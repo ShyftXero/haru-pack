@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, shutil, subprocess, tempfile
+import shutil, subprocess, tempfile
 from pathlib import Path
 from .paths import launcher_src_dir, exe_suffix
 from .payload import build_payload_zip
@@ -7,7 +7,8 @@ from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier
 import shutil as _sh, tempfile as _tf
-from .bundle import bundle_uv, bundle_python, warm_cache_and_lock, install_browsers
+from . import tomlio
+from .bundle import bundle_uv, bundle_python, warm_cache_and_lock, run_bundle_step
 
 class BuildError(RuntimeError): ...
 
@@ -32,26 +33,27 @@ def assemble_payload(project_dir: Path, tier: str, target: str, workdir: Path) -
     """Copy the project, augment its manifest for the tier, and bundle binaries."""
     payload = workdir / "payload"
     shutil.copytree(project_dir, payload)
-    mf = payload / "manifest.json"
-    manifest = apply_tier(json.loads(mf.read_text()), tier)
+    mf = payload / "manifest.toml"
+    manifest = apply_tier(tomlio.load(mf), tier)
     vendor = payload / "vendor"
     if tier in ("default", "thick"):
         bundle_uv(target, vendor)
     if tier == "thick":
         py = bundle_python(target, vendor)  # launcher rediscovers interpreter at runtime
-        browsers = manifest.get("bundle_browsers") or []
-        if browsers:
+        steps = manifest.get("bundle") or []
+        # a project (or any bundle step) needs a warmed cache so the venv builds offline
+        if manifest.get("kind") == "project" or steps:
             app_dir = payload / manifest.get("app_subdir", "app")
             cache = vendor / "cache"; cache.mkdir(parents=True, exist_ok=True)
             tmp_env = Path(_tf.mkdtemp(prefix="haru-warm-"))   # throwaway, NOT shipped
             try:
                 warm_cache_and_lock(app_dir, py, cache, tmp_env)
-                install_browsers(tmp_env, browsers, vendor / "ms-playwright")
+                for step in steps:
+                    run_bundle_step(step, payload, tmp_env, app_dir)
             finally:
                 _sh.rmtree(tmp_env, ignore_errors=True)
             manifest["cache_dir"] = "vendor/cache"
-            manifest["browsers_path"] = "vendor/ms-playwright"
-    mf.write_text(json.dumps(manifest, indent=2))
+    tomlio.dump(manifest, mf)
     return payload
 
 def build(project_dir: Path, out: Path, target: str = "host", tier: str = "default") -> dict:

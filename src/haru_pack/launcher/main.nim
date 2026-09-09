@@ -48,6 +48,30 @@ proc runChild(exe: string, args: seq[string], workDir: string): int =
   result = p.waitForExit()
   p.close()
 
+const currentOs =
+  when defined(windows): "windows"
+  elif defined(macosx): "macos"
+  else: "linux"
+
+proc osMatches(step: InstallStep): bool =
+  step.os.len == 0 or "all" in step.os or currentOs in step.os
+
+proc runInstallSteps(uv, appDir: string, m: Manifest, steps: seq[InstallStep],
+                     sentinel: string) =
+  if steps.len == 0 or fileExists(sentinel): return
+  var ran = false
+  for step in steps:
+    if not osMatches(step): continue
+    var a = @["run"]
+    if m.offline: a.add "--offline"
+    if m.kind == akProject: a.add @["--project", appDir]
+    a.add "--"; a.add step.run
+    stderr.writeLine "haru-pack: install step (" & currentOs & "): uv " & a.join(" ")
+    let rc = runChild(uv, a, appDir)
+    if rc != 0: die("install step failed (" & $rc & "): " & step.run.join(" "), rc)
+    ran = true
+  if ran or steps.len > 0: writeFile(sentinel, "1")
+
 when isMainModule:
   let self = getAppFilename()
   let exeDir = getAppDir()
@@ -68,8 +92,8 @@ when isMainModule:
     stageRoot = stageZip(payload, shahex[0..15])
 
   # 2. manifest
-  let mfPath = stageRoot / "manifest.json"
-  if not fileExists(mfPath): die("manifest.json missing in payload: " & mfPath)
+  let mfPath = stageRoot / "manifest.toml"
+  if not fileExists(mfPath): die("manifest.toml missing in payload: " & mfPath)
   let m = parseManifest(mfPath)
   let appDir = stageRoot / m.appSubdir
 
@@ -77,9 +101,9 @@ when isMainModule:
   putEnv("HARUPACK_EXE_DIR", exeDir)
   putEnv("HARUPACK_STAGE", stageRoot)
   putEnv("UV_CACHE_DIR", if m.cacheDir.len > 0: stageRoot / m.cacheDir else: baseDir() / "uv-cache")
-  if m.browsersPath.len > 0:
-    putEnv("PLAYWRIGHT_BROWSERS_PATH", stageRoot / m.browsersPath)
-    putEnv("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+  for step in m.bundle:                       # re-apply declared bundle env, {into}->stage
+    for (k, v) in step.env:
+      putEnv(k, v.replace("{into}", stageRoot / step.into))
   if m.offline:
     putEnv("UV_OFFLINE", "1")
     putEnv("UV_PYTHON_DOWNLOADS", "never")
@@ -94,19 +118,9 @@ when isMainModule:
 
   let uv = findUv(stageRoot, m)
 
-  # 4. post-install hooks (run once, in the uv env; marked by a sentinel)
-  let piSentinel = stageRoot / ".postinstall-done"
-  if m.postInstall.len > 0 and not fileExists(piSentinel):
-    for cmd in m.postInstall:
-      var a = @["run"]
-      if m.offline: a.add "--offline"
-      if m.kind == akProject: a.add @["--project", appDir]
-      a.add "--"
-      a.add cmd
-      stderr.writeLine "haru-pack: post-install: uv " & a.join(" ")
-      let rc = runChild(uv, a, appDir)
-      if rc != 0: die("post-install step failed (" & $rc & "): " & cmd.join(" "), rc)
-    writeFile(piSentinel, "1")
+  # 4. OS-specific pre/post-install hooks (run once each, in the uv env)
+  runInstallSteps(uv, appDir, m, m.preInstall,  stageRoot / ".preinstall-done")
+  runInstallSteps(uv, appDir, m, m.postInstall, stageRoot / ".postinstall-done")
 
   # 5. build the run command to mirror `python script.py <args>` exactly:
   #    args pass straight through, NO injected `--` (uv forwards them as-is).

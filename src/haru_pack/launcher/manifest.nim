@@ -1,51 +1,72 @@
-## haru-pack manifest: describes how to run the staged payload.
-import std/[json, os]
+## haru-pack manifest (TOML): how to run the staged payload.
+import std/[tables]
+import parsetoml
 
 type
   AppKind* = enum akScript, akProject
+  InstallStep* = object
+    os*: seq[string]            # ["linux"|"windows"|"macos"|"all"]; empty = all
+    run*: seq[string]           # argv, run via `uv run` in the project env
+  BundleStep* = object
+    into*: string               # dir the step writes into (rel to stage), for {into}
+    env*: seq[(string, string)] # env vars set at runtime ({into} -> stage path)
   Manifest* = object
     name*: string
     kind*: AppKind
-    appSubdir*: string          # payload subdir holding the app (default "app")
-    entrypoint*: seq[string]    # script path (1 elem) OR a command argv
-    uvRunArgs*: seq[string]     # extra args to `uv run`
-    python*: string             # optional interpreter path, relative to stage root
-    projectEnv*: string         # optional venv path, relative to stage root
-    postInstall*: seq[seq[string]]  # commands run once (via uv run) after staging
+    appSubdir*: string
+    entrypoint*: seq[string]
+    uvRunArgs*: seq[string]
+    python*: string
+    projectEnv*: string
+    preInstall*: seq[InstallStep]
+    postInstall*: seq[InstallStep]
     offline*: bool
-    cwdPolicy*: string          # "launch" (default, native) | "exe"
-    verboseUv*: bool            # show uv's own progress/logs (default false = quiet)
-    tier*: string               # "thin" | "default" | "thick"
-    fetchUv*: bool              # thin: download uv on target if not bundled/on PATH
-    uvVersion*: string          # uv release to fetch (thin)
-    cacheDir*: string           # bundled warmed uv cache (rel to stage)
-    browsersPath*: string       # bundled playwright browsers (rel to stage)
+    cwdPolicy*: string
+    verboseUv*: bool
+    tier*: string
+    fetchUv*: bool
+    uvVersion*: string
+    cacheDir*: string
+    bundle*: seq[BundleStep]
 
-proc jsSeq(n: JsonNode): seq[string] =
-  if n.isNil: return @[]
-  for x in n: result.add x.getStr
+proc gs(t: TomlValueRef, k, d: string): string =
+  if t.contains(k): t[k].getStr(d) else: d
+proc gb(t: TomlValueRef, k: string, d: bool): bool =
+  if t.contains(k): t[k].getBool(d) else: d
+proc strSeq(t: TomlValueRef, k: string): seq[string] =
+  if not t.contains(k): return
+  let v = t[k]
+  if v.kind == TomlValueKind.Array:
+    for x in v.getElems: result.add x.getStr
+  elif v.kind == TomlValueKind.String:
+    result.add v.getStr
 
 proc parseManifest*(path: string): Manifest =
-  let j = parseJson(readFile(path))
-  result.name = j{"name"}.getStr("app")
-  result.kind = if j{"kind"}.getStr("script") == "project": akProject else: akScript
-  result.appSubdir = j{"app_subdir"}.getStr("app")
-  # entrypoint: string or array
-  let ep = j{"entrypoint"}
-  if not ep.isNil:
-    if ep.kind == JString: result.entrypoint = @[ep.getStr]
-    else: result.entrypoint = jsSeq(ep)
-  result.uvRunArgs = jsSeq(j{"uv_run_args"})
-  result.python = j{"python"}.getStr("")
-  result.projectEnv = j{"project_env"}.getStr("")
-  result.offline = j{"offline"}.getBool(false)
-  result.cwdPolicy = j{"cwd_policy"}.getStr("launch")
-  result.verboseUv = j{"verbose_uv"}.getBool(false)
-  result.tier = j{"tier"}.getStr("default")
-  result.fetchUv = j{"fetch_uv"}.getBool(false)
-  result.uvVersion = j{"uv_version"}.getStr("0.10.4")
-  result.cacheDir = j{"cache_dir"}.getStr("")
-  result.browsersPath = j{"browsers_path"}.getStr("")
-  let pi = j{"post_install"}
-  if not pi.isNil:
-    for cmd in pi: result.postInstall.add jsSeq(cmd)
+  let t = parsetoml.parseFile(path)
+  result.name = gs(t, "name", "app")
+  result.kind = if gs(t, "kind", "script") == "project": akProject else: akScript
+  result.appSubdir = gs(t, "app_subdir", "app")
+  result.entrypoint = strSeq(t, "entrypoint")
+  result.uvRunArgs = strSeq(t, "uv_run_args")
+  result.python = gs(t, "python", "")
+  result.projectEnv = gs(t, "project_env", "")
+  result.offline = gb(t, "offline", false)
+  result.cwdPolicy = gs(t, "cwd_policy", "launch")
+  result.verboseUv = gb(t, "verbose_uv", false)
+  result.tier = gs(t, "tier", "default")
+  result.fetchUv = gb(t, "fetch_uv", false)
+  result.uvVersion = gs(t, "uv_version", "0.10.4")
+  result.cacheDir = gs(t, "cache_dir", "")
+  proc installSteps(node: TomlValueRef): seq[InstallStep] =
+    for step in node.getElems:
+      result.add InstallStep(os: strSeq(step, "os"), run: strSeq(step, "run"))
+  if t.contains("pre_install"):  result.preInstall  = installSteps(t["pre_install"])
+  if t.contains("post_install"): result.postInstall = installSteps(t["post_install"])
+  if t.contains("bundle"):
+    for step in t["bundle"].getElems:
+      var b: BundleStep
+      b.into = gs(step, "into", "")
+      if step.contains("env"):
+        for k, v in step["env"].getTable()[].pairs:
+          b.env.add (k, v.getStr)
+      result.bundle.add b

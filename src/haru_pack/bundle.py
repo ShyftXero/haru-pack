@@ -80,9 +80,16 @@ def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path)
                    capture_output=True, text=True)
 
 
-def install_browsers(tmp_env: Path, browsers: list, dest: Path) -> None:
-    """Install Playwright browsers into `dest` via the throwaway env's playwright."""
-    pw = tmp_env / ("Scripts/playwright.exe" if sys.platform == "win32" else "bin/playwright")
-    env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(dest))
-    subprocess.run([str(pw), "install", *browsers], env=env, check=True,
+def run_bundle_step(step: dict, payload: Path, tmp_env: Path, app_dir: Path) -> None:
+    """Run a declared build-time bundle step in the project's throwaway env. {into} in the
+    step env expands to the absolute bundle dir; whatever the command writes there ships."""
+    into_rel = step.get("into", "")
+    into_abs = (payload / into_rel) if into_rel else payload
+    into_abs.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    bindir = tmp_env / ("Scripts" if sys.platform == "win32" else "bin")
+    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+    for k, v in (step.get("env") or {}).items():
+        env[k] = v.replace("{into}", str(into_abs))
+    subprocess.run(step["run"], env=env, cwd=str(app_dir), check=True,
                    capture_output=True, text=True)
