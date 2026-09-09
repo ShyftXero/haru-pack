@@ -6,6 +6,11 @@
 ## (run-in-place), exposing exe-dir + stage-dir to the child.
 import std/[os, osproc, strutils, sequtils]
 import overlay, stage, manifest
+when defined(posix):
+  import std/posix
+  # A CUSTOM handler (not SIG_IGN) is reset to SIG_DFL across exec, so the child
+  # (python) still gets normal Ctrl+C/KeyboardInterrupt while WE don't die early.
+  proc ignoreInParent(sig: cint) {.noconv.} = discard
 
 proc die(msg: string, code = 1) =
   stderr.writeLine "uvcannon: " & msg
@@ -79,8 +84,11 @@ when isMainModule:
       if rc != 0: die("post-install step failed (" & $rc & "): " & cmd.join(" "), rc)
     writeFile(piSentinel, "1")
 
-  # 5. build the run command
-  var a = @["run"]
+  # 5. build the run command to mirror `python script.py <args>` exactly:
+  #    args pass straight through, NO injected `--` (uv forwards them as-is).
+  var a: seq[string]
+  if not m.verboseUv: a.add "-q"     # suppress uv's own progress/logs
+  a.add "run"
   a.add m.uvRunArgs
   if m.offline and "--offline" notin m.uvRunArgs: a.add "--offline"
   case m.kind
@@ -89,12 +97,11 @@ when isMainModule:
     a.add appDir / m.entrypoint[0]
   of akProject:
     a.add @["--project", appDir]
-    a.add m.entrypoint          # command argv (e.g. flask ... run)
-  if userArgs.len > 0:
-    a.add "--"
-    a.add userArgs
+    a.add m.entrypoint              # command argv (e.g. flask ... run)
+  a.add userArgs                    # verbatim passthrough, like python
 
   # 6. cwd policy: "launch" (native, default) or "exe" (always the exe's folder,
   #    so a plain open('file.txt') always hits the file adjacent to the shipped exe)
   let childCwd = if m.cwdPolicy == "exe": exeDir else: runDir
+  when defined(posix): signal(SIGINT, ignoreInParent)   # child owns Ctrl+C
   quit(runChild(uv, a, childCwd))

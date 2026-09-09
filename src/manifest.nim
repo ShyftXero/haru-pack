@@ -14,6 +14,7 @@ type
     postInstall*: seq[seq[string]]  # commands run once (via uv run) after staging
     offline*: bool
     cwdPolicy*: string          # "launch" (default, native) | "exe"
+    verboseUv*: bool            # show uv's own progress/logs (default false = quiet)
 
 proc jsSeq(n: JsonNode): seq[string] =
   if n.isNil: return @[]
@@ -34,6 +35,7 @@ proc parseManifest*(path: string): Manifest =
   result.projectEnv = j{"project_env"}.getStr("")
   result.offline = j{"offline"}.getBool(false)
   result.cwdPolicy = j{"cwd_policy"}.getStr("launch")
+  result.verboseUv = j{"verbose_uv"}.getBool(false)
   let pi = j{"post_install"}
   if not pi.isNil:
     for cmd in pi: result.postInstall.add jsSeq(cmd)
