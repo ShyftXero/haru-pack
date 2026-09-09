@@ -24,9 +24,14 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 - **thin / default**: fully supported from Linux. `haru-pack` fetches the **Windows** uv
   release when `--target windows` (uv binaries are per-OS), and the launcher links WinHTTP
   for the runtime fetch — no openssl.
-- **thick + `--target windows` from Linux**: **not yet** — staging a *runnable* Windows
-  Python from Linux isn't something uv can do here. Build `--thick --target windows` **on a
-  Windows machine** (or use default/thin for cross-built Windows artifacts).
+- **thick + `--target windows` from Linux**: **partial (roadmap).** Deps and the Python
+  interpreter *are* cross-downloadable — `uv pip install --python-platform windows
+  --python-version 3.12 --only-binary :all: --target <dir>` pulls Windows wheels (incl.
+  native `.pyd`, verified), and python-build-standalone Windows is a plain download; ship
+  them and let uv build the venv at first run on Windows. The blocker is bundle/post_install
+  steps that must **run target-native code** (e.g. `playwright install firefox`): from Linux
+  those need **wine** or by-URL fetching. So today build `--thick --target windows` **on
+  Windows**; a wheel-only thick-cross is feasible and planned.
 
 ## Manifest fields set by the tier
 `tier`, `offline`, `fetch_uv`, `uv_version` (thin). The interpreter for thick is

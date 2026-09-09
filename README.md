@@ -62,12 +62,19 @@ haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux 
 | default | uv | Python + deps | no | yes |
 | `--thick` | uv + Python (+deps/browsers) | nothing | **yes** | **no** (build on target OS) |
 
-**Why no thick cross-compile:** the launcher cross-compiles fine, but thick bakes in
-*target-OS* artifacts — a runnable standalone Python, native wheels, and any
-bundle/post-install output (e.g. Playwright's Firefox) — which can only be produced by
-running the target's toolchain. `uv python install` stages a host-OS interpreter, and a
-Linux `playwright install firefox` fetches Linux Firefox. thin/default defer all of that to
-first run on the target, so they cross-compile. Build `--thick` **on the target OS**.
+**Thick cross-compile — partial (roadmap).** The launcher cross-compiles fine. thick bakes
+in *target-OS* artifacts, and most are cross-downloadable from Linux:
+- **Deps**: `uv pip install --python-platform windows --python-version 3.12 --only-binary
+  :all: --target <dir>` pulls Windows wheels (incl. native `*.pyd`) — verified.
+- **Python**: the Windows python-build-standalone is a plain downloadable archive.
+- **Venv**: don't build it on Linux — ship the interpreter + wheels/cache and let uv
+  assemble at first run on Windows (offline).
+
+The genuine blocker is bundle/`post_install` steps that must **execute target-native code**
+(`playwright install firefox`, C/Rust builds): from Linux those need **wine** (run the
+Windows `python.exe`/`playwright.exe`) or fetching the binaries by URL. So today: build
+`--thick --target windows` **on Windows**; a wheel-only thick-cross (uv `--python-platform`
++ bundled Windows Python + first-run venv) is feasible and on the roadmap.
 
 ## manifest.toml (projects)
 Minimal:
