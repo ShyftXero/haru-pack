@@ -16,6 +16,7 @@ dependencies = [
   "platformdirs>=4",
   "tomli-w>=1",
   "tomli>=2; python_version < '3.11'",
+  "cryptography>=42",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

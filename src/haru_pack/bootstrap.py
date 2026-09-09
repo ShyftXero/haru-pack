@@ -59,7 +59,7 @@ def install_nim(force: bool = False) -> str:
         raise RuntimeError("Nim install failed (binary not found after extract)")
     return nim
 
-NIM_DEPS = ("zippy", "puppy", "parsetoml")   # launcher imports these (puppy pulls webby)
+NIM_DEPS = ("zippy", "puppy", "parsetoml", "nimcrypto")   # launcher imports these (puppy pulls webby)
 
 def ensure_nim_deps(nim: str) -> bool:
     """The launcher imports zippy + puppy; make sure nimble has them."""

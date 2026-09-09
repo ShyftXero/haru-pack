@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from pathlib import Path
 import typer
 from . import __version__
@@ -53,7 +54,16 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           tier: str = typer.Option("default", help="thin | default | thick"),
           thin: bool = typer.Option(False, "--thin", help="bundle NOTHING; fetch uv+python+deps on target"),
           thick: bool = typer.Option(False, "--thick", help="bundle EVERYTHING; download nothing (offline)"),
-          chonky: bool = typer.Option(False, "--chonky", hidden=True)):
+          chonky: bool = typer.Option(False, "--chonky", hidden=True),
+          encrypt: bool = typer.Option(False, "--encrypt", help="AES-256-GCM encrypt the payload"),
+          secret: str = typer.Option(None, "--secret", help="secret literal (key material)"),
+          secret_env: str = typer.Option(None, "--secret-env", help="env var to read the secret from (build)"),
+          secret_prompt: bool = typer.Option(False, "--secret-prompt", help="prompt for the secret"),
+          embed_secret: bool = typer.Option(False, "--embed-secret", help="embed the secret in the exe (weakest)"),
+          expires: str = typer.Option("", "--expires", help="license expiry YYYY-MM-DD"),
+          machine: str = typer.Option("", "--machine", help="bind to this machine-id (cryptographic)"),
+          user: str = typer.Option("", "--user", help="bind to this OS username (cryptographic)"),
+          geo: str = typer.Option("", "--geo", help="allowed country codes, comma-separated")):
     """Build a single-file launcher from a project payload dir.
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
@@ -66,12 +76,25 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
         typer.secho("🦣 chonky mode: bundling everything…", fg="magenta")
     if out is None:
         out = Path((project.name or "app")).with_suffix(".exe" if target == "windows" else "")
+    want_enc = encrypt or embed_secret or secret or secret_env or secret_prompt or expires or machine or user or geo
+    sec = None
+    if want_enc:
+        if secret:            sec = secret.encode()
+        elif secret_env:      sec = os.environ.get(secret_env, "").encode()
+        elif secret_prompt:
+            import getpass; sec = getpass.getpass("build secret: ").encode()
+        if not sec:
+            typer.secho("encryption requested but no secret — use --secret / --secret-env / --secret-prompt",
+                        fg="red"); raise typer.Exit(2)
     try:
-        info = build_exe(project, out, target=target, tier=tier)
+        info = build_exe(project, out, target=target, tier=tier, secret=sec,
+                         expires=expires, geo=[g for g in geo.split(",") if g],
+                         machine=machine, user=user, embed_secret=embed_secret)
     except BuildError as e:
         typer.secho(str(e), fg="red"); raise typer.Exit(2)
+    tag = " 🔒encrypted" if info.get("encrypted") else ""
     typer.secho(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
-                f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…)", fg="green")
+                f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", fg="green")
 
 @app.command()
 def verify(exe: Path):
@@ -80,6 +103,12 @@ def verify(exe: Path):
     for k, v in info.items():
         typer.echo(f"{k:20}: {v}")
     raise typer.Exit(0 if info["sha_ok"] else 1)
+
+@app.command("machine-id")
+def machine_id_cmd():
+    """Print this machine's id (give it to a vendor to bind an --encrypt license)."""
+    from .crypto import machine_id
+    typer.echo(machine_id())
 
 def main():
     app()

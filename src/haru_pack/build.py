@@ -9,6 +9,7 @@ from .tiers import apply_tier
 import shutil as _sh, tempfile as _tf
 from . import tomlio
 from .bundle import bundle_uv, bundle_python, warm_cache_and_lock, run_bundle_step
+from . import crypto
 
 class BuildError(RuntimeError): ...
 
@@ -56,7 +57,9 @@ def assemble_payload(project_dir: Path, tier: str, target: str, workdir: Path) -
     tomlio.dump(manifest, mf)
     return payload
 
-def build(project_dir: Path, out: Path, target: str = "host", tier: str = "default") -> dict:
+def build(project_dir: Path, out: Path, target: str = "host", tier: str = "default",
+          secret: bytes | None = None, expires: str = "", geo=None,
+          machine: str = "", user: str = "", embed_secret: bool = False) -> dict:
     project_dir = Path(project_dir); out = Path(out)
     nim = find_nim()
     if not nim:
@@ -68,11 +71,16 @@ def build(project_dir: Path, out: Path, target: str = "host", tier: str = "defau
         tdp = Path(td)
         payload_dir = assemble_payload(project_dir, tier, target, tdp / "asm")
         payload = build_payload_zip(payload_dir)
+        flags = 0
+        if secret is not None:
+            payload = crypto.encrypt(payload, secret, expires=expires, geo=geo,
+                                     machine=machine, user=user, embed_secret=embed_secret)
+            flags = 1
         launcher = compile_launcher(nim, target, tdp)
-        info = attach(launcher, payload, out)
+        info = attach(launcher, payload, out, flags=flags)
     try:
         out.chmod(0o755)
     except Exception:
         pass
-    info.update(tier=tier, target=target, nim=nim, compiler=tc["compiler"], out=str(out))
+    info.update(tier=tier, target=target, nim=nim, compiler=tc["compiler"], out=str(out), encrypted=bool(secret))
     return info

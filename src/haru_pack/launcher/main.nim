@@ -5,7 +5,7 @@
 ## Behaviour: stage once to appdata, wire uv env, run entrypoint with cwd = launch dir
 ## (run-in-place), exposing exe-dir + stage-dir to the child.
 import std/[os, osproc, strutils, sequtils]
-import overlay, stage, manifest, uvfetch
+import overlay, stage, manifest, uvfetch, cryptbox
 when defined(posix):
   import std/posix
   # A CUSTOM handler (not SIG_IGN) is reset to SIG_DFL across exec, so the child
@@ -86,9 +86,11 @@ when isMainModule:
   else:
     let (found, ft, _) = findFooter(self)
     if not found: die("no payload appended and HARUPACK_DEV_STAGE unset")
-    let payload = readPayload(self, ft)
+    var payload = readPayload(self, ft)
     var shahex = ""
     for b in ft.payloadSha: shahex.add toHex(int(b), 2).toLowerAscii
+    if (ft.flags and 1'u16) != 0'u16 or isEncrypted(payload):
+      payload = openContainer(payload)     # decrypt + license checks (dies on failure)
     stageRoot = stageZip(payload, shahex[0..15])
 
   # 2. manifest
