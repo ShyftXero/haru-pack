@@ -13,6 +13,7 @@ type
     projectEnv*: string         # optional venv path, relative to stage root
     postInstall*: seq[seq[string]]  # commands run once (via uv run) after staging
     offline*: bool
+    cwdPolicy*: string          # "launch" (default, native) | "exe"
 
 proc jsSeq(n: JsonNode): seq[string] =
   if n.isNil: return @[]
@@ -32,6 +33,7 @@ proc parseManifest*(path: string): Manifest =
   result.python = j{"python"}.getStr("")
   result.projectEnv = j{"project_env"}.getStr("")
   result.offline = j{"offline"}.getBool(false)
+  result.cwdPolicy = j{"cwd_policy"}.getStr("launch")
   let pi = j{"post_install"}
   if not pi.isNil:
     for cmd in pi: result.postInstall.add jsSeq(cmd)

@@ -94,5 +94,7 @@ when isMainModule:
     a.add "--"
     a.add userArgs
 
-  # 6. run-in-place: child cwd = the folder the exe was launched from
-  quit(runChild(uv, a, runDir))
+  # 6. cwd policy: "launch" (native, default) or "exe" (always the exe's folder,
+  #    so a plain open('file.txt') always hits the file adjacent to the shipped exe)
+  let childCwd = if m.cwdPolicy == "exe": exeDir else: runDir
+  quit(runChild(uv, a, childCwd))

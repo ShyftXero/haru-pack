@@ -203,8 +203,10 @@ uvcannon/
    sidecar `.uvcap` (AV-friendlier). *Lean: single-file default, sidecar opt-in.*
 3. **Container v0:** zstd-tar vs zip(zippy). *Lean: zstd-tar (better ratio); zippy handy
    for the zip path and it's pure-Nim.*
-4. **cwd policy** when launched from a different terminal dir: real cwd (native feel) vs
-   force exe dir. *Lean: real cwd for child + `UVCANNON_EXE_DIR` for adjacent config.*
+4. **cwd policy** — RESOLVED (M0): manifest `cwd_policy` = `"launch"` (default, native —
+   `open('x')` follows the launch dir like any exe) or `"exe"` (force child cwd to the
+   exe folder so a plain `open('x')` ALWAYS hits the file adjacent to the shipped exe).
+   `UVCANNON_EXE_DIR` is always exported for explicit exe-anchored reads either way.
 
 ---
 
