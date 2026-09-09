@@ -28,9 +28,11 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
   under wine, offline). haru-pack bundles a Windows standalone Python (python-build-standalone,
   via uv's catalog), Windows uv, and Windows wheels (`uv pip install --python-platform windows
   --only-binary :all:`); the venv builds at first run on Windows from the bundled cache.
-  Remaining limit: bundle/`post_install` steps that must **execute** target-native code
-  (`playwright install firefox`, C/Rust builds) — build those on the target OS, under wine,
-  or fetch by URL.
+  Bundle/`post_install` steps that must **execute** target-native code (`playwright install
+  firefox`, C/Rust builds): pass **`--wine`** to run them under wine with the bundled Windows
+  Python (verified: a step's output is baked into the Windows exe from Linux). The tool must
+  run under wine — Playwright's Node driver is flaky under wine, so for Playwright build
+  thick on Windows or use a `[[post_install]]` with `os=["windows"]` instead.
 
 ## Manifest fields set by the tier
 `tier`, `offline`, `fetch_uv`, `uv_version` (thin). The interpreter for thick is

@@ -34,6 +34,7 @@ proc findBundledPython(stageRoot: string): string =
   let base = stageRoot / "vendor" / "python"
   if not dirExists(base): return ""
   for p in walkDirRec(base):
+    if "venv" in p.toLowerAscii: continue          # skip the stdlib venv-template python
     let fn = p.extractFilename
     when defined(windows):
       if fn == "python.exe": return p

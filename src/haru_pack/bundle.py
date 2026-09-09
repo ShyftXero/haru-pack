@@ -4,6 +4,20 @@ from pathlib import Path
 
 UV_VERSION = "0.10.4"
 
+def _run(cmd, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if r.returncode != 0:
+        raise RuntimeError(f"command failed ({r.returncode}): {' '.join(map(str, cmd))}\n" + (r.stderr or r.stdout)[-1500:])
+    return r
+
+def _export_reqs(app_dir: Path) -> list:
+    """Locked requirements for a project, minus uv export's ANSI-colored comment lines."""
+    env = dict(os.environ, NO_COLOR="1")
+    exp = _run(["uv", "export", "--project", str(app_dir), "--no-hashes", "--no-header",
+                "--format", "requirements-txt"], env=env).stdout
+    return [l.strip() for l in exp.splitlines()
+            if l.strip() and not l.strip().startswith(("#", "-e", "-r", "-c"))]
+
 _UV_ASSET = {
     "windows": "uv-x86_64-pc-windows-msvc.zip",
     "linux":   "uv-x86_64-unknown-linux-gnu.tar.gz",
@@ -86,14 +100,11 @@ def bundle_python(target: str, vendor_dir: Path, version: str = "3.12") -> Path:
             with tarfile.open(arc) as t:
                 t.extractall(pydir)   # install_only extracts to pydir/python/...
     exe = "python.exe" if _target_os(target) == "windows" else "python3"
-    for c in sorted({c.resolve() for c in pydir.rglob(exe)}):
-        if c.is_file() and (c.parent.name in ("bin", "install") or c.name == "python.exe"):
-            return c
-    # fallback: any matching interpreter
-    for c in sorted({c.resolve() for c in pydir.rglob(exe)}):
-        if c.is_file():
-            return c
-    raise RuntimeError("staged Python interpreter not found")
+    cands = [c for c in {c.resolve() for c in pydir.rglob(exe)}
+             if c.is_file() and "venv" not in (q.lower() for q in c.parts)]
+    if not cands:
+        raise RuntimeError("staged Python interpreter not found")
+    return min(cands, key=lambda c: len(c.parts))   # top-level interpreter, not a template
 
 
 def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path) -> None:
@@ -123,19 +134,44 @@ def run_bundle_step(step: dict, payload: Path, tmp_env: Path, app_dir: Path) -> 
 def warm_cache_windows(app_dir: Path, cache_dir: Path, version: str) -> None:
     """Cross: lock (host) then download WINDOWS wheels into the bundled uv cache so the
     venv builds offline at first run on Windows. Wheel-only (no target execution)."""
-    subprocess.run(["uv", "lock", "--project", str(app_dir)], check=True,
-                   capture_output=True, text=True)
-    exp = subprocess.run(["uv", "export", "--project", str(app_dir), "--no-hashes",
-                          "--no-header", "--format", "requirements-txt"],
-                         check=True, capture_output=True, text=True).stdout
-    reqs = [l for l in exp.splitlines()
-            if l.strip() and not l.startswith(("#", "-e", "-r"))]
+    _run(["uv", "lock", "--project", str(app_dir)])
+    reqs = _export_reqs(app_dir)
     if not reqs:
         return
     with tempfile.TemporaryDirectory() as td:
         rf = Path(td) / "r.txt"; rf.write_text("\n".join(reqs))
         env = dict(os.environ, UV_CACHE_DIR=str(cache_dir))
-        subprocess.run(["uv", "pip", "install", "--python-platform", "windows",
-                        "--python-version", version, "--only-binary", ":all:",
-                        "--target", str(Path(td) / "t"), "-r", str(rf)],
-                       env=env, check=True, capture_output=True, text=True)
+        _run(["uv", "pip", "install", "--python-platform", "windows",
+              "--python-version", version, "--only-binary", ":all:",
+              "--target", str(Path(td) / "t"), "-r", str(rf)], env=env)
+
+
+def run_bundle_steps_wine(steps: list, payload: Path, win_python: Path, app_dir: Path) -> None:
+    """Run execute-required bundle steps for a Windows target UNDER WINE on Linux, using the
+    bundled Windows Python. Produces Windows-native artifacts (e.g. Windows Firefox)."""
+    wine = shutil.which("wine")
+    if not wine:
+        raise RuntimeError("--wine given but `wine` is not installed on the build host")
+    prefix = Path(tempfile.mkdtemp(prefix="haru-wine-"))
+    base = dict(os.environ, WINEPREFIX=str(prefix), WINEDEBUG="-all",
+                NO_COLOR="1", FORCE_COLOR="0", CI="1", TERM="dumb")
+    try:
+        winenv = prefix / "be"
+        _run([wine, str(win_python), "-m", "venv", str(winenv)], env=base)
+        py = winenv / "Scripts" / "python.exe"
+        # install the project's deps into the wine venv so the tools exist
+        reqs = _export_reqs(app_dir)
+        if reqs:
+            rf = prefix / "r.txt"; rf.write_text("\n".join(reqs))
+            _run([wine, str(py), "-m", "pip", "install", "-r", str(rf)], env=base)
+        for step in steps:
+            into_abs = payload / step.get("into", "")
+            into_abs.mkdir(parents=True, exist_ok=True)
+            env = dict(base)
+            for k, v in (step.get("env") or {}).items():
+                env[k] = v.replace("{into}", str(into_abs))
+            cmd = step["run"]
+            exe = py if cmd[0] == "python" else winenv / "Scripts" / (cmd[0] + ".exe")
+            _run([wine, str(exe), *cmd[1:]], env=env)
+    finally:
+        shutil.rmtree(prefix, ignore_errors=True)

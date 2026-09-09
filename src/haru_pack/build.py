@@ -8,7 +8,7 @@ from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
-                     warm_cache_windows, run_bundle_step)
+                     warm_cache_windows, run_bundle_step, run_bundle_steps_wine)
 
 class BuildError(RuntimeError): ...
 
@@ -66,7 +66,7 @@ def _resolve(project: Path, tier: str, python_cli: str,
     return manifest, enc, pyver, disc["source"]
 
 def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
-                     python: str, workdir: Path) -> Path:
+                     python: str, workdir: Path, wine: bool = False) -> Path:
     payload = workdir / "payload"
     app = payload / manifest["app_subdir"]
     if source.is_file():
@@ -80,10 +80,11 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
         bundle_uv(target, vendor)
     if tier == "thick":
         steps = manifest.get("bundle") or []
-        if steps and target != "host":
+        if steps and target != "host" and not wine:
             raise BuildError(
                 f"bundle steps run target-native code and can't be produced for --target "
-                f"{target} from here — build --thick on the target OS, under wine, or fetch by URL.")
+                f"{target} from here. Re-run with --wine, build --thick on the target OS, or "
+                f"fetch by URL.")
         py = bundle_python(target, vendor, version=python)
         if manifest.get("kind") == "project" or steps:
             app_dir = payload / manifest["app_subdir"]
@@ -98,6 +99,8 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
                     shutil.rmtree(tmp_env, ignore_errors=True)
             else:
                 warm_cache_windows(app_dir, cache, python)
+                if steps and wine:
+                    run_bundle_steps_wine(steps, payload, py, app_dir)
             manifest["cache_dir"] = "vendor/cache"
     tomlio.dump(manifest, payload / "manifest.toml")
     return payload
@@ -105,7 +108,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           machine: str = "", user: str = "", embed_secret: bool = False,
-          python: str = "") -> dict:
+          python: str = "", wine: bool = False) -> dict:
     project = Path(project); out = Path(out)
     nim = find_nim()
     if not nim:
@@ -120,7 +123,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                          "--secret / --secret-env / --secret-prompt")
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        payload_dir = assemble_payload(source, manifest, tier, target, pyver, tdp / "asm")
+        payload_dir = assemble_payload(source, manifest, tier, target, pyver, tdp / "asm", wine)
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:

@@ -44,6 +44,7 @@ haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux 
 | `-o, --out PATH` | `<name>[.exe]` | output path |
 | `--target host\|windows` | `host` | build target (Windows = cross-compile) |
 | `--python X.Y` | auto | Python version to stage (else discovered from the project) |
+| `--wine` | off | run execute-required bundle steps under wine (thick + `--target windows`) |
 | `--tier thin\|default\|thick` | `default` | bundling tier (below) |
 | `--thin` | | shortcut for `--tier thin` |
 | `--thick` / `--chonky` | | shortcut for `--tier thick` |
