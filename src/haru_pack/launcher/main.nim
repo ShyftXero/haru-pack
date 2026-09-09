@@ -76,7 +76,10 @@ when isMainModule:
   # 3. env wiring (three roots + uv offline knobs)
   putEnv("HARUPACK_EXE_DIR", exeDir)
   putEnv("HARUPACK_STAGE", stageRoot)
-  putEnv("UV_CACHE_DIR", baseDir() / "uv-cache")
+  putEnv("UV_CACHE_DIR", if m.cacheDir.len > 0: stageRoot / m.cacheDir else: baseDir() / "uv-cache")
+  if m.browsersPath.len > 0:
+    putEnv("PLAYWRIGHT_BROWSERS_PATH", stageRoot / m.browsersPath)
+    putEnv("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
   if m.offline:
     putEnv("UV_OFFLINE", "1")
     putEnv("UV_PYTHON_DOWNLOADS", "never")

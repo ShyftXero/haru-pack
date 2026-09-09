@@ -31,3 +31,18 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 ## Manifest fields set by the tier
 `tier`, `offline`, `fetch_uv`, `uv_version` (thin). The interpreter for thick is
 auto-detected at runtime, not pinned in the manifest.
+
+## Example: bundled Playwright + Firefox (offline)
+`examples/playwright-shot` — a project that screenshots a page with **Firefox**, built
+fully offline with `--thick`:
+```sh
+haru-pack build examples/playwright-shot/payload --thick -o shot
+./shot                      # extracts once, launches BUNDLED firefox, writes shot.png
+```
+Thick with `bundle_browsers: ["firefox"]` in the manifest makes `haru-pack`: stage a
+standalone Python, warm a uv cache with the project deps (so the venv builds offline at
+runtime), and run `playwright install firefox` into `vendor/ms-playwright`. At runtime the
+launcher sets `PLAYWRIGHT_BROWSERS_PATH` into the stage + `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`
+— zero network. Verified: ~245 MB exe, produces a 1280×720 PNG with `PATH=/usr/bin` and no
+network. (Headed Firefox on Linux needs GTK/X libs; headless is self-contained. Cross to
+Windows: build `--thick` on Windows.)

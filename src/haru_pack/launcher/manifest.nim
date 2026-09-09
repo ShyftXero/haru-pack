@@ -18,6 +18,8 @@ type
     tier*: string               # "thin" | "default" | "thick"
     fetchUv*: bool              # thin: download uv on target if not bundled/on PATH
     uvVersion*: string          # uv release to fetch (thin)
+    cacheDir*: string           # bundled warmed uv cache (rel to stage)
+    browsersPath*: string       # bundled playwright browsers (rel to stage)
 
 proc jsSeq(n: JsonNode): seq[string] =
   if n.isNil: return @[]
@@ -42,6 +44,8 @@ proc parseManifest*(path: string): Manifest =
   result.tier = j{"tier"}.getStr("default")
   result.fetchUv = j{"fetch_uv"}.getBool(false)
   result.uvVersion = j{"uv_version"}.getStr("0.10.4")
+  result.cacheDir = j{"cache_dir"}.getStr("")
+  result.browsersPath = j{"browsers_path"}.getStr("")
   let pi = j{"post_install"}
   if not pi.isNil:
     for cmd in pi: result.postInstall.add jsSeq(cmd)

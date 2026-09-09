@@ -6,7 +6,8 @@ from .payload import build_payload_zip
 from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier
-from .bundle import bundle_uv, bundle_python
+import shutil as _sh, tempfile as _tf
+from .bundle import bundle_uv, bundle_python, warm_cache_and_lock, install_browsers
 
 class BuildError(RuntimeError): ...
 
@@ -37,7 +38,19 @@ def assemble_payload(project_dir: Path, tier: str, target: str, workdir: Path) -
     if tier in ("default", "thick"):
         bundle_uv(target, vendor)
     if tier == "thick":
-        bundle_python(target, vendor)  # launcher discovers the interpreter at runtime
+        py = bundle_python(target, vendor)  # launcher rediscovers interpreter at runtime
+        browsers = manifest.get("bundle_browsers") or []
+        if browsers:
+            app_dir = payload / manifest.get("app_subdir", "app")
+            cache = vendor / "cache"; cache.mkdir(parents=True, exist_ok=True)
+            tmp_env = Path(_tf.mkdtemp(prefix="haru-warm-"))   # throwaway, NOT shipped
+            try:
+                warm_cache_and_lock(app_dir, py, cache, tmp_env)
+                install_browsers(tmp_env, browsers, vendor / "ms-playwright")
+            finally:
+                _sh.rmtree(tmp_env, ignore_errors=True)
+            manifest["cache_dir"] = "vendor/cache"
+            manifest["browsers_path"] = "vendor/ms-playwright"
     mf.write_text(json.dumps(manifest, indent=2))
     return payload
 

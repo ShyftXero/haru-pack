@@ -51,9 +51,9 @@ def bundle_uv(target: str, vendor_dir: Path, version: str = UV_VERSION) -> Path:
     if tos != "windows": dest.chmod(0o755)
     return dest
 
-def bundle_python(target: str, vendor_dir: Path, version: str = "3.12") -> str:
-    """thick: stage a standalone Python into vendor/python. Returns the manifest-relative
-    interpreter path. Host-only for now (cross-OS python staging is a known gap)."""
+def bundle_python(target: str, vendor_dir: Path, version: str = "3.12") -> Path:
+    """thick: stage a standalone Python into vendor/python. Returns the ABS interpreter
+    path (build-time use; the launcher rediscovers it at runtime). Host-only for now."""
     if target != "host":
         raise RuntimeError("thick cross-compile Python bundling not supported yet — "
                            "build --thick on the target OS (uv can't stage a runnable "
@@ -63,10 +63,26 @@ def bundle_python(target: str, vendor_dir: Path, version: str = "3.12") -> str:
     env = dict(os.environ, UV_PYTHON_INSTALL_DIR=str(pydir))
     subprocess.run(["uv", "python", "install", version], env=env, check=True,
                    capture_output=True, text=True)
-    # locate the interpreter
-    for pat in ("bin/python3", "bin/python", "python.exe", "python"):
-        hits = list(pydir.glob(f"*/{pat}"))
-        if hits:
-            rel = hits[0].relative_to(vendor_dir.parent)  # relative to payload root
-            return str(rel).replace(os.sep, "/")
+    cands = [c for c in list(pydir.rglob("python3")) + list(pydir.rglob("python.exe"))
+             if c.parent.name == "bin" or c.name == "python.exe"]
+    for c in sorted({c.resolve() for c in cands}):
+        if c.is_file():
+            return c
     raise RuntimeError("staged Python interpreter not found")
+
+
+def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path) -> None:
+    """Populate a bundled uv cache with the project's deps (+ write uv.lock) using a
+    THROWAWAY env outside the payload, so the runtime can build its venv offline."""
+    env = dict(os.environ, UV_CACHE_DIR=str(cache_dir), UV_PYTHON=str(py),
+               UV_PYTHON_DOWNLOADS="never", UV_PROJECT_ENVIRONMENT=str(tmp_env))
+    subprocess.run(["uv", "sync", "--project", str(app_dir)], env=env, check=True,
+                   capture_output=True, text=True)
+
+
+def install_browsers(tmp_env: Path, browsers: list, dest: Path) -> None:
+    """Install Playwright browsers into `dest` via the throwaway env's playwright."""
+    pw = tmp_env / ("Scripts/playwright.exe" if sys.platform == "win32" else "bin/playwright")
+    env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(dest))
+    subprocess.run([str(pw), "install", *browsers], env=env, check=True,
+                   capture_output=True, text=True)
