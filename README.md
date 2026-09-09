@@ -9,6 +9,19 @@ supported.
 Think PyInstaller's UX, but the interpreter + deps are delegated to `uv` and the launcher
 is a thin signable native stub.
 
+
+## Install & use (builder CLI)
+```sh
+pip install haru-pack            # or: uvx haru-pack ...
+haru-pack bootstrap              # install Nim (+zippy, puppy) & check the C toolchain
+haru-pack doctor --target windows   # verify cross-compile toolchain (prints mingw install cmd if missing)
+haru-pack build ./myproject --thin              # smallest; fetch uv+python on target
+haru-pack build ./myproject                      # default; uv bundled
+haru-pack build ./myproject --thick --target windows   # everything bundled, offline (build thick on the target OS)
+```
+Tiers: **--thin** (bundle nothing) · default (uv bundled) · **--thick/--chonky** (uv +
+Python bundled, offline). See [docs/TIERS.md](docs/TIERS.md).
+
 ## Status
 Research + design. Nothing to build yet.
 - `docs/PLAN.md` — the plan (architecture, container format, uv wiring, signing, milestones)

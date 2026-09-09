@@ -5,7 +5,7 @@
 ## Behaviour: stage once to appdata, wire uv env, run entrypoint with cwd = launch dir
 ## (run-in-place), exposing exe-dir + stage-dir to the child.
 import std/[os, osproc, strutils, sequtils]
-import overlay, stage, manifest
+import overlay, stage, manifest, uvfetch
 when defined(posix):
   import std/posix
   # A CUSTOM handler (not SIG_IGN) is reset to SIG_DFL across exec, so the child
@@ -17,12 +17,30 @@ proc die(msg: string, code = 1) =
   quit(code)
 
 proc findUv(stageRoot: string, m: Manifest): string =
-  # prefer a bundled uv, else PATH
-  for c in [stageRoot / "vendor" / (when defined(windows): "uv.exe" else: "uv")]:
-    if fileExists(c): return c
+  # bundled (thick/default) -> PATH -> fetch on target (thin)
+  let bundled = stageRoot / "vendor" / (when defined(windows): "uv.exe" else: "uv")
+  if fileExists(bundled): return bundled
   let onPath = findExe("uv")
   if onPath.len > 0: return onPath
+  if m.fetchUv:
+    let got = ensureUv(stageRoot, m.uvVersion)
+    if got.len > 0: return got
+    die("thin tier: failed to fetch uv (need curl/powershell + network on first run)")
   die("no uv binary bundled and none on PATH")
+
+proc findBundledPython(stageRoot: string): string =
+  ## Scan the staged tree for a real interpreter (robust to uv's version-alias
+  ## symlink dir, which the zip does not preserve).
+  let base = stageRoot / "vendor" / "python"
+  if not dirExists(base): return ""
+  for p in walkDirRec(base):
+    let fn = p.extractFilename
+    when defined(windows):
+      if fn == "python.exe": return p
+    else:
+      if (fn == "python3" or fn == "python") and p.parentDir.extractFilename == "bin":
+        return p
+  return ""
 
 proc runChild(exe: string, args: seq[string], workDir: string): int =
   let p = startProcess(exe, workingDir = workDir, args = args,
@@ -62,9 +80,12 @@ when isMainModule:
   if m.offline:
     putEnv("UV_OFFLINE", "1")
     putEnv("UV_PYTHON_DOWNLOADS", "never")
-  if m.python.len > 0:
-    putEnv("UV_PYTHON", stageRoot / m.python)
+  # bundled interpreter (thick): explicit manifest path, else auto-detect on disk
+  var py = if m.python.len > 0: stageRoot / m.python else: findBundledPython(stageRoot)
+  if py.len > 0 and fileExists(py):
+    putEnv("UV_PYTHON", py)
     putEnv("UV_PYTHON_INSTALL_DIR", stageRoot / "vendor" / "python")
+    putEnv("UV_PYTHON_DOWNLOADS", "never")
   if m.projectEnv.len > 0:
     putEnv("UV_PROJECT_ENVIRONMENT", stageRoot / m.projectEnv)
 

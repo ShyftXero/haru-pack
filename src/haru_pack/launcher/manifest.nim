@@ -15,6 +15,9 @@ type
     offline*: bool
     cwdPolicy*: string          # "launch" (default, native) | "exe"
     verboseUv*: bool            # show uv's own progress/logs (default false = quiet)
+    tier*: string               # "thin" | "default" | "thick"
+    fetchUv*: bool              # thin: download uv on target if not bundled/on PATH
+    uvVersion*: string          # uv release to fetch (thin)
 
 proc jsSeq(n: JsonNode): seq[string] =
   if n.isNil: return @[]
@@ -36,6 +39,9 @@ proc parseManifest*(path: string): Manifest =
   result.offline = j{"offline"}.getBool(false)
   result.cwdPolicy = j{"cwd_policy"}.getStr("launch")
   result.verboseUv = j{"verbose_uv"}.getBool(false)
+  result.tier = j{"tier"}.getStr("default")
+  result.fetchUv = j{"fetch_uv"}.getBool(false)
+  result.uvVersion = j{"uv_version"}.getStr("0.10.4")
   let pi = j{"post_install"}
   if not pi.isNil:
     for cmd in pi: result.postInstall.add jsSeq(cmd)

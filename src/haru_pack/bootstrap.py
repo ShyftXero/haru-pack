@@ -59,16 +59,21 @@ def install_nim(force: bool = False) -> str:
         raise RuntimeError("Nim install failed (binary not found after extract)")
     return nim
 
-def ensure_zippy(nim: str) -> bool:
-    """The launcher imports `zippy`; make sure nimble has it."""
+NIM_DEPS = ("zippy", "puppy")   # launcher imports these (puppy pulls webby)
+
+def ensure_nim_deps(nim: str) -> bool:
+    """The launcher imports zippy + puppy; make sure nimble has them."""
     nimble = str(Path(nim).with_name("nimble" + (".exe" if sys.platform == "win32" else "")))
     if not Path(nimble).exists():
         nimble = shutil.which("nimble") or "nimble"
-    try:
-        r = subprocess.run([nimble, "install", "-y", "zippy"], capture_output=True, text=True, timeout=300)
-        return r.returncode == 0
-    except Exception:
-        return False
+    ok = True
+    for pkg in NIM_DEPS:
+        try:
+            r = subprocess.run([nimble, "install", "-y", pkg], capture_output=True, text=True, timeout=600)
+            ok = ok and r.returncode == 0
+        except Exception:
+            ok = False
+    return ok
 
 # ---------- C toolchain (esp. lin->win cross) ----------
 def _distro_mingw_cmd() -> str:
