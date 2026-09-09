@@ -14,6 +14,22 @@ the folder the exe sits in**. Windows-first, Linux supported. Written in **Nim**
 
 ---
 
+## 0. Core requirements (non-negotiable)
+
+1. **Signable on Windows.** Output is a normal Authenticode PE. It **may ship unsigned,
+   but MUST support being signed** with an EV code-signing cert later, by us or the
+   downstream distributor. Payload is appended **before** signing; the fixed footer is
+   found by a **backward magic scan** so an appended cert table never hides it. No UPX.
+   *(Validated end-to-end — see `docs/SIGNING.md` and §10.)*
+2. **Cross-compilation is first-class.** The entire pipeline — compile launcher, attach
+   payload, sign — runs from **Linux → Windows** (and Linux-native), no Windows box
+   required in CI. `nim -d:mingw` for the PE; `osslsigncode`/`jsign` for signing (since
+   `signtool` is Windows-only). *(Validated: Linux-built PE signed + verified below.)*
+3. **Offline at runtime.** Zero network calls when the shipped exe runs.
+4. **Run-in-place UX.** Behaves like a native binary in the folder it was launched from.
+
+---
+
 ## 1. UX contract (the thing that must be true)
 
 Scenario: user downloads `myapp.exe` into `C:\Users\user\Downloads\images\`, drops a
@@ -189,3 +205,25 @@ uvcannon/
    for the zip path and it's pure-Nim.*
 4. **cwd policy** when launched from a different terminal dir: real cwd (native feel) vs
    force exe dir. *Lean: real cwd for child + `UVCANNON_EXE_DIR` for adjacent config.*
+
+---
+
+## 10. Signing & cross-compilation — VALIDATED (2026-09-09)
+
+Proven on this Linux box, no Windows machine:
+
+1. `nim c -d:mingw --cpu:amd64 -d:release` → `PE32+ console exe` (`src/main.nim` +
+   `src/overlay.nim`, the real backward-scan footer reader).
+2. `builder/attach.py` appends `payload || footer(68B)` → still a valid PE.
+3. `osslsigncode sign -h sha256` (throwaway cert) appends the attribute cert table
+   **after** our footer (+1527 B). `osslsigncode verify`: **Calculated == Current
+   message digest** → Authenticode integrity covers our payload. (Only failure is
+   `self-signed certificate` chain — a real EV cert fixes that.)
+4. `builder/verify.py` and, under wine, **the Nim exe reading its own signed self** both
+   relocate the footer by backward scan and confirm `payload_sha256` intact.
+
+Real-cert path (see `docs/SIGNING.md`): EV keys are non-exportable (FIPS/HSM), so sign
+with a hardware token (`osslsigncode` via PKCS#11 engine) or, preferred/modern, a cloud
+signer — **Azure Trusted Signing** / Key Vault / AWS KMS via **`jsign`** — all runnable
+from Linux CI. Always RFC3161-timestamp (`-ts`/`/tr`) so signatures outlive cert expiry.
+EV also grants immediate SmartScreen reputation.

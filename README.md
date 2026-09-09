@@ -17,6 +17,13 @@ Research + design. Nothing to build yet.
 - `research/03-nim-launcher.md` — Nim embed/extract/exec/sign
 - `research/04-pyinstaller-lessons.md` — what to steal / reject from PyInstaller
 
+
+## Validated so far (2026-09-09)
+- **Cross-compile Linux → Windows** PE via `nim -d:mingw` (core requirement).
+- **Signable-after-attach**: append payload → `osslsigncode` sign → Authenticode digest
+  matches and the Nim launcher still relocates its payload from its own *signed* exe
+  (backward magic scan survives the appended cert table). See `docs/SIGNING.md`.
+
 ## Key findings
 - **`astral-sh/war` is not what it looked like** — it's a draft *archive-format* spec
   ("Way better ARchive"), Paperware, **no binary encoding defined yet**. Can't build on
