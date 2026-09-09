@@ -33,7 +33,7 @@ haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux 
 | `haru-pack init [dir]` | scaffold a `haru_pack.toml` (learns from pyproject + any venv) |
 | `haru-pack build <dir>` | build a single-file launcher from a project or script |
 | `haru-pack bootstrap` | install Nim + launcher deps; verify the C toolchain |
-| `haru-pack doctor` | check Nim / C toolchain (prints the mingw install cmd if missing) |
+| `haru-pack doctor [dir]` | check Nim / C toolchain; scan a project for needed bundle/install steps |
 | `haru-pack verify <exe>` | inspect the footer + confirm payload integrity |
 | `haru-pack machine-id` | print this machine's id (for `--machine` license binding) |
 | `haru-pack version` | version |

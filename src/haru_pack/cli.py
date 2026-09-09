@@ -16,8 +16,9 @@ def version():
     typer.echo(f"haru-pack {__version__}")
 
 @app.command()
-def doctor(target: str = typer.Option("host", help="'host' or 'windows' (cross-compile)")):
-    """Check the build toolchain (Nim, zippy, C compiler) and advise on what's missing."""
+def doctor(path: Path = typer.Argument(None, help="project/script to scan for needed bundle/install steps"),
+           target: str = typer.Option("host", help="'host' or 'windows' (cross-compile)")):
+    """Check the build toolchain, and (if given a project) detect needed bundle/post_install steps."""
     nim = find_nim()
     typer.secho(f"nim       : {nim_version(nim) if nim else 'NOT FOUND — run `haru-pack bootstrap`'}",
                 fg=("green" if nim else "red"))
@@ -26,6 +27,35 @@ def doctor(target: str = typer.Option("host", help="'host' or 'windows' (cross-c
                 fg=("green" if tc["ok"] else "red"))
     if not tc["ok"]:
         typer.secho(tc["advice"], fg="yellow")
+
+    if path is not None:
+        from .discovery import discover
+        from . import scaffold
+        try:
+            disc = discover(path)
+        except Exception as e:
+            typer.secho(f"project scan skipped: {e}", fg="yellow")
+            disc = None
+        if disc is not None:
+            deps = set(scaffold.project_deps(path, disc))
+            venv = scaffold.find_venv(path if path.is_dir() else path.parent)
+            if venv:
+                _, vpkgs = scaffold.venv_info(venv)
+                deps |= set(vpkgs)
+                typer.secho(f"scanned {len(deps)} deps ({disc['kind']}; venv: {venv.name})", fg="cyan")
+            else:
+                typer.secho(f"scanned {len(deps)} deps ({disc['kind']}; no venv)", fg="cyan")
+            hints = scaffold.detect(sorted(deps))
+            if not hints:
+                typer.secho("bundle steps: none needed — plain deps only ✓", fg="green")
+            else:
+                typer.secho("needed bundle/install steps:", fg="yellow")
+                for h in hints:
+                    tag = {"bundle": "bundle (offline)", "post_install": "post_install (1st run)",
+                           "note": "note"}[h["kind"]]
+                    typer.echo(f"  • {h['package']:14} [{tag}]  {h['why']}")
+                typer.secho("  run `haru-pack init` to scaffold them into haru_pack.toml", fg="cyan")
+
     if not nim or not tc["ok"]:
         raise typer.Exit(1)
 

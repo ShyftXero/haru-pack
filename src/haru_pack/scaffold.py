@@ -4,6 +4,43 @@ import os, re
 from pathlib import Path
 from . import tomlio
 
+
+# package -> what extra step it needs beyond `uv pip install`.
+KNOWN = {
+    "playwright": {
+        "kind": "bundle",
+        "why": "installs browser binaries separately (playwright install)",
+        "bundle": ('[[bundle]]\n'
+                   '  run = ["playwright", "install", "firefox"]\n'
+                   '  into = "vendor/ms-playwright"\n'
+                   '  [bundle.env]\n'
+                   '    PLAYWRIGHT_BROWSERS_PATH = "{into}"\n'
+                   '    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"'),
+        "post_install": ('[[post_install]]\n'
+                         '  run = ["playwright", "install", "firefox"]'),
+    },
+    "spacy": {"kind": "post_install", "why": "language models are downloaded, not in the wheel",
+              "post_install": '[[post_install]]\n  run = ["python", "-m", "spacy", "download", "en_core_web_sm"]'},
+    "nltk": {"kind": "post_install", "why": "corpora are downloaded at runtime",
+             "post_install": '[[post_install]]\n  run = ["python", "-m", "nltk.downloader", "punkt"]'},
+    "transformers": {"kind": "post_install", "why": "model weights download on first use (large)",
+                     "post_install": '# pre-fetch your model in a post_install step to stay offline'},
+    "torch": {"kind": "note", "why": "large native wheels; pick the right CUDA/CPU index at build"},
+    "selenium": {"kind": "note", "why": "Selenium Manager fetches drivers at runtime (needs network)"},
+    "tiktoken": {"kind": "post_install", "why": "downloads BPE vocab files on first use",
+                 "post_install": '# warm the tiktoken cache in a post_install step'},
+    "weasyprint": {"kind": "note", "why": "needs system libs (pango/cairo) — not pip-bundlable"},
+}
+
+def detect(deps):
+    """Return [{package, kind, why, bundle?, post_install?}] for known packages in deps."""
+    out = []
+    for d in deps:
+        k = KNOWN.get(d)
+        if k:
+            out.append({"package": d, **k})
+    return out
+
 def _dep_name(spec: str) -> str:
     return re.split(r"[<>=!~;\[ ]", spec.strip(), 1)[0].lower()
 
@@ -28,11 +65,18 @@ def project_deps(path: Path, disc: dict) -> list[str]:
     return []
 
 def find_venv(path: Path) -> Path | None:
-    """Locate a usable venv: $VIRTUAL_ENV, then <project>/.venv, <project>/venv."""
-    cands = [Path(path) / ".venv", Path(path) / "venv", os.environ.get("VIRTUAL_ENV")]
-    for c in cands:
-        if c and (Path(c) / "pyvenv.cfg").exists():
-            return Path(c)
+    """A project-local venv (<project>/.venv or venv), or $VIRTUAL_ENV only if it lives
+    inside the project — never a random ambient venv that isn't this project's."""
+    path = Path(path).resolve()
+    root = path if path.is_dir() else path.parent
+    for c in (root / ".venv", root / "venv"):
+        if (c / "pyvenv.cfg").exists():
+            return c
+    ve = os.environ.get("VIRTUAL_ENV")
+    if ve:
+        ve = Path(ve).resolve()
+        if (ve / "pyvenv.cfg").exists() and (ve == root or root in ve.parents):
+            return ve
     return None
 
 def venv_info(venv: Path) -> tuple[str, list[str]]:
@@ -69,30 +113,17 @@ def render(disc: dict, deps: list[str], learned_from_venv: bool = False) -> str:
         "# verbose_uv = false",
         "",
     ]
-    if "playwright" in deps:
-        L += [
-            "# Detected Playwright — bundle a browser for offline (thick) builds:",
-            "[[bundle]]",
-            '  run = ["playwright", "install", "firefox"]',
-            '  into = "vendor/ms-playwright"',
-            "  [bundle.env]",
-            '    PLAYWRIGHT_BROWSERS_PATH = "{into}"',
-            '    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"',
-            "",
-            "# ...or fetch on first run instead (thin/default), per-OS:",
-            "# [[post_install]]",
-            '# os = ["windows"]',
-            '# run = ["playwright", "install", "firefox"]',
-            "",
-        ]
-    if any(d in deps for d in ("spacy", "nltk", "transformers", "torch")):
-        L += [
-            "# Detected an ML package — it likely needs a model download on first run:",
-            "# [[post_install]]",
-            '# run = ["python", "-m", "spacy", "download", "en_core_web_sm"]',
-            "",
-        ]
-    if not deps or "playwright" not in deps:
+    hints = detect(deps)
+    for h in hints:
+        L.append(f"# Detected {h['package']} — {h['why']}:")
+        if h.get("bundle"):
+            L += h["bundle"].split("\n")
+            L.append("# ...or fetch on first run instead (thin/default): " +
+                     h.get("post_install", "").replace(chr(10), " "))
+        elif h.get("post_install"):
+            L += h["post_install"].split("\n")
+        L.append("")
+    if not hints:
         L += [
             "# Build-time bundling (thick) — bake a command's output into the exe:",
             "# [[bundle]]",
