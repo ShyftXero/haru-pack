@@ -48,3 +48,10 @@ proc findFooter*(exePath: string): (bool, Footer, int) =
     dec i
   var empty: Footer
   return (false, empty, -1)
+
+proc readPayload*(exePath: string, ft: Footer): string =
+  ## read the raw payload bytes described by the footer
+  var f = newFileStream(exePath, fmRead)
+  defer: f.close()
+  f.setPosition(int(ft.payloadOff))
+  result = f.readStr(int(ft.payloadLen))
