@@ -18,7 +18,6 @@ from _invariants import (
     INVARIANTS_MD,
     REPO,
     REQUIRED_FIELDS,
-    Invariant,
     collect_citations,
     collect_markers,
     load_invariants,

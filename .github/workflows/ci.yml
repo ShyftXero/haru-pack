@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:          # so publish.yml can require this before releasing
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # the floor and the ceiling of `requires-python = ">=3.9"`. 3.9 matters here:
+        # it is where tarfile's extraction filter is not the default (INV-SUPPLY-03).
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv venv --python ${{ matrix.python-version }}
+      - run: uv pip install -e . pytest
+
+      - name: lint
+        run: uvx ruff check .
+
+      - name: invariant contract
+        # Runs first and on its own so a linkage failure is legible in the log rather
+        # than buried in a full-suite summary. This is the gate that catches an `active`
+        # invariant whose claiming test was deleted.
+        run: uv run pytest -m invariant
+
+      - name: full suite
+        run: uv run pytest

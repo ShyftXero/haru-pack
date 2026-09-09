@@ -1,7 +1,7 @@
 from __future__ import annotations
-import os, platform, shutil, subprocess, sys, tarfile, tempfile, urllib.request
+import platform, shutil, subprocess, sys, tempfile, urllib.request
 from pathlib import Path
-from .paths import nim_dir, toolchain_dir
+from .paths import nim_dir
 from .archives import safe_extract_tar
 
 NIM_VERSION = "2.2.6"  # pinned; bump deliberately

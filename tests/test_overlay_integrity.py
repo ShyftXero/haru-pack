@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from haru_pack.archives import safe_extract_tar
-from haru_pack.overlay import FOOTER_SIZE, MAGIC, attach, verify
+from haru_pack.overlay import attach, verify
 
 SRC = Path(__file__).resolve().parent.parent / "src/haru_pack"
 

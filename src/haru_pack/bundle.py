@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, shutil, subprocess, sys, tarfile, tempfile, urllib.request, zipfile
+import json, os, shutil, subprocess, sys, tempfile, urllib.request, zipfile
 from pathlib import Path
 from .archives import safe_extract_tar
 

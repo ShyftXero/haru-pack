@@ -8,7 +8,13 @@ permissions:
   contents: read
 
 jobs:
+  # A tag push used to go straight to PyPI with nothing checked. Publishing is the one
+  # irreversible step in this repo — a yanked release is still a released filename.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: ci
     runs-on: ubuntu-latest
     environment: pypi          # configure this env + a PyPI trusted publisher
     permissions:

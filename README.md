@@ -116,6 +116,10 @@ to make relative paths always resolve next to the shipped exe. Never use `__file
 user data — the code lives in the stage dir.
 
 ## Docs
+- [INVARIANTS.md](INVARIANTS.md) — properties that must not regress, each with a red-path.
+  `pytest -m invariant` checks that every `active` one is claimed by a test.
+- [THREAT_MODEL.md](THREAT_MODEL.md) — assets, actors, trust boundaries, and what the
+  licensing feature does and does not actually enforce
 - [docs/CONFIG.md](docs/CONFIG.md) — haru_pack.toml reference + discovery
 - [docs/TIERS.md](docs/TIERS.md) — bundling tiers + the Playwright example
 - [docs/SIGNING.md](docs/SIGNING.md) — Windows EV code signing (cross-platform)
@@ -124,6 +128,12 @@ user data — the code lives in the stage dir.
 - [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)
 
 ## Status
-Alpha. Core verified on Linux (host + Windows cross-compile): run-in-place UX, CLI
+Alpha. Core exercised on Linux (host + Windows cross-compile): run-in-place UX, CLI
 fidelity, all three tiers, EV-signable output, offline Playwright+Firefox, and encryption
 + license checks.
+
+Read [THREAT_MODEL.md](THREAT_MODEL.md) before relying on `--encrypt` for anything
+commercial. Two things worth knowing up front: the launcher does **not** verify its
+payload before running it ([`INV-LAUNCH-01`](INVARIANTS.md)), and the `--expires` / `--geo`
+checks read the local clock and an environment variable supplied by the person being
+restricted — they are not enforcement. Machine and user binding *are* cryptographic.

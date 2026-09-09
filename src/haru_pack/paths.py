@@ -1,7 +1,7 @@
 from __future__ import annotations
-import os, sys
+import sys
 from pathlib import Path
-from platformdirs import user_data_dir, user_cache_dir
+from platformdirs import user_data_dir
 
 APP = "haru-pack"
 

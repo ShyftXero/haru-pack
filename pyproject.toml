@@ -67,3 +67,10 @@ markers = [
 [tool.ruff]
 line-length = 110
 extend-exclude = ["examples", "research"]
+
+[tool.ruff.lint]
+# The house style is compact: grouped imports and one-line guard clauses. Those are
+# deliberate, so they are not errors here. What ruff is here to catch is dead code and
+# real mistakes — an unused import in a security test usually means an assertion was
+# deleted and nobody noticed.
+ignore = ["E401", "E701", "E702", "E741"]
