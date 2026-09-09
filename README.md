@@ -1,5 +1,28 @@
 # uvcannon
 
-Single-file, signable native launcher that stages `uv` + a standalone Python and runs an arbitrary Python project (PEP 723 script or a full multi-folder project) as if it were a compiled binary.
+Single-file, **EV-signable native launcher** (Nim) that carries an arbitrary Python
+project — a PEP 723 script *or* a full multi-folder project (e.g. a Flask app) — stages
+`uv` + a standalone Python into per-user appdata on first run, and runs it **as if it were
+a compiled binary sitting in the folder the exe was launched from**. Windows-first, Linux
+supported.
 
-Status: research/design. See `research/` and `docs/PLAN.md`.
+Think PyInstaller's UX, but the interpreter + deps are delegated to `uv` and the launcher
+is a thin signable native stub.
+
+## Status
+Research + design. Nothing to build yet.
+- `docs/PLAN.md` — the plan (architecture, container format, uv wiring, signing, milestones)
+- `research/01-war-and-prior-art.md` — astral `war` (NOT a builder) + `pyapp`
+- `research/02-uv-staging.md` — driving `uv` fully offline
+- `research/03-nim-launcher.md` — Nim embed/extract/exec/sign
+- `research/04-pyinstaller-lessons.md` — what to steal / reject from PyInstaller
+
+## Key findings
+- **`astral-sh/war` is not what it looked like** — it's a draft *archive-format* spec
+  ("Way better ARchive"), Paperware, **no binary encoding defined yet**. Can't build on
+  it today; we borrow its ideas in our own container and can adopt it later.
+- **Persistent, hash-versioned extract to appdata** (PyInstaller *onedir* semantics), not
+  per-run temp extraction (*onefile*) — faster, crash-safe, AV-friendlier.
+- **Run-in-place cwd** + explicit three-root model (CWD / exe dir / stage dir) so a config
+  dropped next to the exe is found and relative paths behave natively.
+- **Append payload, sign last, no UPX** — EV signing + reputation is the AV story.
