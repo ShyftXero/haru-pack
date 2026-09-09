@@ -12,6 +12,7 @@ launched from**. Windows-first, cross-compiled from Linux. Built on `uv`; launch
 ```sh
 pip install haru-pack            # or:  uvx haru-pack ...
 haru-pack bootstrap              # installs Nim (+zippy, puppy, parsetoml, nimcrypto) & checks the C toolchain
+haru-pack init ./myproject       # optional: scaffold haru_pack.toml (learns from pyproject + venv)
 ```
 
 ## Quickstart
@@ -29,7 +30,8 @@ haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux 
 ## Commands
 | Command | What |
 |---|---|
-| `haru-pack build <dir>` | build a single-file launcher from a payload dir |
+| `haru-pack init [dir]` | scaffold a `haru_pack.toml` (learns from pyproject + any venv) |
+| `haru-pack build <dir>` | build a single-file launcher from a project or script |
 | `haru-pack bootstrap` | install Nim + launcher deps; verify the C toolchain |
 | `haru-pack doctor` | check Nim / C toolchain (prints the mingw install cmd if missing) |
 | `haru-pack verify <exe>` | inspect the footer + confirm payload integrity |

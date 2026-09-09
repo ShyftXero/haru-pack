@@ -105,6 +105,31 @@ def verify(exe: Path):
         typer.echo(f"{k:20}: {v}")
     raise typer.Exit(0 if info["sha_ok"] else 1)
 
+@app.command()
+def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
+         force: bool = typer.Option(False, "--force", help="overwrite an existing haru_pack.toml")):
+    """Scaffold a haru_pack.toml, pre-filled from discovery + any available venv."""
+    from .discovery import discover
+    from . import scaffold
+    out_dir = path if path.is_dir() else path.parent
+    out = out_dir / "haru_pack.toml"
+    if out.exists() and not force:
+        typer.secho(f"{out} already exists (use --force)", fg="yellow"); raise typer.Exit(1)
+    try:
+        disc = discover(path)
+    except Exception as e:
+        typer.secho(f"discovery failed: {e}", fg="red"); raise typer.Exit(2)
+    deps = set(scaffold.project_deps(path, disc))
+    learned = False
+    venv = scaffold.find_venv(out_dir)
+    if venv:
+        vver, vpkgs = scaffold.venv_info(venv)
+        if vpkgs: deps |= set(vpkgs); learned = True
+        if vver and not disc.get("python"): disc["python"] = vver
+        typer.secho(f"learned from venv: {venv}  ({len(vpkgs)} packages, python {vver or '?'})", fg="cyan")
+    out.write_text(scaffold.render(disc, sorted(deps), learned_from_venv=learned))
+    typer.secho(f"wrote {out}  (kind={disc['kind']}, entrypoint={disc['entrypoint']}, python={disc.get('python') or 'auto'})", fg="green")
+
 @app.command("machine-id")
 def machine_id_cmd():
     """Print this machine's id (give it to a vendor to bind an --encrypt license)."""

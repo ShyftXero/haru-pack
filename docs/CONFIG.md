@@ -10,6 +10,15 @@
   the script filename for a script.
 - **name** — `[project].name` or the script stem.
 
+## `haru-pack init` — scaffold it
+```sh
+haru-pack init ./myproject     # writes a commented haru_pack.toml, pre-filled
+```
+`init` discovers kind/name/entrypoint/Python and **learns from an available venv**
+(`<project>/.venv`, `venv`, or `$VIRTUAL_ENV`): it reads the venv's Python version and
+installed packages, so it can suggest bundle/post_install steps (e.g. a Playwright browser)
+even when they aren't in `pyproject.toml`. Add `--force` to overwrite.
+
 ## haru_pack.toml (optional, at the project root)
 Declare overrides + extras. Precedence: discovery < `haru_pack.toml` < CLI flags.
 ```toml
