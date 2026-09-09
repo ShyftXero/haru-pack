@@ -2,6 +2,7 @@ from __future__ import annotations
 import os, platform, shutil, subprocess, sys, tarfile, tempfile, urllib.request
 from pathlib import Path
 from .paths import nim_dir, toolchain_dir
+from .archives import safe_extract_tar
 
 NIM_VERSION = "2.2.6"  # pinned; bump deliberately
 
@@ -46,8 +47,7 @@ def install_nim(force: bool = False) -> str:
         urllib.request.urlretrieve(url, arc)
         extract_to = Path(td) / "x"
         if kind == "tar.xz":
-            with tarfile.open(arc) as t:
-                t.extractall(extract_to)
+            safe_extract_tar(arc, extract_to)       # INV-SUPPLY-03
         else:
             import zipfile
             with zipfile.ZipFile(arc) as z:

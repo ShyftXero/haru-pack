@@ -72,8 +72,26 @@ If a single self-extracting stub still trips strict Defender policies, ship
 **external-payload mode**: `app.exe` (signed, tiny) + `app.uvcap` sidecar. Launcher finds
 the sidecar via `getAppDir()`. Onedir-like, least-suspicious posture.
 
-## Validated (2026-09-09)
+## Validated (2026-09-09, corrected 2026-09-09)
+
 Cross-compiled on Linux, attached payload, signed with `osslsigncode` (throwaway cert),
 `osslsigncode verify` reported matching Authenticode digests, and the Nim exe (under wine)
-relocated its footer + verified its payload sha256 from its own **signed** image. Only the
-cert *chain* failed (self-signed) — an EV cert resolves that. See `docs/PLAN.md` §10.
+relocated its footer from its own **signed** image. Only the cert *chain* failed
+(self-signed) — an EV cert resolves that. See `docs/PLAN.md` §10.
+
+**Correction.** The original wording of this section claimed the launcher "verified its
+payload sha256". It does not, and never has. `main.nim` hex-encodes the footer digest and
+uses the first 16 characters as a staging-directory name; it never compares it to the
+payload it just read. See `INV-LAUNCH-01`, which is `proposed` for that reason.
+
+What is actually covered by tests today:
+
+| Claim | Evidence |
+|---|---|
+| The footer round-trips and detects payload modification **at build time** | `INV-PAYLOAD-02` — `tests/test_overlay_integrity.py` |
+| The footer survives data appended after it (the cert table) | `INV-PAYLOAD-02` — `test_footer_survives_data_appended_after_it` |
+| The **launcher** verifies the payload before executing it | **Nothing. Not implemented.** `INV-LAUNCH-01` |
+| The payload is signature-verified rather than digest-checked | **Nothing. Not implemented.** `INV-LAUNCH-03` |
+
+On an unsigned ELF target, a haru-pack binary has no tamper-evidence at all: the footer
+digest is not a MAC, so anyone editing the payload can recompute it.

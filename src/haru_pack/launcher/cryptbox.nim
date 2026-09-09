@@ -1,8 +1,15 @@
 ## Runtime decryption + license checks for --encrypt payloads. Matches crypto.py.
 ## Container: magic"HPAKENC1"|ver u16|flags u16|iters u32|salt16|nonce12|tag16|
-##            esecret_len u16|esecret|policy_len u32|policy|ciphertext
+##            esecret_len u16|esecret|ciphertext
+## where ciphertext = AES-256-GCM( policy_len u32 | policy | payload.zip ), AAD = magic.
 ## key = PBKDF2-HMAC-SHA256(secret [+0x1f+machine][+0x1f+user], salt, iters, 32)
-## policy (JSON) is the GCM AAD -> tamper-evident. No PKI.
+##
+## The policy is INSIDE the ciphertext, not the AAD, and not in the header — a
+## reverse-engineer sees no expiry/geo/machine/user, and cannot edit them without the key.
+## (Two earlier revisions of this comment said the policy was the AAD, and said it sat in
+## the header. Both were wrong; the code has always done what is written above. See
+## INV-CRYPTO-01. The header itself is NOT covered by the AEAD — INV-CRYPTO-04.)
+## No PKI.
 import std/[os, osproc, strutils, times, json, terminal]
 import nimcrypto/[pbkdf2, bcmode, rijndael, sha2]
 

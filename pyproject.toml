@@ -53,3 +53,17 @@ include = [
 
 [tool.hatch.build.targets.sdist]
 include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproject.toml"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "invariant(id): claims an entry in INVARIANTS.md. Run the contract with `pytest -m invariant`.",
+]
+
+[tool.ruff]
+line-length = 110
+extend-exclude = ["examples", "research"]

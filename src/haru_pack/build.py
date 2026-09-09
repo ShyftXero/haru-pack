@@ -12,9 +12,20 @@ from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
 
 class BuildError(RuntimeError): ...
 
+# INV-PAYLOAD-01: a payload is appended to a binary that gets distributed, and often
+# signed. Anything credential-shaped that lands in it is published. Build directories
+# routinely sit next to a working .env, so exclusion is the default, not the operator's job.
+_SECRET_PATTERNS = ("*.env", ".env", ".env.*", ".envrc", ".direnv",
+                    "*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore",
+                    "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",
+                    ".ssh", ".aws", ".gnupg", ".netrc", "_netrc",
+                    "credentials", "credentials.*", "secrets.*", "*.secret",
+                    ".npmrc", ".pypirc", "service-account*.json")
+
 _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv", "*.egg-info",
                                  "dist", "build", ".git", "haru_pack.toml", ".mypy_cache",
-                                 ".pytest_cache", ".ruff_cache", "*.exe")
+                                 ".pytest_cache", ".ruff_cache", "*.exe",
+                                 *_SECRET_PATTERNS)
 
 def compile_launcher(nim: str, target: str, workdir: Path) -> Path:
     src = launcher_src_dir() / "main.nim"
@@ -31,7 +42,7 @@ def compile_launcher(nim: str, target: str, workdir: Path) -> Path:
     return out
 
 def _resolve(project: Path, tier: str, python_cli: str,
-             expires, geo, machine, user, embed_secret):
+             expires, geo, machine, user, embed_secret, encrypt: bool = False):
     """Discover + merge haru_pack.toml + CLI. Returns (manifest, enc, python_version)."""
     disc = discovery.discover(project)
     decl_dir = project if project.is_dir() else project.parent
@@ -56,7 +67,11 @@ def _resolve(project: Path, tier: str, python_cli: str,
     pyver = python_cli or decl.get("python", "") or disc.get("python", "") or "3.12"
     e = decl.get("encryption", {})
     enc = {
-        "enabled": bool(e.get("enabled")) or any([expires, geo, machine, user, embed_secret]),
+        # INV-BUILD-02: an explicit --encrypt must enable encryption on its own. It was
+        # previously dropped here, so `--encrypt --secret X` with no policy flag attached a
+        # PLAINTEXT payload and exited 0.
+        "enabled": bool(encrypt) or bool(e.get("enabled"))
+                   or any([expires, geo, machine, user, embed_secret]),
         "expires": expires or e.get("expires", ""),
         "geo": geo or e.get("geo", []),
         "machine": machine or e.get("machine", ""),
@@ -108,7 +123,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           machine: str = "", user: str = "", embed_secret: bool = False,
-          python: str = "", wine: bool = False) -> dict:
+          python: str = "", wine: bool = False, encrypt: bool = False) -> dict:
     project = Path(project); out = Path(out)
     nim = find_nim()
     if not nim:
@@ -117,7 +132,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     if not tc["ok"]:
         raise BuildError(f"C toolchain missing for target '{target}':\n{tc['advice']}")
     manifest, enc, pyver, source = _resolve(project, tier, python, expires, geo,
-                                            machine, user, embed_secret)
+                                            machine, user, embed_secret, encrypt)
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
@@ -131,6 +146,13 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                                      machine=enc["machine"], user=enc["user"],
                                      embed_secret=enc["embed_secret"])
             flags = 1
+        # INV-BUILD-01: never report a protection we did not apply. Checked against the
+        # bytes about to be attached, not against the intent that produced them.
+        if enc["enabled"] != payload.startswith(crypto.MAGIC):
+            raise BuildError(
+                "internal: encryption state does not match the payload "
+                f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
+                "Refusing to emit a binary whose build receipt would be wrong.")
         launcher = compile_launcher(nim, target, tdp)
         info = attach(launcher, payload, out, flags=flags)
     try:

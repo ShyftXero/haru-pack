@@ -121,7 +121,8 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
     try:
         info = build_exe(project, out, target=target, tier=tier, secret=sec,
                          expires=expires, geo=[g for g in geo.split(",") if g],
-                         machine=machine, user=user, embed_secret=embed_secret, python=python, wine=wine)
+                         machine=machine, user=user, embed_secret=embed_secret, python=python,
+                         wine=wine, encrypt=bool(want_enc))   # INV-BUILD-02
     except BuildError as e:
         typer.secho(str(e), fg="red"); raise typer.Exit(2)
     tag = " 🔒encrypted" if info.get("encrypted") else ""

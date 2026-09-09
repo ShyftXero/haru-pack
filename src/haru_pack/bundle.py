@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json, os, shutil, subprocess, sys, tarfile, tempfile, urllib.request, zipfile
 from pathlib import Path
+from .archives import safe_extract_tar
 
 UV_VERSION = "0.10.4"
 
@@ -37,7 +38,7 @@ def _extract_find(archive: Path, name: str, dest: Path) -> None:
         if archive.suffix == ".zip":
             with zipfile.ZipFile(archive) as z: z.extractall(td)
         else:
-            with tarfile.open(archive) as t: t.extractall(td)
+            safe_extract_tar(archive, td)          # INV-SUPPLY-03
         for root, _, files in os.walk(td):
             if name in files:
                 shutil.move(os.path.join(root, name), dest)
@@ -97,8 +98,8 @@ def bundle_python(target: str, vendor_dir: Path, version: str = "3.12") -> Path:
         with tempfile.TemporaryDirectory() as td:
             arc = Path(td) / "py.tar.gz"
             urllib.request.urlretrieve(url, arc)
-            with tarfile.open(arc) as t:
-                t.extractall(pydir)   # install_only extracts to pydir/python/...
+            # install_only extracts to pydir/python/...
+            safe_extract_tar(arc, pydir)               # INV-SUPPLY-03
     exe = "python.exe" if _target_os(target) == "windows" else "python3"
     cands = [c for c in {c.resolve() for c in pydir.rglob(exe)}
              if c.is_file() and "venv" not in (q.lower() for q in c.parts)]
