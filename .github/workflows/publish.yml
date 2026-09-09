@@ -1,0 +1,21 @@
+name: publish
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi          # configure this env + a PyPI trusted publisher
+    permissions:
+      id-token: write          # OIDC for PyPI trusted publishing (no token needed)
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - run: uv publish --trusted-publishing always

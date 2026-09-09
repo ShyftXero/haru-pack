@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "haru-pack"
+dynamic = ["version"]
+description = "Pack a Python project (PEP 723 script or full project) into a single, EV-signable native launcher that stages uv + a standalone Python and runs it like a compiled binary."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "ShyftXero" }]
+keywords = ["packaging", "uv", "pep723", "executable", "nim", "single-file", "pyinstaller", "distribution"]
+dependencies = [
+  "typer>=0.12",
+  "platformdirs>=4",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: System :: Software Distribution",
+]
+
+[project.urls]
+Homepage = "https://github.com/ShyftXero/haru-pack"
+Repository = "https://github.com/ShyftXero/haru-pack"
+Issues = "https://github.com/ShyftXero/haru-pack/issues"
+
+[project.scripts]
+haru-pack = "haru_pack.cli:main"
+
+[tool.hatch.version]
+path = "src/haru_pack/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/haru_pack"]
+
+# ship the Nim launcher source (compiled at build-time by `haru-pack build`)
+[tool.hatch.build]
+include = [
+  "src/haru_pack/**/*.py",
+  "src/haru_pack/launcher/*.nim",
+]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproject.toml"]

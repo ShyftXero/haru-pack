@@ -16,3 +16,10 @@ Thumbs.db
 
 # build-fuzzer run artifacts
 .haru-pack-fuzz/
+
+# python packaging
+dist/
+*.egg-info/
+__pycache__/
+.venv/
+.venv-*/
