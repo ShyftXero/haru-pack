@@ -1,4 +1,4 @@
-## uvcannon staging: per-user, content-addressed, atomic, first-run-skip.
+## haru-pack staging: per-user, content-addressed, atomic, first-run-skip.
 import std/[os, strutils, hashes]
 import zippy/ziparchives
 
@@ -10,7 +10,7 @@ proc baseDir*(): string =
     result = getEnv("HOME") / "Library" / "Caches"
   else:
     result = getEnv("XDG_CACHE_HOME", getHomeDir() / ".cache")
-  result = result / "uvcannon"
+  result = result / "haru-pack"
 
 proc keyFor*(s: string): string =
   ## short stable key for the stage dir (M0: fast non-crypto hash of the payload/id)

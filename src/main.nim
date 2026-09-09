@@ -1,7 +1,7 @@
-## uvcannon M0 launcher — actually runs `uv`.
+## haru-pack M0 launcher — actually runs `uv`.
 ## Modes:
 ##   packaged : payload zip appended to this exe (footer located by backward scan)
-##   dev      : UVCANNON_DEV_STAGE=<dir> points at an already-unpacked payload tree
+##   dev      : HARUPACK_DEV_STAGE=<dir> points at an already-unpacked payload tree
 ## Behaviour: stage once to appdata, wire uv env, run entrypoint with cwd = launch dir
 ## (run-in-place), exposing exe-dir + stage-dir to the child.
 import std/[os, osproc, strutils, sequtils]
@@ -13,7 +13,7 @@ when defined(posix):
   proc ignoreInParent(sig: cint) {.noconv.} = discard
 
 proc die(msg: string, code = 1) =
-  stderr.writeLine "uvcannon: " & msg
+  stderr.writeLine "haru-pack: " & msg
   quit(code)
 
 proc findUv(stageRoot: string, m: Manifest): string =
@@ -38,12 +38,12 @@ when isMainModule:
 
   # 1. locate staged payload root
   var stageRoot: string
-  let dev = getEnv("UVCANNON_DEV_STAGE")
+  let dev = getEnv("HARUPACK_DEV_STAGE")
   if dev.len > 0:
     stageRoot = dev
   else:
     let (found, ft, _) = findFooter(self)
-    if not found: die("no payload appended and UVCANNON_DEV_STAGE unset")
+    if not found: die("no payload appended and HARUPACK_DEV_STAGE unset")
     let payload = readPayload(self, ft)
     var shahex = ""
     for b in ft.payloadSha: shahex.add toHex(int(b), 2).toLowerAscii
@@ -56,8 +56,8 @@ when isMainModule:
   let appDir = stageRoot / m.appSubdir
 
   # 3. env wiring (three roots + uv offline knobs)
-  putEnv("UVCANNON_EXE_DIR", exeDir)
-  putEnv("UVCANNON_STAGE", stageRoot)
+  putEnv("HARUPACK_EXE_DIR", exeDir)
+  putEnv("HARUPACK_STAGE", stageRoot)
   putEnv("UV_CACHE_DIR", baseDir() / "uv-cache")
   if m.offline:
     putEnv("UV_OFFLINE", "1")
@@ -79,7 +79,7 @@ when isMainModule:
       if m.kind == akProject: a.add @["--project", appDir]
       a.add "--"
       a.add cmd
-      stderr.writeLine "uvcannon: post-install: uv " & a.join(" ")
+      stderr.writeLine "haru-pack: post-install: uv " & a.join(" ")
       let rc = runChild(uv, a, appDir)
       if rc != 0: die("post-install step failed (" & $rc & "): " & cmd.join(" "), rc)
     writeFile(piSentinel, "1")

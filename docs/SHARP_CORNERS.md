@@ -1,4 +1,4 @@
-# uvcannon — sharp corners catalog
+# haru-pack — sharp corners catalog
 
 The launcher is easy. The *long tail of real projects* is where it bleeds. This is the
 running list of packaging hazards + the intended handling. The `busybody` build-fuzzer
@@ -75,10 +75,10 @@ Rust ext, `flask db upgrade`, `prisma generate`, downloading a model, compiling 
 
 ## E. Data files, templates, assets adjacent-vs-bundled
 - Bundled assets (templates, static/) live under the stage dir → resolve via
-  `UVCANNON_STAGE` or `importlib.resources`, never `os.getcwd()`.
-- User data (save files, user config) belongs next to the exe (`UVCANNON_EXE_DIR`) or a
+  `HARUPACK_STAGE` or `importlib.resources`, never `os.getcwd()`.
+- User data (save files, user config) belongs next to the exe (`HARUPACK_EXE_DIR`) or a
   user dir — never the stage dir (it's wiped on version change).
-- Ship a tiny `uvcannon` runtime helper: `stage()`, `exe_dir()`, `data_dir()` so authors
+- Ship a tiny `haru-pack` runtime helper: `stage()`, `exe_dir()`, `data_dir()` so authors
   stop guessing.
 
 ## F. Games — asset compression + source protection

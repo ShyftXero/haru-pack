@@ -1,4 +1,4 @@
-# uvcannon — Plan
+# haru-pack — Plan
 
 A single-file, **EV-signable native launcher** that carries an arbitrary Python project
 (PEP 723 script *or* a full multi-folder project), stages `uv` + a standalone Python into
@@ -36,7 +36,7 @@ Scenario: user downloads `myapp.exe` into `C:\Users\user\Downloads\images\`, dro
 `config.toml` next to it, double-clicks / runs it.
 
 1. First run: launcher extracts payload to
-   `%LOCALAPPDATA%\uvcannon\<payload-hash>\` (Linux: `$XDG_CACHE_HOME/uvcannon/<hash>`),
+   `%LOCALAPPDATA%\haru-pack\<payload-hash>\` (Linux: `$XDG_CACHE_HOME/haru-pack/<hash>`),
    stages `uv` + standalone Python + the app, then invokes the entrypoint.
 2. **The Python sees `images\` as its working directory** — relative paths, `os.getcwd()`,
    `open("data.csv")` all resolve against `images\`, exactly like a native binary would.
@@ -51,11 +51,11 @@ Scenario: user downloads `myapp.exe` into `C:\Users\user\Downloads\images\`, dro
 | Root | Nim source | Exposed to Python as | Purpose |
 |------|-----------|----------------------|---------|
 | **CWD**   | `getCurrentDir()` | child process cwd | native relative-path behavior |
-| **EXE dir** | `getAppDir()` | env `UVCANNON_EXE_DIR` | find config *adjacent to the shipped exe* |
-| **STAGE dir** | appdata `<hash>/` | env `UVCANNON_STAGE` | bundled code / venv / python (internal) |
+| **EXE dir** | `getAppDir()` | env `HARUPACK_EXE_DIR` | find config *adjacent to the shipped exe* |
+| **STAGE dir** | appdata `<hash>/` | env `HARUPACK_STAGE` | bundled code / venv / python (internal) |
 
-Config resolution order shipped in a tiny `uvcannon` runtime helper:
-`UVCANNON_EXE_DIR` first, then CWD. Scripts never touch `__file__` for user data.
+Config resolution order shipped in a tiny `haru-pack` runtime helper:
+`HARUPACK_EXE_DIR` first, then CWD. Scripts never touch `__file__` for user data.
 
 > In the user's example CWD == EXE dir == `images\` (double-click). We keep them separate
 > so launching from a terminal in another directory still behaves like a native binary
@@ -74,7 +74,7 @@ myapp.exe  =  [ Nim launcher PE ]  ++  [ payload blob ]  ++  [ footer ]   (++ [A
 Runtime flow (thin stub — interpreter delegated to uv):
 1. `getAppFilename()` → open self → **scan backward from EOF for footer magic** (survives
    an appended cert table) → read `{offset,len,sha256}`.
-2. Compute stage dir `= <appdata>/uvcannon/<payload-sha256-prefix>/`.
+2. Compute stage dir `= <appdata>/haru-pack/<payload-sha256-prefix>/`.
 3. If `<dir>/.ready` exists → go to step 6.
 4. Else: extract payload → `<dir>.tmp-<pid>/`, verify sha256, write `.ready` **last**,
    `moveDir` (atomic rename) into `<dir>/`. Tolerate concurrent-loser race.
@@ -94,13 +94,13 @@ war has no binary encoding, so v0 uses a concrete, boring container and steals w
   per-entry compression, atomic unpack, path-traversal + reserved-name rejection.)
 - **Overlay footer** (fixed size, at EOF pre-signing; located by backward magic scan):
   ```
-  magic        "UVCANON1"      8B
+  magic        "HARUPACK"      8B
   format_ver   u16
   flags        u16             (bit0: external-payload mode; bit1: has-warmed-cache)
   payload_off  u64             (offset from start of file)
   payload_len  u64
   payload_sha  32B             (sha256 of payload bytes)
-  tail_magic   "1NONACVU"      8B   (reverse sentinel for backward scan)
+  tail_magic   "KCAPURAH"      8B   (reverse sentinel for backward scan)
   ```
 - **Payload tree:**
   ```
@@ -126,7 +126,7 @@ UV_PYTHON=<stage>/vendor/python/.../python(.exe)     # path, not version
 UV_PYTHON_DOWNLOADS=never
 UV_PYTHON_INSTALL_DIR=<stage>/vendor/python
 UV_CACHE_DIR=<stage>/vendor/cache
-UVCANNON_EXE_DIR=<exe dir>   UVCANNON_STAGE=<stage>
+HARUPACK_EXE_DIR=<exe dir>   HARUPACK_STAGE=<stage>
 ```
 
 - **PEP 723 single script** — ship `app/script.py` + `locks/script.py.lock` + warmed
@@ -153,7 +153,7 @@ cross-machine portable (warm on target OS/arch at build, or ship prebuilt venv).
 
 ---
 
-## 6. Build pipeline (the `uvcannon` CLI, later)
+## 6. Build pipeline (the `haru-pack` CLI, later)
 1. Read the target project; detect kind (PEP 723 script vs project w/ pyproject).
 2. Resolve deps with uv on the build host (**warm cache / build venv on target OS/arch**),
    generate `uv.lock` / `script.py.lock`. Fetch pinned python-build-standalone.
@@ -169,10 +169,10 @@ cross-machine portable (warm on target OS/arch at build, or ship prebuilt venv).
 
 ## 7. Repo layout
 ```
-uvcannon/
+haru-pack/
   src/            # Nim launcher: main, overlay, stage, envsetup, exec, container
-  builder/        # the uvcannon build CLI (assemble payload, drive nim, sign) — later
-  runtime/        # tiny `uvcannon` python helper (app_dir(), exe_dir(), here())
+  builder/        # the haru-pack build CLI (assemble payload, drive nim, sign) — later
+  runtime/        # tiny `haru-pack` python helper (app_dir(), exe_dir(), here())
   examples/       # hello PEP723 script + a minimal Flask app to dogfood both modes
   research/       # 01-04 (done)
   docs/           # PLAN.md (this), later: FORMAT.md, SIGNING.md
@@ -188,7 +188,7 @@ uvcannon/
   hash-versioned appdata with atomic `.ready`.
 - **M2 (uv offline):** full env wiring; PEP 723 single-script mode fully offline.
 - **M3 (project mode):** prebuilt venv + `--no-sync` Flask example offline.
-- **M4 (builder CLI):** `uvcannon build ./project` → unsigned exe end-to-end.
+- **M4 (builder CLI):** `haru-pack build ./project` → unsigned exe end-to-end.
 - **M5 (signing/AV):** EV signing step, external-payload mode, splash, docs.
 - **M6 (Linux + polish):** Linux target, eviction, cross-platform CI.
 
@@ -206,7 +206,7 @@ uvcannon/
 4. **cwd policy** — RESOLVED (M0): manifest `cwd_policy` = `"launch"` (default, native —
    `open('x')` follows the launch dir like any exe) or `"exe"` (force child cwd to the
    exe folder so a plain `open('x')` ALWAYS hits the file adjacent to the shipped exe).
-   `UVCANNON_EXE_DIR` is always exported for explicit exe-anchored reads either way.
+   `HARUPACK_EXE_DIR` is always exported for explicit exe-anchored reads either way.
 
 ---
 

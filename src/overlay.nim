@@ -1,11 +1,11 @@
-## uvcannon overlay: locate an appended payload inside our own signed PE.
+## haru-pack overlay: locate an appended payload inside our own signed PE.
 ## Footer is fixed-size and located by scanning BACKWARD for the start magic,
 ## so an Authenticode cert table appended at EOF (post-signing) does not hide it.
 import std/[os, streams]
 
 const
-  FooterMagic* = "UVCANON1"   # 8B start sentinel
-  FooterTail*  = "1NONACVU"   # 8B end sentinel
+  FooterMagic* = "HARUPACK"   # 8B start sentinel
+  FooterTail*  = "KCAPURAH"   # 8B end sentinel
   FooterSize*  = 8 + 2 + 2 + 8 + 8 + 32 + 8   # = 68
   ScanWindow*  = 256 * 1024   # bytes from EOF to search
 

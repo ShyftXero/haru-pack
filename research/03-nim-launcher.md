@@ -29,8 +29,8 @@ _Agent: Acid_Burn. Nim 2.2 stdlib. Date: 2026-09-09._
 - zippy (`nimble install zippy`, pure-Nim, arc/orc + vcc ok): `extractAll(zip, dest)`
   (dest must NOT pre-exist), or `openZipArchive`/`walkFiles`/`extractFile`.
 - Version dir: bake `const buildId = staticExec("git rev-parse --short HEAD")` (or hash of
-  blob) → target `<baseDir>/uvcannon/<buildId>/`. Skip if `<dir>/.complete` exists.
-- Atomic: extract to `<baseDir>/uvcannon/.tmp-<rand>`, write `.complete`, then
+  blob) → target `<baseDir>/haru-pack/<buildId>/`. Skip if `<dir>/.complete` exists.
+- Atomic: extract to `<baseDir>/haru-pack/.tmp-<rand>`, write `.complete`, then
   `moveDir(tmp, final)` (rename = atomic same-FS). Guard `if not dirExists(final)`;
   tolerate concurrent-loser race (moveDir fails when target now exists).
 

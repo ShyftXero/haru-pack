@@ -1,4 +1,4 @@
-# Research 04 — PyInstaller architecture → lessons for uvcannon
+# Research 04 — PyInstaller architecture → lessons for haru-pack
 
 _Agent: Bootloader. Date: 2026-09-09._
 
@@ -9,7 +9,7 @@ _Agent: Bootloader. Date: 2026-09-09._
   **leaks temp on crash/kill** (cleanup only on graceful exit).
 - **ONEDIR:** persistent folder, no runtime extraction, faster, AV-friendly.
 
-**uvcannon target = ONEDIR's persistence, keyed by a content hash** — extract once to
+**haru-pack target = ONEDIR's persistence, keyed by a content hash** — extract once to
 appdata, skip on later runs. Explicitly reject onefile's re-extract-every-launch.
 
 ## The overlay / magic-cookie pattern (steal this)
@@ -26,7 +26,7 @@ appdata, skip on later runs. Explicitly reject onefile's re-extract-every-launch
 - `dirname(sys.executable)` = the **shipped exe's dir** → where a user-dropped config
   lives. `os.getcwd()` is the shell's launch dir (bootloader does NOT chdir).
 - Frozen check: `getattr(sys,'frozen',False) and hasattr(sys,'_MEIPASS')`.
-- **uvcannon exposes three explicit roots** (see PLAN): CWD, EXE dir, STAGE dir. Never
+- **haru-pack exposes three explicit roots** (see PLAN): CWD, EXE dir, STAGE dir. Never
   derive user-data paths from `__file__`.
 
 ## Signing + AV

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""uvcannon: pack a payload dir into a zip and append it to a launcher.
+"""haru-pack: pack a payload dir into a zip and append it to a launcher.
 Usage: pack.py <launcher> <payload_dir> <out_exe>"""
 import io, os, sys, zipfile
 sys.path.insert(0, os.path.dirname(__file__))

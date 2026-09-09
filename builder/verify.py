@@ -3,7 +3,7 @@
 Scans backward for MAGIC (footer is NOT at EOF once signed), re-hashes the
 payload slice, and reports whether it still verifies."""
 import hashlib, struct, sys
-MAGIC=b"UVCANON1"; TAIL=b"1NONACVU"
+MAGIC=b"HARUPACK"; TAIL=b"KCAPURAH"
 data=open(sys.argv[1],"rb").read()
 i=data.rfind(MAGIC)
 assert i!=-1, "footer magic not found"

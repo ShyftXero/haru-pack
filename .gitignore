@@ -15,4 +15,4 @@ vendor/python*
 Thumbs.db
 
 # build-fuzzer run artifacts
-.uvcannon-fuzz/
+.haru-pack-fuzz/

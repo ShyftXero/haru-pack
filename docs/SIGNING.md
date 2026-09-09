@@ -1,4 +1,4 @@
-# uvcannon — Windows code signing
+# haru-pack — Windows code signing
 
 Requirement: the produced exe **may ship unsigned but MUST support signing** with an EV
 code-signing certificate. The whole flow is **cross-platform (runs on Linux CI)** — no
@@ -11,8 +11,8 @@ Windows machine required.
   entry, and the attribute certificate table. Our overlay is inside that hash, so signing
   after appending is valid and tamper-evident.
 - The cert table is appended at EOF **after** our footer, so the footer is no longer at
-  EOF. The launcher (`src/overlay.nim`) **scans backward for the magic** `UVCANON1` (and
-  tail `1NONACVU`) to relocate it — the same trick PyInstaller uses so an OS-added
+  EOF. The launcher (`src/overlay.nim`) **scans backward for the magic** `HARUPACK` (and
+  tail `KCAPURAH`) to relocate it — the same trick PyInstaller uses so an OS-added
   signature can't hide the payload cookie.
 - **No UPX** — it invalidates a prior signature and trips AV/SmartScreen heuristics.
 

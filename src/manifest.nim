@@ -1,4 +1,4 @@
-## uvcannon manifest: describes how to run the staged payload.
+## haru-pack manifest: describes how to run the staged payload.
 import std/[json, os]
 
 type

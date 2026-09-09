@@ -1,4 +1,4 @@
-# uvcannon — optional encryption & license checks
+# haru-pack — optional encryption & license checks
 
 Optional, opt-in wrapper features: **AES-256 payload encryption** + **license gating**
 by hostname, date/time, location, or any combination.
@@ -28,7 +28,7 @@ online when you need real teeth. Never advertise it as DRM-proof.
 - **Leakage caveat:** uv needs files on disk, so decrypted *code* lands in the stage dir in
   plaintext during a run. Mitigate: decrypt to a locked/ACL'd dir, wipe on exit (shrinks
   the window, doesn't close it). For **assets**, keep them encrypted in the container and
-  decrypt on-read inside the app (a shipped `uvcannon` helper) — never hits disk plaintext.
+  decrypt on-read inside the app (a shipped `haru-pack` helper) — never hits disk plaintext.
 
 ## 2. License checks (combinable)
 Each is a boolean predicate; combine with `and`/`or`/a small policy expression.
@@ -43,7 +43,7 @@ Each is a boolean predicate; combine with `and`/`or`/a small policy expression.
 Resist tampering by making the license itself unforgeable and by keying decryption on it.
 1. Vendor holds an **Ed25519 private key**; the launcher **embeds the public key**.
 2. License = JSON `{ machine_ids, not_before, not_after, geo, features }` **Ed25519-signed**.
-3. Launcher: find license (adjacent to exe via `UVCANNON_EXE_DIR`, embedded, or fetched) →
+3. Launcher: find license (adjacent to exe via `HARUPACK_EXE_DIR`, embedded, or fetched) →
    **verify signature** with the embedded pubkey → **evaluate policy** vs current
    machine/time/geo → only on pass, **derive/release the AES key** → decrypt → stage → run.
 4. Because the AES key is bound to a valid license (source `license`), **patching out the
@@ -65,8 +65,8 @@ Resist tampering by making the license itself unforgeable and by keying decrypti
 ```
 
 ## 5. Build/CLI surface (future)
-- `uvcannon build --encrypt --key-source license --license-pubkey key.pub ...`
-- `uvcannon license issue --machine <id> --expires 2027-01-01 --geo US --key vendor.key`
+- `haru-pack build --encrypt --key-source license --license-pubkey key.pub ...`
+- `haru-pack license issue --machine <id> --expires 2027-01-01 --geo US --key vendor.key`
   → emits a signed `license.lic` to drop next to the exe.
 - Keep signing keys off the build box where possible (HSM/KMS), like the code-signing cert.
 

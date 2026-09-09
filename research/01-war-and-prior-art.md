@@ -23,7 +23,7 @@ builder and has no tool at all.
 - Inspirations: Nix Archive (NAR) and XAR. Goals are speed + indexability +
   unambiguity vs tar/zip. Anti-goal: not general-purpose, not max compression.
 
-**Implication for uvcannon:** "use war's file format" is not literally possible today.
+**Implication for haru-pack:** "use war's file format" is not literally possible today.
 Adopt the *concepts* (magic footer + index + per-entry zstd + atomic unpack) in our own
 overlay container now, and keep the door open to swap in real `war` once it defines a
 binary encoding + ships a lib. Do not pin the design on it.
@@ -37,7 +37,7 @@ uses uv, and installs+caches to an OS data dir on first run (self update/remove)
 
 Because output is an ordinary native binary, **it Authenticode-signs like any exe**.
 
-### pyapp gaps uvcannon can own (differentiation)
+### pyapp gaps haru-pack can own (differentiation)
 1. **Native PEP 723 ingestion** — read inline `# /// script` metadata, auto-translate.
 2. **Truly embed** uv binary + pinned standalone Python + resolved wheels → zero runtime
    network. (pyapp by default *downloads* CPython/uv on first run unless you set

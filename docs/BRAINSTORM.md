@@ -1,4 +1,4 @@
-# uvcannon — brainstorm
+# haru-pack — brainstorm
 
 Unfiltered idea dump. Nothing here is committed scope.
 
@@ -37,7 +37,7 @@ before users do.
 - `moved-exe` — rename/move the exe, run again; assert stage still resolves.
 
 ### Harness shape (steal from BusyBody)
-- Reproducible `--seed`; each run in a throwaway dir; artifacts in `.uvcannon-fuzz/runs/<id>/`
+- Reproducible `--seed`; each run in a throwaway dir; artifacts in `.haru-pack-fuzz/runs/<id>/`
   (gitignored): `timeline.jsonl`, per-project journal, the built exe, stdout/stderr.
 - `validate` (corpus loads + manifests parse, offline/instant) · `run --minutes N` ·
   `analyze <run>` (verdict: real corner vs artifact of our test) · `ledger` (corners
@@ -49,18 +49,18 @@ before users do.
 
 ### Cheap first version
 `fuzz/hello_from_top_pypi.py`: pull the top-100 list, for each emit a PEP723 script that
-imports it, `uvcannon build` it, run it in an airgapped subdir, record pass/fail + reason.
+imports it, `haru-pack build` it, run it in an airgapped subdir, record pass/fail + reason.
 One afternoon; immediately finds the "needs post-install" and "native wheel per-platform"
 classes.
 
 ## 2. More feature ideas
-- **`uvcannon doctor <project>`** — static pre-flight: detects playwright/spacy/nltk/torch
+- **`haru-pack doctor <project>`** — static pre-flight: detects playwright/spacy/nltk/torch
   (post-install needed), native exts (per-platform bundle), reads-`__file__` smells,
   network-at-import, missing lockfile. Emits the manifest it *thinks* you need.
-- **`uvcannon init`** — infer manifest from a project (PEP723 vs pyproject, entrypoint
+- **`haru-pack init`** — infer manifest from a project (PEP723 vs pyproject, entrypoint
   from `[project.scripts]`, guess post-install from known packages).
 - **Auto run-in-place shim** — inject a `sitecustomize`/`usercustomize` that repoints
-  cwd + a `uvcannon.exe_dir()` helper so unmodified apps mostly "just work."
+  cwd + a `haru-pack.exe_dir()` helper so unmodified apps mostly "just work."
 - **Splash/progress** during first-run stage + post-install (the PyInstaller `--splash`
   lesson) — a Nim webview or a console spinner.
 - **Self-update channel** — optional: exe checks a URL for a newer payload hash, swaps the
@@ -96,7 +96,7 @@ stable. Against those:
      launcher wants to be tiny.
   3. **Maturity/churn.** Language still evolving with breaking changes; Nim is stable.
 - Where Mojo IS relevant: as a **packaged app** language. Its toolchain being uv/pip-
-  installable means a uvcannon bundle could ship a Mojo-based Python app (bundle the mojo
+  installable means a haru-pack bundle could ship a Mojo-based Python app (bundle the mojo
   runtime like any dep). Good "app we package," not "the launcher."
 - Also-rans for the launcher: **Zig** (excellent cross-compile + tiny, but less Python-ish
   syntax — strong plan-B), **Rust** (what pyapp uses; heavier build, great tooling), **C**
@@ -104,7 +104,7 @@ stable. Against those:
   hard requirement forces a change.
 
 ## 3. Naming
-Current: **uvcannon** (uv + "cast it at a target") — memorable, fine to keep.
+Current: **haru-pack** (uv + "cast it at a target") — memorable, fine to keep.
 
 UV-ray / sunlight theme (uv does the work, launcher delivers it):
 - **Photon** — one quantum of light == one single-file artifact. Clean, techy. (npm/py
@@ -118,12 +118,12 @@ UV-ray / sunlight theme (uv does the work, launcher delivers it):
 - **Lumen / Radiant / Aurora / Blacklight / Ultraviolet / Nanometer.**
 Delivery/uv-forward: **uvship, uvpack, uvcast, solarpack.**
 
-Leaning: keep **uvcannon** as the project; if you want the light theme, **Photon** or
+Leaning: keep **haru-pack** as the project; if you want the light theme, **Photon** or
 **Flare** are the strongest single words; **Prism** if you want to lean on the
 cross-compile/one-source-many-targets story.
 
 ## 4. Positioning vs pyapp
-pyapp already ships a Rust launcher. uvcannon's wedge (say it out loud in the README):
+pyapp already ships a Rust launcher. haru-pack's wedge (say it out loud in the README):
 native **PEP 723 ingestion**, **truly embedded** uv+python+wheels (zero runtime network),
 **run-in-place cwd + adjacent config** UX, **first-class cross-compile + EV-signing from
 Linux**, and the **build-fuzzer** as a correctness story pyapp doesn't have.

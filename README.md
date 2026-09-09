@@ -1,4 +1,4 @@
-# uvcannon
+# haru-pack
 
 Single-file, **EV-signable native launcher** (Nim) that carries an arbitrary Python
 project — a PEP 723 script *or* a full multi-folder project (e.g. a Flask app) — stages
