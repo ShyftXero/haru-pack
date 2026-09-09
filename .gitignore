@@ -1,0 +1,15 @@
+# nim build artifacts
+nimcache/
+*.exe
+!examples/**/*.exe
+build/
+dist/
+# staged payloads (large binaries not committed)
+payload/
+vendor/uv*
+vendor/python*
+*.zst
+*.tar.zst
+# os
+.DS_Store
+Thumbs.db
