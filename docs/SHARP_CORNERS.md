@@ -35,6 +35,26 @@ Handling options (manifest `post_install`, implemented in M0):
 Corners: the download is slow (need the splash/progress), can fail offline, and the
 browser cache must be pinned into our stage dir or it pollutes/depends-on the user's.
 
+### Bundling Playwright **firefox** for fully-offline deployments (the plan)
+Firefox is the pragmatic choice — lotek's BusyBody already found bundled **chromium fails
+to install on newer distros while firefox works**. Recipe:
+1. **Build time, per target platform** (browsers are OS-specific — this is the sharp part):
+   `PLAYWRIGHT_BROWSERS_PATH=<payload>/vendor/ms-playwright uv run playwright install firefox`
+   → lays firefox + the matching driver under the payload. Bundle that tree.
+2. **Runtime**: launcher sets `PLAYWRIGHT_BROWSERS_PATH=<stage>/vendor/ms-playwright` (into
+   our stage, never the user's cache) and `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` so it never
+   phones home. No `post_install` needed → truly offline first run.
+3. **Version lock**: the firefox build and the `playwright` python package version are
+   coupled — pin both in the lock so they match, or Playwright refuses the browser.
+4. **CROSS-PLATFORM DOWNLOAD CORNER**: `playwright install` fetches for the *host* OS. To
+   bundle *Windows* firefox from a Linux build box you must fetch the Windows build
+   explicitly (Playwright's browser CDN is per-OS; drive it with a matching
+   `PLAYWRIGHT_DOWNLOAD_HOST`/manual fetch, or run the install step on/for the target OS).
+   This is exactly the per-(OS,arch) rule from §D applied to browsers. Size: firefox ~85MB
+   → strongly consider **external-payload/sidecar mode** so the signed exe stays lean.
+5. On Windows, headed firefox needs no system deps; on Linux, headless is fine but headed
+   needs X/GTK libs — document per-target.
+
 ## C. Post-install steps — GENERAL mechanism
 Many projects need a one-time step after install, before first real run:
 `playwright install`, `python -m spacy download`, `nltk.download`, building a Cython/

@@ -74,6 +74,35 @@ classes.
   byte-identical bundles for auditability.
 - **Telemetry-free by default**, but an opt-in first-run crash reporter for authors.
 
+
+## 5b. Launcher language: Nim vs Mojo (and others)
+Question raised: use **Mojo** for the exe instead of Nim (Mojo is a Python superset,
+uv/pip-installable)?
+
+Decision: **keep Nim for the launcher.** The launcher's hard requirements are (§0 of PLAN):
+compile to a **signable Windows PE**, **cross-compile from Linux**, tiny/dependency-light,
+stable. Against those:
+- **Nim** — already proven end-to-end here: cross-compiles Linux→Windows PE, signs with
+  osslsigncode, reads its own signed self, small binary, stable stdlib. It wins on every
+  hard requirement today.
+- **Mojo** — `mojo build` does emit native binaries, and the toolchain installs via
+  pip/uv. But the blockers for THIS job:
+  1. **Windows / cross-compile.** Mojo's native Windows target + Linux→Windows
+     cross-compilation are not a solved, first-class path (historically Linux/macOS-first,
+     Windows via WSL). Our primary target is Windows + EV signing + cross-build-from-Linux
+     — that's the deciding factor. (Mojo moves fast; re-verify current status before ruling
+     it out forever.)
+  2. **Runtime weight.** Mojo/MAX binaries pull a heavier runtime than a lean Nim stub; the
+     launcher wants to be tiny.
+  3. **Maturity/churn.** Language still evolving with breaking changes; Nim is stable.
+- Where Mojo IS relevant: as a **packaged app** language. Its toolchain being uv/pip-
+  installable means a uvcannon bundle could ship a Mojo-based Python app (bundle the mojo
+  runtime like any dep). Good "app we package," not "the launcher."
+- Also-rans for the launcher: **Zig** (excellent cross-compile + tiny, but less Python-ish
+  syntax — strong plan-B), **Rust** (what pyapp uses; heavier build, great tooling), **C**
+  (what PyInstaller's bootloader is; maximal control, least ergonomic). Nim stays unless a
+  hard requirement forces a change.
+
 ## 3. Naming
 Current: **uvcannon** (uv + "cast it at a target") — memorable, fine to keep.
 
