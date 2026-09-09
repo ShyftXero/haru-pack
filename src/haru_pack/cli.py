@@ -63,7 +63,8 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           expires: str = typer.Option("", "--expires", help="license expiry YYYY-MM-DD"),
           machine: str = typer.Option("", "--machine", help="bind to this machine-id (cryptographic)"),
           user: str = typer.Option("", "--user", help="bind to this OS username (cryptographic)"),
-          geo: str = typer.Option("", "--geo", help="allowed country codes, comma-separated")):
+          geo: str = typer.Option("", "--geo", help="allowed country codes, comma-separated"),
+          python: str = typer.Option("", "--python", help="Python version to stage (e.g. 3.12); default auto/3.12")):
     """Build a single-file launcher from a project payload dir.
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
@@ -89,7 +90,7 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
     try:
         info = build_exe(project, out, target=target, tier=tier, secret=sec,
                          expires=expires, geo=[g for g in geo.split(",") if g],
-                         machine=machine, user=user, embed_secret=embed_secret)
+                         machine=machine, user=user, embed_secret=embed_secret, python=python)
     except BuildError as e:
         typer.secho(str(e), fg="red"); raise typer.Exit(2)
     tag = " 🔒encrypted" if info.get("encrypted") else ""

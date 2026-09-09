@@ -8,7 +8,7 @@ from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier
 import shutil as _sh, tempfile as _tf
 from . import tomlio
-from .bundle import bundle_uv, bundle_python, warm_cache_and_lock, run_bundle_step
+from .bundle import bundle_uv, bundle_python, warm_cache_and_lock, warm_cache_windows, run_bundle_step
 from . import crypto
 
 class BuildError(RuntimeError): ...
@@ -30,7 +30,7 @@ def compile_launcher(nim: str, target: str, workdir: Path) -> Path:
         raise BuildError("nim compile failed:\n" + (r.stderr or r.stdout)[-2000:])
     return out
 
-def assemble_payload(project_dir: Path, tier: str, target: str, workdir: Path) -> Path:
+def assemble_payload(project_dir: Path, tier: str, target: str, workdir: Path, python: str = "3.12") -> Path:
     """Copy the project, augment its manifest for the tier, and bundle binaries."""
     payload = workdir / "payload"
     shutil.copytree(project_dir, payload)
@@ -40,26 +40,34 @@ def assemble_payload(project_dir: Path, tier: str, target: str, workdir: Path) -
     if tier in ("default", "thick"):
         bundle_uv(target, vendor)
     if tier == "thick":
-        py = bundle_python(target, vendor)  # launcher rediscovers interpreter at runtime
         steps = manifest.get("bundle") or []
-        # a project (or any bundle step) needs a warmed cache so the venv builds offline
+        if steps and target != "host":
+            raise BuildError(
+                "bundle steps run target-native code and can't be produced for "
+                f"--target {target} from here. Build --thick on the target OS, run them "
+                "under wine, or fetch the artifacts by URL.")
+        py = bundle_python(target, vendor, version=python)  # launcher rediscovers at runtime
         if manifest.get("kind") == "project" or steps:
             app_dir = payload / manifest.get("app_subdir", "app")
             cache = vendor / "cache"; cache.mkdir(parents=True, exist_ok=True)
-            tmp_env = Path(_tf.mkdtemp(prefix="haru-warm-"))   # throwaway, NOT shipped
-            try:
-                warm_cache_and_lock(app_dir, py, cache, tmp_env)
-                for step in steps:
-                    run_bundle_step(step, payload, tmp_env, app_dir)
-            finally:
-                _sh.rmtree(tmp_env, ignore_errors=True)
+            if target == "host":
+                tmp_env = Path(_tf.mkdtemp(prefix="haru-warm-"))   # throwaway, NOT shipped
+                try:
+                    warm_cache_and_lock(app_dir, py, cache, tmp_env)
+                    for step in steps:
+                        run_bundle_step(step, payload, tmp_env, app_dir)
+                finally:
+                    _sh.rmtree(tmp_env, ignore_errors=True)
+            else:
+                warm_cache_windows(app_dir, cache, python)   # cross: download win wheels
             manifest["cache_dir"] = "vendor/cache"
     tomlio.dump(manifest, mf)
     return payload
 
 def build(project_dir: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
-          machine: str = "", user: str = "", embed_secret: bool = False) -> dict:
+          machine: str = "", user: str = "", embed_secret: bool = False,
+          python: str = "") -> dict:
     project_dir = Path(project_dir); out = Path(out)
     nim = find_nim()
     if not nim:
@@ -69,7 +77,7 @@ def build(project_dir: Path, out: Path, target: str = "host", tier: str = "defau
         raise BuildError("C toolchain missing for target '%s':\n%s" % (target, tc["advice"]))
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        payload_dir = assemble_payload(project_dir, tier, target, tdp / "asm")
+        payload_dir = assemble_payload(project_dir, tier, target, tdp / "asm", python or "3.12")
         payload = build_payload_zip(payload_dir)
         flags = 0
         if secret is not None:

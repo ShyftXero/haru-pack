@@ -4,8 +4,10 @@ Container (little-endian), stored as the attached payload when encrypted (footer
   magic "HPAKENC1"(8) | version u16 | flags u16 | kdf_iters u32 |
   salt[16] | nonce[12] | tag[16] |
   esecret_len u16 | esecret[..]        # embedded secret, XOR-obfuscated (weakest key source)
-  policy_len u32 | policy[..]          # JSON, authenticated as GCM AAD (tamper-evident)
-  ciphertext[..]                        # AES-256-GCM(payload.zip)
+  ciphertext[..]                        # AES-256-GCM( policy_len u32 | policy | payload.zip )
+
+The license policy is stored INSIDE the ciphertext, not in cleartext — a reverse-engineer
+sees no expiry/geo/etc. All license checks run AFTER decryption. AAD is a fixed magic.
 
 Key = PBKDF2-HMAC-SHA256(secret [+ machine-id][+ user], salt, iters, 32).
 flags: bit0 bind_machine, bit1 bind_user, bit2 embedded_secret.
@@ -69,12 +71,12 @@ def encrypt(payload: bytes, secret: bytes, *, expires: str = "", geo=None,
                          "machine": machine, "user": user},
                         separators=(",", ":"), sort_keys=True).encode()
     key = derive_key(secret, salt, iters, machine or None, user or None)
-    ct_tag = AESGCM(key).encrypt(nonce, payload, policy)   # ciphertext || 16B tag
+    plaintext = struct.pack("<I", len(policy)) + policy + payload   # policy hidden inside
+    ct_tag = AESGCM(key).encrypt(nonce, plaintext, MAGIC)           # AAD = fixed magic
     ct, tag = ct_tag[:-16], ct_tag[-16:]
     esecret = _xor(secret, OBFUS) if embed_secret else b""
     out = bytearray()
     out += MAGIC + struct.pack("<HHI", 1, flags, iters) + salt + nonce + tag
     out += struct.pack("<H", len(esecret)) + esecret
-    out += struct.pack("<I", len(policy)) + policy
     out += ct
     return bytes(out)

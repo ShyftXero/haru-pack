@@ -24,14 +24,13 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 - **thin / default**: fully supported from Linux. `haru-pack` fetches the **Windows** uv
   release when `--target windows` (uv binaries are per-OS), and the launcher links WinHTTP
   for the runtime fetch — no openssl.
-- **thick + `--target windows` from Linux**: **partial (roadmap).** Deps and the Python
-  interpreter *are* cross-downloadable — `uv pip install --python-platform windows
-  --python-version 3.12 --only-binary :all: --target <dir>` pulls Windows wheels (incl.
-  native `.pyd`, verified), and python-build-standalone Windows is a plain download; ship
-  them and let uv build the venv at first run on Windows. The blocker is bundle/post_install
-  steps that must **run target-native code** (e.g. `playwright install firefox`): from Linux
-  those need **wine** or by-URL fetching. So today build `--thick --target windows` **on
-  Windows**; a wheel-only thick-cross is feasible and planned.
+- **thick + `--target windows` from Linux**: **supported for wheel-only projects** (verified
+  under wine, offline). haru-pack bundles a Windows standalone Python (python-build-standalone,
+  via uv's catalog), Windows uv, and Windows wheels (`uv pip install --python-platform windows
+  --only-binary :all:`); the venv builds at first run on Windows from the bundled cache.
+  Remaining limit: bundle/`post_install` steps that must **execute** target-native code
+  (`playwright install firefox`, C/Rust builds) — build those on the target OS, under wine,
+  or fetch by URL.
 
 ## Manifest fields set by the tier
 `tier`, `offline`, `fetch_uv`, `uv_version` (thin). The interpreter for thick is

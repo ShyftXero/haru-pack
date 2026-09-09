@@ -60,21 +60,16 @@ haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux 
 |---|---|---|---|---|
 | `--thin` | nothing | uv + Python + deps | no | yes |
 | default | uv | Python + deps | no | yes |
-| `--thick` | uv + Python (+deps/browsers) | nothing | **yes** | **no** (build on target OS) |
+| `--thick` | uv + Python (+deps/browsers) | nothing | **yes** | wheel-only ✓ / exec-steps: build on target |
 
-**Thick cross-compile — partial (roadmap).** The launcher cross-compiles fine. thick bakes
-in *target-OS* artifacts, and most are cross-downloadable from Linux:
-- **Deps**: `uv pip install --python-platform windows --python-version 3.12 --only-binary
-  :all: --target <dir>` pulls Windows wheels (incl. native `*.pyd`) — verified.
-- **Python**: the Windows python-build-standalone is a plain downloadable archive.
-- **Venv**: don't build it on Linux — ship the interpreter + wheels/cache and let uv
-  assemble at first run on Windows (offline).
-
-The genuine blocker is bundle/`post_install` steps that must **execute target-native code**
-(`playwright install firefox`, C/Rust builds): from Linux those need **wine** (run the
-Windows `python.exe`/`playwright.exe`) or fetching the binaries by URL. So today: build
-`--thick --target windows` **on Windows**; a wheel-only thick-cross (uv `--python-platform`
-+ bundled Windows Python + first-run venv) is feasible and on the roadmap.
+**Thick cross-compile (Linux → Windows) — supported for wheel-only projects.**
+`haru-pack build ./proj --target windows --thick` bundles a Windows standalone Python
+(python-build-standalone), Windows uv, and Windows wheels (`uv pip install
+--python-platform windows --only-binary :all:`), and the venv builds at first run on
+Windows from the bundled cache. Verified end-to-end under wine (offline). The remaining
+limit: bundle/`post_install` steps that must **execute target-native code**
+(`playwright install firefox`, C/Rust source builds) can't be produced cross — build those
+on the target OS (or run them under wine / fetch the binaries by URL).
 
 ## manifest.toml (projects)
 Minimal:

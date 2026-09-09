@@ -17,7 +17,7 @@ type Box = object
   flags: uint16
   iters: int
   salt, nonce, tag: seq[byte]
-  esecret, policy, ciphertext: seq[byte]
+  esecret, ciphertext: seq[byte]
 
 proc rdU16(b: seq[byte], o: int): uint16 = uint16(b[o]) or (uint16(b[o+1]) shl 8)
 proc rdU32(b: seq[byte], o: int): int =
@@ -37,8 +37,6 @@ proc parseBox(raw: string): Box =
   let eslen = int(rdU16(b, 60))
   var o = 62
   result.esecret = b[o ..< o+eslen]; o += eslen
-  let plen = rdU32(b, o); o += 4
-  result.policy = b[o ..< o+plen]; o += plen
   result.ciphertext = b[o ..< b.len]
 
 proc machineId(): string =
@@ -74,9 +72,10 @@ proc resolveSecret(box: Box): string =
     stderr.write "License secret: "
     result = stdin.readLine()
 
-proc checkPolicy(box: Box) =
-  ## date + geo (machine/user are cryptographically bound via the key)
-  let j = parseJson(cast[string](box.policy))
+proc checkPolicy(policy: seq[byte]) =
+  ## date + geo (machine/user are cryptographically bound via the key). Runs POST-decrypt
+  ## so the policy is never visible in cleartext to a reverse-engineer.
+  let j = parseJson(cast[string](policy))
   let expires = j{"expires"}.getStr("")
   if expires.len > 0:
     let exp = parse(expires, "yyyy-MM-dd", utc())
@@ -92,9 +91,8 @@ proc checkPolicy(box: Box) =
       quit("haru-pack: not licensed for this location (allowed: " & $geo & ")", 3)
 
 proc openContainer*(raw: string): string =
-  ## verify policy, derive key, GCM-decrypt -> returns the plaintext payload zip.
+  ## derive key, GCM-decrypt, THEN parse+check the (hidden) policy -> returns payload zip.
   let box = parseBox(raw)
-  checkPolicy(box)
   let secret = resolveSecret(box)
   if secret.len == 0:
     quit("haru-pack: this build is encrypted — set HARUPACK_SECRET (or run interactively)", 4)
@@ -105,8 +103,10 @@ proc openContainer*(raw: string): string =
   if (box.flags and BindUser) != 0'u16:
     pw.add byte(0x1f); (for c in currentUser(): pw.add byte(c))
   let key = pbkdf2(sha256, pw, box.salt, box.iters, 32)
+  var aad = newSeq[byte](Magic.len)
+  for i in 0 ..< Magic.len: aad[i] = byte(Magic[i])
   var gcm: GCM[aes256]
-  gcm.init(key, box.nonce, box.policy)
+  gcm.init(key, box.nonce, aad)
   var pt = newSeq[byte](box.ciphertext.len)
   gcm.decrypt(box.ciphertext, pt)
   let tag = gcm.getTag()
@@ -114,5 +114,8 @@ proc openContainer*(raw: string): string =
   for i in 0 ..< 16:
     if tag[i] != box.tag[i]:
       quit("haru-pack: wrong secret / not authorized for this machine / tampered payload", 5)
-  result = newString(pt.len)
-  for i in 0 ..< pt.len: result[i] = char(pt[i])
+  # plaintext = policy_len(4) | policy | zip  — checks happen AFTER decrypt
+  let plen = rdU32(pt, 0)
+  checkPolicy(pt[4 ..< 4+plen])
+  result = newString(pt.len - 4 - plen)
+  for i in 0 ..< result.len: result[i] = char(pt[4+plen+i])
