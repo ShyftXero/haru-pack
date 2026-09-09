@@ -13,3 +13,6 @@ vendor/python*
 # os
 .DS_Store
 Thumbs.db
+
+# build-fuzzer run artifacts
+.uvcannon-fuzz/
