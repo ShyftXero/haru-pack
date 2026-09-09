@@ -96,8 +96,14 @@ when isMainModule:
     a.add "--script"
     a.add appDir / m.entrypoint[0]
   of akProject:
+    # make the project importable regardless of run-in-place cwd, and resolve any
+    # script token (foo.py) to an absolute path under the staged app dir.
+    let prev = getEnv("PYTHONPATH")
+    putEnv("PYTHONPATH", if prev.len > 0: appDir & (when defined(windows): ";" else: ":") & prev else: appDir)
     a.add @["--project", appDir]
-    a.add m.entrypoint              # command argv (e.g. flask ... run)
+    for tok in m.entrypoint:
+      if tok.endsWith(".py") and not isAbsolute(tok): a.add appDir / tok
+      else: a.add tok
   a.add userArgs                    # verbatim passthrough, like python
 
   # 6. cwd policy: "launch" (native, default) or "exe" (always the exe's folder,
