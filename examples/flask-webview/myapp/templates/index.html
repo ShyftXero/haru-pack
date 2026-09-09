@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><title>My App</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
+<body><h1>Packaged Flask app 🎉</h1>
+<p>Served from a single signed exe via haru-pack.</p>
+<pre>cwd     = {{ cwd }}
+exe_dir = {{ exe_dir }}
+stage   = {{ stage }}</pre>
+<button onclick="fetch('/api/ping').then(r=>r.json()).then(j=>document.getElementById('o').textContent=JSON.stringify(j))">ping</button>
+<pre id="o"></pre></body></html>

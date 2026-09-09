@@ -1,0 +1,2 @@
+# optional — hello.py is discovered (PEP723). Declared here just to show the format.
+cwd_policy = "launch"

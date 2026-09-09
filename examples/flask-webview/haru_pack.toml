@@ -1,0 +1,3 @@
+# pyproject.toml supplies deps + requires-python; entrypoint discovered as python -m myapp
+cwd_policy = "exe"
+entrypoint = ["python", "-m", "myapp"]

@@ -1,0 +1,11 @@
+cwd_policy = "exe"
+entrypoint = ["python", "-m", "shot"]
+
+# build-time bundle: bake Firefox into the exe (thick) — offline at runtime
+[[bundle]]
+run = ["playwright", "install", "firefox"]
+into = "vendor/ms-playwright"
+
+[bundle.env]
+PLAYWRIGHT_BROWSERS_PATH = "{into}"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"

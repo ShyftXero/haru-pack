@@ -16,7 +16,8 @@ haru-pack bootstrap              # installs Nim (+zippy, puppy, parsetoml, nimcr
 
 ## Quickstart
 ```sh
-# a PEP 723 script or a project dir with a manifest.toml (see below)
+# point at a PEP 723 script or a project dir (with pyproject.toml). haru-pack auto-discovers
+# the kind, Python version (requires-python / .python-version / PEP 723), and entrypoint.
 haru-pack build ./myproject                 # default tier: uv bundled, deps fetched 1st run
 ./myproject                                 # run it — behaves like a native binary
 
@@ -40,6 +41,7 @@ haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux 
 |---|---|---|
 | `-o, --out PATH` | `<name>[.exe]` | output path |
 | `--target host\|windows` | `host` | build target (Windows = cross-compile) |
+| `--python X.Y` | auto | Python version to stage (else discovered from the project) |
 | `--tier thin\|default\|thick` | `default` | bundling tier (below) |
 | `--thin` | | shortcut for `--tier thin` |
 | `--thick` / `--chonky` | | shortcut for `--tier thick` |
@@ -71,17 +73,20 @@ limit: bundle/`post_install` steps that must **execute target-native code**
 (`playwright install firefox`, C/Rust source builds) can't be produced cross — build those
 on the target OS (or run them under wine / fetch the binaries by URL).
 
-## manifest.toml (projects)
-Minimal:
+## haru_pack.toml (optional declarations)
+haru-pack discovers most things from your project. Add a `haru_pack.toml` at the project
+root only to override or declare extras (full reference: [docs/CONFIG.md](docs/CONFIG.md)):
 ```toml
-name = "myapp"
-kind = "project"                 # "script" | "project"
-app_subdir = "app"
-entrypoint = ["python", "-m", "myapp"]   # string (script) or argv (command)
 cwd_policy = "exe"               # "launch" (native cwd, default) | "exe" (always exe-adjacent)
+entrypoint = ["python", "-m", "myapp"]   # override the discovered entrypoint
+python = "3.12"                  # override the staged Python version
+
+[encryption]                     # same fields as the --encrypt flags (secret via CLI/env only)
+enabled = true
+expires = "2027-01-01"
+geo = ["US", "CA"]
 ```
-Declare build-time bundling and OS-specific run-once hooks (full reference:
-[docs/MANIFEST.md](docs/MANIFEST.md)):
+Build-time bundling and OS-specific run-once hooks:
 ```toml
 [[bundle]]                       # run at build, bake output into the exe (thick)
 run = ["playwright", "install", "firefox"]
@@ -108,7 +113,7 @@ to make relative paths always resolve next to the shipped exe. Never use `__file
 user data — the code lives in the stage dir.
 
 ## Docs
-- [docs/MANIFEST.md](docs/MANIFEST.md) — full manifest reference
+- [docs/CONFIG.md](docs/CONFIG.md) — haru_pack.toml reference + discovery
 - [docs/TIERS.md](docs/TIERS.md) — bundling tiers + the Playwright example
 - [docs/SIGNING.md](docs/SIGNING.md) — Windows EV code signing (cross-platform)
 - [docs/ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) — `--encrypt` + license checks
