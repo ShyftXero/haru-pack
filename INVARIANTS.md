@@ -103,6 +103,38 @@ rather than 0 when it collects nothing. The success marker is printed only on rc
 Territory: src/haru_pack/build.py, src/haru_pack/bundle.py, src/haru_pack/discovery.py,
 tests/test_tiers_offline.py, tests/test_examiner_fixtures.py, tools/flex-run.py
 
+### INV-TIER-03
+Status: active
+Statement: A payload built for a foreign target contains only objects for that target. No
+host ELF object reaches a Windows payload; no x86-64 object reaches an aarch64 payload.
+Actors: whoever runs `--target linux-aarch64` and deploys the result to a Raspberry Pi, and
+whoever runs `--target windows` and emails the exe to a customer.
+Assets: the meaning of `--target`. A cross-built binary that carries host objects fails on
+first run on the machine it was explicitly built for — after the build reported success, and
+after the artifact has been signed and shipped. The operator has no reason to suspect it and
+no way to see it without unpacking the binary.
+Red-path: A payload whose members include `\x7fELF` objects under `--target windows`, or ELF
+objects with `e_machine` 0x3E (x86-64) under `--target linux-aarch64`. Both are checked
+statically by busybody's `crosseyed` cases, which read the payload rather than running it —
+a Windows payload cannot be executed on Linux, but it can be inspected, and that is what
+makes the check possible without a second machine. `tests/test_compose.py` pins the
+`e_machine` decoding, because getting 0x3E and 0xB7 the wrong way round would make the
+aarch64 check pass on an x86 payload.
+Source: 2026-09-10, from the persona brainstorm. Cross-target correctness had four tests in
+`tests/test_targets.py` covering target PARSING and none covering payload CONTENTS, so
+nothing anywhere verified that a foreign payload held foreign objects. uv's
+`--python-platform` resolves wheels for the target without executing them, which is the
+right mechanism; the risk is any path that stages with the host interpreter instead.
+Note: The Raspberry Pi is a stated deployment target for this project, which is why the
+aarch64 case is not hypothetical. ARM Linux is a target, not a build host.
+Note: `tourist` covers the adjacent question — what happens when a foreign artifact IS
+executed here — and its honest scope is "fails cleanly". A real foreign run needs a real
+foreign machine; `openclaw` is the ARM one on hand.
+Territory: src/haru_pack/targets.py, src/haru_pack/bundle.py, tools/busybody.py,
+tests/test_compose.py, tests/test_targets.py
+
+---
+
 ### INV-TIER-02
 Status: active
 Statement: A build that combines `post_install` steps with `--thick` says so loudly, because
@@ -380,6 +412,59 @@ Note: Wedge cases are `per_fixture=False`. They build their own artifact and say
 about the packed package, so running them once per fixture would repeat one answer 25 times
 and inflate the census that INV-CHAOS-04 exists to keep honest.
 Territory: src/haru_pack/build.py, tools/busybody.py, tests/test_config_wedges.py
+
+---
+
+### INV-CHAOS-08
+Status: active
+Statement: Under any stack of hostile conditions, haru-pack either works or refuses
+intelligibly. It never produces a language-level traceback, never hangs, and never exits
+zero without running the application. Composed runs are selected and realised from a
+recorded seed, so any finding can be reproduced by one printed command.
+Actors: whoever hits the combination nobody reasoned about. That is every user eventually,
+because a stack of individually-ordinary conditions is what a real machine is.
+Assets: the difference between chaos engineering and integration testing. A persona that
+runs alone asks a closed question — "does staging cope with umask 077?" has the same answer
+forever. The open question is which COMBINATION of individually-survivable conditions is not
+survivable, and running them one at a time cannot answer it.
+Red-path: The composed pass asserts only the FATAL floor, so removing a guard anywhere in
+staging or the launcher shows up here as a CRASHED stack rather than as a specific failed
+case. Concretely: delete the payload-digest check and the stacks containing
+`revenant_stage_from_an_older_layout` start reporting CRASHED instead of REFUSED. Remove
+`realize()`'s determinism (seed the draw from time instead of the triple) and
+`--compose-only` stops reproducing a finding, which is caught by a claiming test.
+Source: 2026-09-10. Built after the observation that the twelve existing personas each ran
+in isolation, which makes them integration tests wearing costumes. 42 traits across 11
+personas, combining to 845 conflict-free pairs and over 11,000 triples.
+Note: The pass condition is deliberately weak and must stay weak. `RAN`, `REFUSED` and
+`APP-CRASHED` are all acceptable for a stack, because nobody has reasoned about combination
+7,431. Asserting anything stronger — "haru-pack always works under any three of these" —
+would be an overclaim of exactly the kind this file exists to prevent. The floor is the
+claim: it refuses intelligibly, or it works.
+Note: FALLIBILITY. Each trait has a probability of acting, so a persona is a person rather
+than a fixture. If greenhorn always fumbles, then "greenhorn fumbled AND auditor left a .env
+behind" is the only thing ever tested, and "greenhorn got it right, auditor still left the
+.env" — a different code path — never runs. A run's identity is the set that FIRED, not the
+set that was selected, and both are journalled.
+Note: Fallibility is forced OFF for two passes, and only two. The k=1 pass IS the attribution
+baseline — "does trait A fail alone?" cannot be answered by a run where A did not fire, and a
+baseline with holes makes every composed finding unattributable. `--compose-only` is forced
+because someone asked for a specific stack, and handing them a control run answers a
+different question than the one they typed.
+Note: A run where nothing fired is a control, and it is kept rather than resampled. A control
+arriving naturally through the same machinery is worth more than one bolted on beside it: if
+the baseline is broken, that is where it shows.
+Note: `realize()` draws from sha256 of (seed, run_index, trait_name), not from a sequential
+RNG and not from `random.Random(triple)` — the latter raises on Python 3.14, and even where
+it works the seed-to-stream mapping is an implementation detail. A digest is stable across
+Python versions and machines, which is the property a printed reproduction line actually
+needs. Per-trait rather than sequential so that adding a trait to the catalogue does not
+reshuffle every other trait's firing decisions in every other run.
+Note: Conflicts are declared for pairs where one trait CANCELS another, not for pairs that
+break together. A stack whose members cancel tests less than either member alone; a stack
+that breaks together is the finding.
+Territory: tools/busybody_compose.py, tools/busybody_traits.py, tools/busybody.py,
+tests/test_compose.py
 
 ---
 

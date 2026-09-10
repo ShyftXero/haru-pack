@@ -106,6 +106,153 @@ They are registered `per_fixture=False`. They build their own artifact and say n
 the packed package, so running them once per fixture would repeat one answer 25 times and
 inflate exactly the census INV-CHAOS-04 exists to keep honest.
 
+## Composition — why the personas stack
+
+A persona that runs alone asks a closed question. *Does staging cope with umask 077?* has the
+same answer forever, and answering it is integration testing with a costume on. The open
+question is the other one:
+
+> **Which combination of individually-survivable conditions is not survivable?**
+
+A read-only cwd is fine. No `HOME` is fine. `CI=true` with no TTY is fine. One of the ways of
+stacking three of those is where the traceback lives, and no amount of running them
+separately will find it. That is the difference between this and a test suite.
+
+So hostility is expressed as **traits** — small, orthogonal, declared mutations — and the
+runner combines them:
+
+```sh
+python tools/busybody.py --list-traits              # the catalogue
+python tools/busybody.py --compose 1                # every trait alone: the baseline
+python tools/busybody.py --compose 2                # pairs
+python tools/busybody.py --compose 3 --compose-runs 300
+python tools/busybody.py --compose-only greenhorn_output_over_the_input,foreman_no_home
+```
+
+42 traits across 11 personas. 845 conflict-free pairs, over 11,000 triples.
+
+### The pass condition is deliberately weak
+
+| outcome | verdict |
+|---|---|
+| `RAN` | fine |
+| `REFUSED` | fine — a guard fired and said so |
+| `APP-CRASHED` | fine — the app declined the box these traits built for it |
+| `CRASHED` | **never** — a language-level traceback reached the user |
+| `HUNG` | **never** |
+| `SILENT` | **never** — exit 0 and the app never ran |
+
+That is the existing `FATAL` set, which is the point: composition needs no new vocabulary,
+only a weaker expectation. Nobody has reasoned about combination 7,431 of 11,000, so
+asserting *"haru-pack works under any three of these"* would be an overclaim of exactly the
+kind `INVARIANTS.md` exists to prevent. **The floor is the claim: it works, or it refuses
+intelligibly.**
+
+### Fallibility — the persona is a person, not a fixture
+
+A trait has a *probability* of acting. Some days the new developer reads the flag correctly.
+
+This matters more than it sounds. If `greenhorn` always fumbles, then *"greenhorn fumbled
+AND auditor left a `.env` behind"* is the only thing ever tested — and *"greenhorn got it
+right, auditor still left the `.env`"* is a **different code path** that never runs at all.
+
+```
+run 0   auditor_plants_credentials+foreman_ci_true          (greenhorn got it right today)
+run 1   foreman_ci_true                                     (nobody misbehaved but CI)
+run 3   greenhorn_output_over_the_input+auditor+foreman_ci   (everything at once)
+```
+
+`fires` is set below 1.0 only where real-world presence is genuinely intermittent — a
+developer's mistake, a stale cache that may or may not be there. A CI runner's missing TTY is
+not a coin flip, so `foreman`'s traits always fire.
+
+**A run's identity is the set that FIRED**, not the set that was selected. Both are
+journalled. A run where nothing fired is a *control*, and it is kept rather than resampled —
+a control arriving through the same machinery is worth more than one bolted on beside it,
+because if the baseline is broken that is where it shows.
+
+Fallibility is forced **off** for exactly two passes: `--compose 1`, which *is* the
+attribution baseline (a baseline with holes makes every composed finding unattributable), and
+`--compose-only`, where someone asked for a specific stack and a control run would answer a
+different question than the one they typed.
+
+### Attribution, and why the baseline comes first
+
+A composed failure is only interesting if the parts are individually fine. `A+B` failing while
+`A` and `B` each pass alone is an **interaction** — the finding worth having. `A+B` failing
+because `A` was already broken is just `A`. Running `--compose 1` first is what makes that
+distinction free rather than another guess.
+
+### Determinism
+
+Selection and firing both come from a recorded seed, and every finding prints the command that
+reproduces it:
+
+```
+[critical] CRASHED  greenhorn_output_over_the_input+revenant_manifest_from_the_future
+    Reproduce with: python tools/busybody.py --compose-only greenhorn_output_over_the_input,revenant_manifest_from_the_future --compose-seed 1757505639
+```
+
+Firing is drawn from `sha256(seed:run_index:trait_name)` rather than a sequential RNG.
+Per-trait, so adding a trait to the catalogue does not reshuffle every other trait's decisions
+in every other run — a recorded seed has to keep meaning what it meant when the finding was
+filed. And a digest rather than `random.Random(triple)`, which raises on Python 3.14 and whose
+seed-to-stream mapping is an implementation detail either way.
+
+### Conflicts are cancellations, not breakages
+
+A declared conflict means one trait **cancels** the other — a read-only cache and an absent
+`HOME` cannot both be the thing under test, and a stack whose members cancel tests *less* than
+either member alone while looking like coverage. Pairs that **break** together are not
+conflicts. Those are the findings.
+
+## The eleven personas
+
+| persona | attacks | phase |
+|---|---|---|
+| `greenhorn` | wrong invocation — bad paths, bad flags, output in silly places | build |
+| `foreman` | the environment CI actually provides | build + run |
+| `crosseyed` | a foreign `--target`; the payload must not carry host objects | build |
+| `babel` | filenames legal here and illegal, colliding or unencodable there | build |
+| `understudy` | the packaged application misbehaving | build |
+| `revenant` | an on-disk stage left by an older, different haru-pack | run |
+| `quotamaster` | target storage hostility — noexec, full, read-only, cgroup | run |
+| `packrat` | payload extremes — enormous files, fifos, absurd file counts | build |
+| `tourist` | the artifact on a platform that is not its own | run |
+| `auditor` | credential-shaped files where the payload builder will see them | build |
+| `archivist` | a build that must be byte-reproducible | build |
+
+Three of them also own **explicit cases**, because their value is a property of an artifact
+rather than a condition to survive — *"these two builds are identical"* and *"no ELF object in
+a Windows payload"* are things to check, not things to endure:
+
+- **`archivist`** builds the same input twice and compares payload bytes, naming the first
+  differing member and why (`date_time`, `external_attr`, or content).
+- **`auditor`** plants every credential shape the ignore list claims to cover and then **greps
+  the finished binary** for each planted value. Stronger than scanning zip members, which
+  cannot see a leak via the manifest, a Nim literal, or a warmed uv cache.
+- **`crosseyed`** reads the payload of a foreign-target build and checks ELF `e_machine` and
+  wheel tags. A Windows payload cannot be *run* here, but it can be *read* — which is what
+  makes the check possible without a second machine.
+
+### quotamaster needs docker, and says so
+
+Some target hostility cannot be faked in-process. A **noexec mount** is the clearest case:
+staging writes an interpreter and then execs it, so a cache on a noexec filesystem fails at
+`exec` with `EACCES`. `/tmp` is noexec on any hardened host and CIS benchmarks recommend it —
+and `mount(2)` needs privileges this harness should never ask for.
+
+So those four cases run the artifact inside a container where docker chooses the mount options:
+`--tmpfs /cache:noexec`, a 24 MB cache filesystem, `--read-only` rootfs, and a 512 MB cgroup
+cap. The image is a stock glibc base (`debian:12-slim`), which keeps the case honest about what
+the binary actually requires of a host. A missing docker or image is reported as a **skip**,
+not a pass.
+
+The cgroup case is worth its own note: a cgroup limit kills on the OOM path rather than failing
+an allocation, so the process takes `SIGKILL` with no traceback and no message. That is a
+genuinely different failure from the `RLIMIT_AS` case, and `rc 137` with empty output must not
+be classified as a silent success.
+
 ## Where the ledger lives
 
 ```
