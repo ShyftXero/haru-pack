@@ -6,8 +6,16 @@
   PEP 723 script.
 - **Python version** — `requires-python` (pyproject or PEP 723 block) → `.python-version` →
   else `3.12`. Override with `--python X.Y` or `haru_pack.toml` `python`.
-- **entrypoint** — `[project.scripts]` first entry, else `python -m <name>` for a project;
-  the script filename for a script.
+- **entrypoint** — the single `[project.scripts]` entry (two or more and it refuses, naming
+  them); else `python -m <name>` **if `<name>/__main__.py` exists**; else the script
+  filename for a script. An importable-but-not-executable package is refused rather than
+  turned into a `python -m` that fails on the target.
+
+  A `module:callable` entrypoint is also checked: if that module is in the project tree and
+  does not define the attribute, the build refuses. Note that `app:main` means "import
+  `main` from module `app`" — it is **not** the `if __name__ == "__main__":` block, which
+  cannot be imported and called. If your logic lives in that guard, either move it into a
+  function or put it in `<pkg>/__main__.py` and let discovery emit `python -m <pkg>`.
 - **name** — `[project].name` or the script stem.
 
 ## `haru-pack init` — scaffold it
@@ -19,8 +27,38 @@ haru-pack init ./myproject     # writes a commented haru_pack.toml, pre-filled
 installed packages, so it can suggest bundle/post_install steps (e.g. a Playwright browser)
 even when they aren't in `pyproject.toml`. Add `--force` to overwrite.
 
+## Where directives live
+Two places, and a project may use either or both:
+
+```
+discovery  <  [tool.haru-pack] in pyproject.toml  <  haru_pack.toml  <  CLI flags
+```
+
+- **`[tool.haru-pack]` in `pyproject.toml`** — for a project that is already a package. It
+  already declares everything else about itself; asking for a second file to say "this is
+  how I am bundled" is friction for no gain. Same keys as below, one table deeper.
+- **`haru_pack.toml`** — the only option for a tree with *no* pyproject (a bare script, a
+  folder of `.py` files), the local override for one that has it, and what `haru-pack init`
+  writes. Wins where both speak.
+
+The merge is per top-level key, not deep: a `[[bundle]]` list in `haru_pack.toml` **replaces**
+the one in `pyproject.toml` rather than appending to it, so a directive can be removed and
+not just added to.
+
+`[tool.haru_pack]` (underscore) is **refused, not ignored** — a config table read by nobody
+is worse than a missing one, because you believe it took effect. `INV-BUILD-07`.
+
+PEP 723 allows `[tool]` tables inside a script's inline metadata block; that is not read yet.
+
+```toml
+# in pyproject.toml
+[tool.haru-pack]
+entrypoint = "myapp"
+cwd_policy = "exe"
+```
+
 ## haru_pack.toml (optional, at the project root)
-Declare overrides + extras. Precedence: discovery < `haru_pack.toml` < CLI flags.
+Declare overrides + extras. Precedence as above.
 ```toml
 name = "myapp"                   # usually discovered
 kind = "project"                 # usually discovered

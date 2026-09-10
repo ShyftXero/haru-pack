@@ -9,7 +9,7 @@ from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier, bundles_uv
 from .sources import Sources
 from .targets import Target
-from .entrypoints import resolve_entrypoint
+from .entrypoints import resolve_entrypoint, verify_object_ref, EntryPointError
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
                      warm_cache_for_script, install_dev_tools, compress_uv)
@@ -46,6 +46,44 @@ def compile_launcher(nim: str, target, workdir: Path) -> Path:
         raise BuildError("nim compile failed:\n" + (r.stderr or r.stdout)[-2000:])
     return out
 
+def _declarations(decl_dir: Path) -> dict:
+    """Merge the project's build directives from both places it may declare them.
+
+    Precedence, lowest first — the same shape `discovery`'s docstring already described:
+
+        discovery  <  [tool.haru-pack] in pyproject.toml  <  haru_pack.toml  <  CLI flags
+
+    `[tool.haru-pack]` exists because a project that is already a package has one obvious
+    home for its own build configuration, and asking for a second file to say "this is how
+    I am bundled" is friction for no gain. `haru_pack.toml` stays, wins where both speak,
+    and remains what `haru-pack init` writes — it is the sidecar for a tree that has no
+    pyproject.toml at all (a bare script, a folder of `.py` files), and the local override
+    for one that does.
+
+    The merge is per top-level key, not deep: a `[[bundle]]` list in `haru_pack.toml`
+    REPLACES the one in pyproject.toml rather than appending to it. Concatenating would
+    mean an operator could not remove an inherited step, only add to it, and "why is this
+    build still running a step I deleted" is a bad afternoon.
+    """
+    merged: dict = {}
+    pp = decl_dir / "pyproject.toml"
+    if pp.exists():
+        tool = (tomlio.load(pp).get("tool") or {})
+        if "haru-pack" not in tool and "haru_pack" in tool:
+            # Refuse rather than silently ignore. A config table that is read by nobody is
+            # worse than a missing one: the operator believes it took effect.
+            raise BuildError(
+                f"{pp} has a [tool.haru_pack] table; haru-pack reads [tool.haru-pack] "
+                f"(hyphen, matching the distribution name). Rename the table — it is "
+                f"being ignored, and silently honouring both spellings would mean two "
+                f"places to look when a directive does not apply.")
+        merged.update(tool.get("haru-pack") or {})
+    side = decl_dir / "haru_pack.toml"
+    if side.exists():
+        merged.update(tomlio.load(side))
+    return merged
+
+
 def _resolve(project: Path, tier: str, python_cli: str,
              expires, geo, machine, user, embed_secret, encrypt: bool = False,
              entry_point: str = ""):
@@ -56,10 +94,7 @@ def _resolve(project: Path, tier: str, python_cli: str,
     # `entrypoint` in haru_pack.toml was rejected with advice telling the operator to set
     # `entrypoint` in haru_pack.toml.
     decl_dir = project if project.is_dir() else project.parent
-    decl = {}
-    p = decl_dir / "haru_pack.toml"
-    if p.exists():
-        decl = tomlio.load(p)
+    decl = _declarations(decl_dir)
     explicit_ep = entry_point or decl.get("entrypoint")
     try:
         disc = discovery.discover(project)
@@ -74,6 +109,15 @@ def _resolve(project: Path, tier: str, python_cli: str,
     # console-script name, or a `module:callable` object reference in the same spelling
     # [project.scripts] uses — resolved to argv here so the launcher never parses it.
     ep = entry_point or decl.get("entrypoint") or disc["entrypoint"]
+    # A `module:callable` becomes a `python -c "from module import attr"` argv and nothing
+    # used to check that the import resolves, so a typo built cleanly, exited 0, and failed
+    # on the customer's machine at first run (INV-BUILD-04). Checked statically — parsing
+    # the module rather than importing it, so nothing of the project executes on the build
+    # host and the check works for cross-compiled targets too. Silent unless it is certain.
+    if isinstance(ep, str):
+        problem = verify_object_ref(ep, decl_dir)
+        if problem:
+            raise EntryPointError(problem)
     ep = resolve_entrypoint(ep, name=decl.get("name", disc["name"]),
                             kind=decl.get("kind", disc["kind"]))
     manifest = {

@@ -11,9 +11,12 @@ and knows nothing about entry-point syntax — one less place for the two sides 
 """
 from __future__ import annotations
 
+import ast
 import re
+from pathlib import Path
 
-__all__ = ["EntryPointError", "is_object_ref", "argv_for_object_ref", "resolve_entrypoint"]
+__all__ = ["EntryPointError", "is_object_ref", "argv_for_object_ref", "resolve_entrypoint",
+           "verify_object_ref"]
 
 # `module.path:callable` — the packaging spec's object reference. The attribute half may be
 # dotted (`pkg.mod:Cls.method`); neither half may be empty.
@@ -54,6 +57,131 @@ def argv_for_object_ref(spec: str, prog: str) -> list:
             f"from {module} import {root} as _o;"
             f"raise SystemExit({call}())")
     return ["python", "-c", code]
+
+
+def _module_file(module: str, project: Path):
+    """The file a dotted module name would live in, under a flat or `src/` layout.
+
+    Returns None when nothing matches — which is a normal answer, not a failure: the module
+    may legitimately come from a dependency rather than from the project tree.
+    """
+    rel = module.replace(".", "/")
+    for root in (project, project / "src"):
+        for cand in (root / f"{rel}.py", root / rel / "__init__.py"):
+            if cand.is_file():
+                return cand
+    return None
+
+
+def _defines(tree: ast.Module, wanted: str) -> bool:
+    """Does this module bind `wanted` at top level, by any of the usual means?
+
+    Import aliases count: a package whose `__init__.py` does `from .impl import main` really
+    does provide `main`, and refusing that would be worse than not checking at all.
+    """
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == wanted:
+                return True
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for al in node.names:
+                if al.name == "*":
+                    return True          # `import *` — cannot know; assume it provides it
+                if (al.asname or al.name.split(".")[0]) == wanted:
+                    return True
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == wanted:
+                    return True
+                if isinstance(t, (ast.Tuple, ast.List)):
+                    for e in t.elts:
+                        if isinstance(e, ast.Name) and e.id == wanted:
+                            return True
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == wanted:
+                return True
+        elif isinstance(node, ast.Try):
+            # `try: from fast import main / except ImportError: from slow import main`
+            for sub in [*node.body, *node.orelse, *node.finalbody,
+                        *[h for hh in node.handlers for h in hh.body]]:
+                if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    for al in sub.names:
+                        if al.name == "*" or (al.asname or al.name.split(".")[0]) == wanted:
+                            return True
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                        and sub.name == wanted:
+                    return True
+        elif isinstance(node, ast.If):
+            # `if TYPE_CHECKING:` and platform guards; be generous, this is a typo check
+            for sub in [*node.body, *node.orelse]:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                        and sub.name == wanted:
+                    return True
+                if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    for al in sub.names:
+                        if al.name == "*" or (al.asname or al.name.split(".")[0]) == wanted:
+                            return True
+    return False
+
+
+def verify_object_ref(spec: str, project) -> str:
+    """Confirm `module:callable` actually names something, or return why it does not.
+
+    A `module:callable` entrypoint is turned into a `python -c "from module import attr"`
+    argv at build time and *nothing ever checks that the import works*. So `-e app:mian`
+    built cleanly, exited 0, and failed on the customer's machine at first run — the exact
+    failure this project's design rules single out as the worst kind.
+
+    Checked statically, by parsing the module rather than importing it. That is deliberate:
+    an import would execute the project's code on the build host, and would not work at all
+    for a cross-compiled target. The cost is that this cannot see attributes created
+    dynamically, so the rule is **only refuse when we are sure**:
+
+      * module file not found in the project tree -> say nothing (it may come from a
+        dependency, or from a `src/` layout we do not recognise);
+      * module found but unparseable -> say nothing (not our job to lint their syntax);
+      * module found, parsed, and the name is genuinely absent -> refuse.
+
+    Returns an empty string when there is no problem to report.
+    """
+    m = _OBJECT_REF.match(spec or "")
+    if not m:
+        return ""
+    module, attr = m.group("module"), m.group("attr")
+    root_attr = attr.split(".")[0]
+    path = _module_file(module, Path(project))
+    if path is None:
+        return ""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"),
+                         filename=str(path))
+    except (SyntaxError, ValueError, OSError):
+        return ""
+    if _defines(tree, root_attr):
+        return ""
+    hint = ""
+    names = sorted({n.name for n in tree.body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
+    if names:
+        hint = "\nCallables it does define: " + ", ".join(names[:8])
+    if any(isinstance(n, ast.If) and _is_main_guard(n) for n in tree.body):
+        hint += (
+            f"\n\n{path.name} has an `if __name__ == \"__main__\":` block. That is NOT the "
+            f"same thing as `{module}:{root_attr}` — the guard runs when the file is "
+            f"executed (`python -m {module}`), and cannot be imported and called. Either "
+            f"move that code into a function and point at it, or use a `__main__.py` and "
+            f"let haru-pack run `python -m {module}`.")
+    return (f"entrypoint {spec!r} names `{root_attr}` in `{module}`, but {path} defines no "
+            f"`{root_attr}`.{hint}")
+
+
+def _is_main_guard(node: ast.If) -> bool:
+    t = node.test
+    if not isinstance(t, ast.Compare) or len(t.comparators) != 1:
+        return False
+    left, right = t.left, t.comparators[0]
+    return (isinstance(left, ast.Name) and left.id == "__name__"
+            and isinstance(right, ast.Constant) and right.value == "__main__")
 
 
 def resolve_entrypoint(spec, *, name: str, kind: str) -> list:

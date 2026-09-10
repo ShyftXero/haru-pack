@@ -11,10 +11,14 @@ the build — which is what makes guessing worse than refusing.
 """
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 
+from haru_pack.build import BuildError, _resolve
 from haru_pack.discovery import AmbiguousProject, discover
-from haru_pack.entrypoints import EntryPointError, argv_for_object_ref, resolve_entrypoint
+from haru_pack.entrypoints import (EntryPointError, argv_for_object_ref, resolve_entrypoint,
+                                   verify_object_ref)
 
 
 def _pyproject(d, body: str):
@@ -49,10 +53,19 @@ def test_a_lone_script_still_just_works(tmp_path):
 
 
 @pytest.mark.invariant("INV-BUILD-03")
-def test_no_scripts_table_falls_back_to_dash_m_only_if_the_package_exists(tmp_path):
+def test_no_scripts_table_falls_back_to_dash_m_only_if_the_package_is_executable(tmp_path):
+    """Was `..._only_if_the_package_exists`, and asserted the bug.
+
+    It created `my_app/__init__.py` alone and expected `python -m my_app`, which is an argv
+    CPython refuses: "'my_app' is a package and cannot be directly executed". Existing is
+    not the same as executable — `__main__.py` is what makes `-m` work. Corrected
+    2026-09-10 along with `discovery`; the refusal is covered by
+    `test_an_importable_but_unexecutable_package_is_refused` below.
+    """
     _pyproject(tmp_path, '[project]\nname = "my-app"\n')
     (tmp_path / "my_app").mkdir()
     (tmp_path / "my_app" / "__init__.py").write_text("")
+    (tmp_path / "my_app" / "__main__.py").write_text("print('hi')\n")
     assert discover(tmp_path)["entrypoint"] == ["python", "-m", "my_app"]
 
 
@@ -145,3 +158,154 @@ def test_plain_names_pass_through_untouched():
     assert resolve_entrypoint("lotek", name="lotek", kind="project") == ["lotek"]
     assert resolve_entrypoint(["python", "-m", "pkg"], name="p", kind="project") == [
         "python", "-m", "pkg"]
+
+
+# ------------------------------------------- a well-formed reference that names nothing
+
+def _proj(tmp_path, files: dict, name="demo"):
+    """A project tree with a pyproject and whatever modules the test needs."""
+    d = tmp_path / "proj"
+    d.mkdir(exist_ok=True)
+    (d / "pyproject.toml").write_text(
+        f"[project]\nname = '{name}'\nversion = '0'\n", encoding="utf-8")
+    for rel, body in files.items():
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(textwrap.dedent(body), encoding="utf-8")
+    return d
+
+
+@pytest.mark.invariant("INV-BUILD-04")
+def test_a_reference_to_a_missing_callable_is_refused(tmp_path):
+    """`-e app:mian` used to build cleanly and die on the customer's machine, because the
+    generated `python -c "from app import mian"` was never checked against anything."""
+    d = _proj(tmp_path, {"app.py": "def serve():\n    pass\n"})
+    problem = verify_object_ref("app:mian", d)
+    assert problem, "a typo'd callable was accepted"
+    assert "defines no `mian`" in problem
+    assert "serve" in problem, "the message should name what the module does define"
+    with pytest.raises(EntryPointError):
+        _resolve(d, "default", "", "", [], "", "", False, False, "app:mian")
+
+
+@pytest.mark.invariant("INV-BUILD-04")
+def test_a_main_guard_is_diagnosed_as_not_being_a_callable(tmp_path):
+    """The specific misconception that produces this mistake: `if __name__ == "__main__":`
+    is not addressable as `module:callable`. Saying "defines no main" alone would leave the
+    operator staring at a file that visibly runs when executed."""
+    d = _proj(tmp_path, {"app.py": """
+        def helper():
+            pass
+        if __name__ == "__main__":
+            helper()
+    """})
+    problem = verify_object_ref("app:main", d)
+    assert "__main__" in problem and "cannot be imported and called" in problem
+
+
+@pytest.mark.invariant("INV-BUILD-04")
+@pytest.mark.parametrize("spec,body", [
+    ("app:main", "def main():\n    pass\n"),
+    ("app:main", "async def main():\n    pass\n"),
+    ("app:main", "class main:\n    pass\n"),
+    ("app:main", "from .impl import main\n"),
+    ("app:main", "main = lambda: None\n"),
+    ("app:main", "from os import *\n"),
+    ("app:Cls.run", "class Cls:\n    def run(self): pass\n"),
+])
+def test_references_that_do_resolve_are_left_alone(tmp_path, spec, body):
+    d = _proj(tmp_path, {"app.py": body})
+    assert verify_object_ref(spec, d) == "", f"{spec} with body {body!r} was wrongly refused"
+
+
+@pytest.mark.invariant("INV-BUILD-04")
+def test_a_module_outside_the_project_tree_is_not_second_guessed(tmp_path):
+    """The module may come from a dependency. Refusing what we cannot see would make the
+    check worse than useless — it would block correct builds."""
+    d = _proj(tmp_path, {"app.py": "x = 1\n"})
+    assert verify_object_ref("gunicorn.app.wsgiapp:run", d) == ""
+    assert verify_object_ref("nope.not_here:main", d) == ""
+
+
+@pytest.mark.invariant("INV-BUILD-04")
+def test_a_src_layout_module_is_found(tmp_path):
+    d = _proj(tmp_path, {"src/app/__init__.py": "def go():\n    pass\n"})
+    assert verify_object_ref("app:go", d) == ""
+    assert "defines no `nope`" in verify_object_ref("app:nope", d)
+
+
+# ------------------------------------------------ importable is not the same as executable
+
+@pytest.mark.invariant("INV-BUILD-03")
+def test_an_importable_but_unexecutable_package_is_refused(tmp_path):
+    """`python -m pkg` needs `pkg/__main__.py`. Discovery checked `__init__.py`, so a
+    library-shaped package produced an entrypoint that cannot run: "'pkg' is a package and
+    cannot be directly executed" — on the target, after a clean build."""
+    d = _proj(tmp_path, {"demo/__init__.py": "VALUE = 1\n"})
+    with pytest.raises(AmbiguousProject) as e:
+        discover(d)
+    assert "__main__.py" in str(e.value)
+    assert "would fail on the target" in str(e.value)
+
+
+@pytest.mark.invariant("INV-BUILD-03")
+@pytest.mark.parametrize("layout", ["demo", "src/demo"])
+def test_a_package_with_a_main_module_is_discovered(tmp_path, layout):
+    d = _proj(tmp_path, {f"{layout}/__init__.py": "", f"{layout}/__main__.py": "print(1)\n"})
+    assert discover(d)["entrypoint"] == ["python", "-m", "demo"]
+
+
+# ------------------------------------------------------------- where directives may live
+
+@pytest.mark.invariant("INV-BUILD-07")
+def test_directives_can_live_in_pyproject(tmp_path):
+    """A project that already has a pyproject.toml should not need a second file to say how
+    it is bundled."""
+    d = _proj(tmp_path, {"demo/__init__.py": "", "demo/__main__.py": ""})
+    (d / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\nversion = '0'\n\n"
+        "[tool.haru-pack]\ncwd_policy = 'exe'\nentrypoint = 'demo'\n", encoding="utf-8")
+    manifest, _, _, _, _ = _resolve(d, "default", "", "", [], "", "", False, False)
+    assert manifest["cwd_policy"] == "exe"
+    assert manifest["entrypoint"] == ["demo"]
+
+
+@pytest.mark.invariant("INV-BUILD-07")
+def test_haru_pack_toml_wins_over_pyproject(tmp_path):
+    """The sidecar is the local override; the pyproject table is the project's own default."""
+    d = _proj(tmp_path, {"demo/__init__.py": "", "demo/__main__.py": ""})
+    (d / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\nversion = '0'\n\n"
+        "[tool.haru-pack]\ncwd_policy = 'exe'\npython = '3.11'\n", encoding="utf-8")
+    (d / "haru_pack.toml").write_text("cwd_policy = 'launch'\n", encoding="utf-8")
+    manifest, _, pyver, _, _ = _resolve(d, "default", "", "", [], "", "", False, False)
+    assert manifest["cwd_policy"] == "launch", "haru_pack.toml did not win"
+    assert pyver == "3.11", "keys only pyproject set must still apply"
+
+
+@pytest.mark.invariant("INV-BUILD-07")
+def test_an_underscored_tool_table_is_refused_not_ignored(tmp_path):
+    """A config table nobody reads is worse than a missing one: the operator believes it
+    took effect. Red-path: drop the refusal and this build succeeds while ignoring the
+    table."""
+    d = _proj(tmp_path, {"demo/__init__.py": "", "demo/__main__.py": ""})
+    (d / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\nversion = '0'\n\n"
+        "[tool.haru_pack]\ncwd_policy = 'exe'\n", encoding="utf-8")
+    with pytest.raises(BuildError) as e:
+        _resolve(d, "default", "", "", [], "", "", False, False)
+    assert "[tool.haru-pack]" in str(e.value)
+
+
+@pytest.mark.invariant("INV-BUILD-07")
+def test_a_cli_flag_still_beats_both(tmp_path):
+    d = _proj(tmp_path, {"demo/__init__.py": "", "demo/__main__.py": "",
+                         "other.py": "def go():\n    pass\n"})
+    (d / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\nversion = '0'\n\n"
+        "[tool.haru-pack]\nentrypoint = 'demo'\n", encoding="utf-8")
+    (d / "haru_pack.toml").write_text("entrypoint = 'demo'\n", encoding="utf-8")
+    manifest, _, _, _, _ = _resolve(d, "default", "", "", [], "", "", False, False,
+                                    "other:go")
+    assert manifest["entrypoint"][:2] == ["python", "-c"]
+    assert "from other import go" in manifest["entrypoint"][2]

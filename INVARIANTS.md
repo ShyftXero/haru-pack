@@ -302,21 +302,41 @@ luck; a project with `serve` and `migrate` got a coin flip and no warning.
 Note: Root-level `.py` files stop being candidates once `[project.scripts]` exists. In a real
 tree they are helpers, plugins, and one-off utilities that the console script invokes or takes
 as arguments — lotek's root has a dozen, and the only correct answer is the declared `lotek`.
-Note: `python -m <package>` is only offered when that package actually exists in the tree.
-Otherwise it is a guess dressed as a default.
+Note: `python -m <package>` is only offered when that package is actually **executable** —
+i.e. `<pkg>/__main__.py` exists. Otherwise it is a guess dressed as a default. This checked
+only `__init__.py` until 2026-09-10, so a library-shaped package (importable, nothing to
+execute) yielded the entrypoint `python -m <pkg>`, which builds cleanly and then fails on the
+target with "'<pkg>' is a package and cannot be directly executed". Verified against a
+synthetic package that day. Red-path for that half: change the `__main__.py` test in
+`discovery.discover` back to `__init__.py` and
+`test_an_importable_but_unexecutable_package_is_refused` goes red.
 Territory: src/haru_pack/discovery.py, src/haru_pack/cli.py, tests/test_entrypoints.py
 
 ### INV-BUILD-04
 Status: active
 Statement: An entrypoint may be given as a script filename, a console-script name, or a
-`module:callable` object reference; a malformed one is rejected at build time, never deferred
-to a runtime "command not found" on a customer machine.
-Actors: an operator typing `--entry-point`, or editing `entrypoint` in haru_pack.toml.
+`module:callable` object reference. A malformed one is rejected at build time — and so is a
+well-formed one whose module is present in the project tree but does not define the named
+attribute. Neither is ever deferred to a runtime "command not found" or `ImportError` on a
+customer machine.
+Actors: an operator typing `--entry-point`, or editing `entrypoint` in haru_pack.toml or
+`[tool.haru-pack]`.
 Assets: build-time feedback. Every spelling accepted here is resolved to plain argv before it
 reaches the payload.
 Red-path: Delete the `if ":" in spec: raise` branch in `entrypoints.resolve_entrypoint`. Four
 parametrizations of `test_malformed_entry_points_are_rejected` go red — `mod:`, `:func`,
 `mod::func` and `not a ref!` all fall through to being treated as console-script names.
+Separately, delete the `verify_object_ref(...)` call from `build._resolve`:
+`test_a_reference_to_a_missing_callable_is_refused` goes red, and `-e app:mian` builds
+cleanly again and dies on the target.
+Note: The reference check is STATIC — the module is parsed, never imported. Importing would
+execute the project's code on the build host and could not work at all for a cross-compiled
+target. The cost is that dynamically-created attributes are invisible, so the rule is to
+refuse only when certain: module not found in the tree (it may come from a dependency),
+unparseable, or providing the name via `import *` all pass silently. Added 2026-09-10 after
+`app:main` was found to build cleanly against a module whose logic lived in an
+`if __name__ == "__main__":` block — the guard is not importable, and the error message now
+says so specifically, because that is the misconception that produces the mistake.
 Source: Added 2026-09-09 with `--entry-point`. The first implementation had exactly that bug:
 anything failing the object-reference pattern was silently treated as a command name, so a
 typo'd `app.cli:` became a search for a console script of that literal name.
@@ -371,6 +391,32 @@ crashed on `OptionInfo.encode()`.
 Note: Both entry points call one plain `_run_build()` with ordinary keyword defaults, rather
 than `ctx.invoke`, which is what produced the sentinel bug. One implementation, two doors.
 Territory: src/haru_pack/cli.py, tests/test_targets.py
+
+### INV-BUILD-07
+Status: active
+Statement: Build directives are read from `[tool.haru-pack]` in `pyproject.toml` as well as
+from `haru_pack.toml`, in that order of increasing precedence; a table haru-pack does not
+read is never silently ignored.
+Actors: a developer who wants their project to declare how it is bundled, in the file that
+already declares everything else about it; and the same developer three months later
+wondering why a directive did nothing.
+Assets: whether configuration means what it appears to mean. A config table read by nobody is
+worse than a missing one, because the operator believes it took effect — the same failure
+shape as the five documented-but-unimplemented security claims this file exists because of.
+Red-path: Delete the `[tool.haru_pack]` (underscore) refusal in `build._declarations` and
+`test_an_underscored_tool_table_is_refused_not_ignored` goes red. Delete the pyproject read
+entirely and `test_directives_can_live_in_pyproject` goes red.
+Source: Asked for 2026-09-10 — "the developer could choose how to bundle the tool and define
+it inside of their own project". `haru_pack.toml` stays: it is the only option for a tree with
+no pyproject.toml (a bare script, a folder of `.py` files) and the local override for one that
+has it. The precedence ladder is the one `discovery`'s docstring already described, with the
+new table slotted at the pyproject level.
+Note: The merge is per top-level key, not deep. A `[[bundle]]` list in `haru_pack.toml`
+replaces rather than extends the one in `pyproject.toml`; concatenating would let an operator
+add steps but never remove an inherited one.
+Note: PEP 723 permits `[tool]` tables inside a script's inline metadata block. That is NOT
+read yet — a script's directives still go in `haru_pack.toml` beside it.
+Territory: src/haru_pack/build.py, tests/test_entrypoints.py
 
 ---
 

@@ -86,12 +86,26 @@ def discover(path) -> dict:
                 f"{name} declares {len(scripts)} console scripts; haru-pack will not pick "
                 f"one for you.", scripts, kind="project", name=name, source=path, python=py)
 
-        # No scripts table: fall back to `python -m <package>`, which only makes sense if
-        # that package actually exists in the tree.
+        # No scripts table: fall back to `python -m <package>`. That requires a
+        # `__main__.py`, NOT merely an `__init__.py` — this used to check the latter, and a
+        # library-shaped package (importable, nothing to execute) produced the entrypoint
+        # `python -m <mod>`, which builds cleanly and then dies on the target with
+        # "'<mod>' is a package and cannot be directly executed". Verified 2026-09-10 on a
+        # synthetic package. Refusing here turns a customer-machine failure into a build
+        # refusal, which is the whole point of INV-BUILD-03.
         mod = name.replace("-", "_")
-        if (path / mod / "__init__.py").exists() or (path / "src" / mod / "__init__.py").exists():
+        pkg_roots = [path / mod, path / "src" / mod]
+        if any((r / "__main__.py").is_file() for r in pkg_roots):
             return {"kind": "project", "name": name, "app_subdir": "app",
                     "entrypoint": ["python", "-m", mod], "python": py, "source": path}
+        importable = next((r for r in pkg_roots if (r / "__init__.py").is_file()), None)
+        if importable is not None:
+            raise AmbiguousProject(
+                f"{name} has no [project.scripts], and the package {mod!r} is importable "
+                f"but not executable: {importable.name}/__main__.py does not exist, so "
+                f"`python -m {mod}` would fail on the target rather than here. Add a "
+                f"{mod}/__main__.py, declare a [project.scripts] entry, or pass "
+                f"--entry-point.", [], kind="project", name=name, source=path, python=py)
         raise AmbiguousProject(
             f"{name} has no [project.scripts] and no importable package named {mod!r}, so "
             f"there is nothing obvious to run.", [], kind="project", name=name,
