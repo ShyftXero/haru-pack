@@ -453,3 +453,29 @@ def test_the_analysis_questions_are_reachable_from_the_command_line():
     for flag in ("--analyze", "--calibrate"):
         assert f'"{flag}"' in src, f"{flag} is not wired into the CLI"
     assert "format_analysis" in src, "--analyze must use the shared formatter"
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
+    """A fingerprint folds in the diagnostic TEXT, so the same outcome with two different
+    messages counts as two distinct results. That granularity is right for triage and wrong
+    for "did the sweep buy anything" — and conflating them made the census print
+    "0 case(s) DIVERGED" on a sweep where nothing had.
+    """
+    a = _analyze()
+    cases = []
+    for i in range(25):
+        c = _case("c1", f"pkg{i}")
+        c["fingerprint"] = f"fp-{i}"      # 25 fingerprints, one outcome
+        cases.append(c)
+    got = a.analyze_run(_journal(tmp_path, cases))
+
+    assert len(got["fingerprints"]) == 25
+    assert got["diverged"] == {}, "the outcome was RAN on every fixture"
+
+    text = a.format_analysis(got)
+    assert "NOTHING DIVERGED" in text
+    assert "0 of" not in text, "a sweep where nothing diverged must not claim 0 diverged"
+    assert "fingerprints against 1 case(s)" in text, (
+        "the fingerprint/outcome gap should be explained, not hidden"
+    )

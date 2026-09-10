@@ -119,7 +119,14 @@ def format_analysis(a: dict) -> str:
     if n_fix > 1:
         ratio = n_cases / distinct if distinct else 0
         L += [f"  ratio: {ratio:.1f} runs per distinct result."]
-        if distinct <= len(a["matrix"]) and not a["diverged"]:
+        # A fingerprint folds in the diagnostic TEXT, so two runs with the same outcome and
+        # different messages count as distinct results. That is the right granularity for
+        # triage and the wrong one for "did the sweep buy anything" — for that, only a
+        # differing OUTCOME counts. Report both rather than conflating them: an earlier
+        # version branched on the fingerprint count and printed "0 case(s) DIVERGED" on a
+        # sweep where nothing had.
+        n_case_names = len(a["matrix"])
+        if not a["diverged"]:
             L += ["",
                   "  NOTHING DIVERGED. Every case answered identically on all "
                   f"{n_fix} fixtures,",
@@ -131,10 +138,16 @@ def format_analysis(a: dict) -> str:
                   "  every binary. Only app-level personas can, and only where the package",
                   "  genuinely changes something (resource envelope, native libraries,",
                   "  startup cost)."]
+            if distinct > n_case_names:
+                L += ["",
+                      f"  ({distinct} fingerprints against {n_case_names} case(s): same",
+                      "  outcome, differing diagnostic text. Message wording varies by",
+                      "  package; the verdict did not.)"]
         else:
             L += ["",
-                  f"  {len(a['diverged'])} case(s) DIVERGED by fixture — the sweep earned",
-                  "  its cost for those, and only those."]
+                  f"  {len(a['diverged'])} of {n_case_names} case(s) DIVERGED by fixture —",
+                  "  the sweep earned its cost for those, and only those. The rest",
+                  "  confirmed the same fact once per fixture."]
         L.append("")
 
     # ---------------------------------------------------------------- divergence
