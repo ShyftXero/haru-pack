@@ -2,12 +2,13 @@ from __future__ import annotations
 import shutil, subprocess, tempfile
 from pathlib import Path
 from . import tomlio, discovery, crypto
-from .paths import launcher_src_dir, exe_suffix
+from .paths import launcher_src_dir
 from .payload import build_payload_zip
 from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier
 from .sources import Sources
+from .targets import Target
 from .entrypoints import resolve_entrypoint
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine)
@@ -29,14 +30,14 @@ _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv", "*.egg
                                  ".pytest_cache", ".ruff_cache", "*.exe",
                                  *_SECRET_PATTERNS)
 
-def compile_launcher(nim: str, target: str, workdir: Path) -> Path:
+def compile_launcher(nim: str, target, workdir: Path) -> Path:
+    tgt = target if isinstance(target, Target) else Target.parse(target)
     src = launcher_src_dir() / "main.nim"
     if not src.exists():
         raise BuildError(f"launcher source missing: {src}")
-    out = workdir / ("launcher" + exe_suffix(target))
+    out = workdir / ("launcher" + tgt.exe_suffix)
     args = [nim, "c", "-d:release", f"--nimcache:{workdir/'nimcache'}", f"--out:{out}"]
-    if target == "windows":
-        args += ["-d:mingw", "--cpu:amd64"]
+    args += tgt.nim_flags()          # empty for a native build
     args.append(str(src))
     r = subprocess.run(args, capture_output=True, text=True)
     if r.returncode != 0 or not out.exists():
@@ -86,10 +87,11 @@ def _resolve(project: Path, tier: str, python_cli: str,
     }
     return manifest, enc, pyver, disc["source"], Sources.resolve(decl)
 
-def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
+def assemble_payload(source: Path, manifest: dict, tier: str, target,
                      python: str, workdir: Path, wine: bool = False,
                      sources: Sources | None = None) -> Path:
     sources = sources or Sources()
+    tgt = target if isinstance(target, Target) else Target.parse(target)
     payload = workdir / "payload"
     app = payload / manifest["app_subdir"]
     if source.is_file():
@@ -100,19 +102,19 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
     manifest = apply_tier(dict(manifest), tier)
     vendor = payload / "vendor"
     if tier in ("default", "thick"):
-        bundle_uv(target, vendor, sources=sources)
+        bundle_uv(tgt, vendor, sources=sources)
     if tier == "thick":
         steps = manifest.get("bundle") or []
-        if steps and target != "host" and not wine:
+        if steps and not tgt.is_host and not wine:
             raise BuildError(
                 f"bundle steps run target-native code and can't be produced for --target "
-                f"{target} from here. Re-run with --wine, build --thick on the target OS, or "
+                f"{tgt} from here. Re-run with --wine, build --thick on a {tgt} machine, or "
                 f"fetch by URL.")
-        py = bundle_python(target, vendor, version=python, sources=sources)
+        py = bundle_python(tgt, vendor, version=python, sources=sources)
         if manifest.get("kind") == "project" or steps:
             app_dir = payload / manifest["app_subdir"]
             cache = vendor / "cache"; cache.mkdir(parents=True, exist_ok=True)
-            if target == "host":
+            if tgt.is_host:
                 tmp_env = Path(tempfile.mkdtemp(prefix="haru-warm-"))
                 try:
                     warm_cache_and_lock(app_dir, py, cache, tmp_env, sources=sources)
@@ -134,12 +136,13 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           python: str = "", wine: bool = False, encrypt: bool = False,
           entry_point: str = "") -> dict:
     project = Path(project); out = Path(out)
+    tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
     if not nim:
         raise BuildError("Nim not found. Run `haru-pack bootstrap` first.")
-    tc = detect_c_toolchain(target)
+    tc = detect_c_toolchain(tgt)
     if not tc["ok"]:
-        raise BuildError(f"C toolchain missing for target '{target}':\n{tc['advice']}")
+        raise BuildError(f"C toolchain missing for target '{tgt}':\n{tc['advice']}")
     manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
                                                      machine, user, embed_secret, encrypt,
                                                      entry_point)
@@ -148,7 +151,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                          "--secret / --secret-env / --secret-prompt")
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        payload_dir = assemble_payload(source, manifest, tier, target, pyver, tdp / "asm",
+        payload_dir = assemble_payload(source, manifest, tier, tgt, pyver, tdp / "asm",
                                        wine, sources=sources)
         payload = build_payload_zip(payload_dir)
         flags = 0
@@ -164,7 +167,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 "internal: encryption state does not match the payload "
                 f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
                 "Refusing to emit a binary whose build receipt would be wrong.")
-        launcher = compile_launcher(nim, target, tdp)
+        launcher = compile_launcher(nim, tgt, tdp)
         info = attach(launcher, payload, out, flags=flags)
     try:
         out.chmod(0o755)
@@ -173,6 +176,6 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # The receipt records WHERE this build's third-party bytes came from. An operator
     # auditing a signed artifact should not have to guess whether a mirror was in play.
     info.update(sources=sources.describe(),
-                tier=tier, target=target, nim=nim, compiler=tc["compiler"], out=str(out),
+                tier=tier, target=str(tgt), nim=nim, compiler=tc["compiler"], out=str(out),
                 encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver)
     return info

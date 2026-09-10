@@ -49,6 +49,7 @@ packages = ["src/haru_pack"]
 include = [
   "src/haru_pack/**/*.py",
   "src/haru_pack/launcher/*.nim",
+  "src/haru_pack/pins.toml",
 ]
 
 [tool.hatch.build.targets.sdist]

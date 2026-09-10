@@ -19,12 +19,14 @@ haru-pack init ./myproject       # optional: scaffold haru_pack.toml (learns fro
 ```sh
 # point at a PEP 723 script or a project dir (with pyproject.toml). haru-pack auto-discovers
 # the kind, Python version (requires-python / .python-version / PEP 723), and entrypoint.
+haru-pack ./myproject                       # no subcommand needed for the simple case
 haru-pack build ./myproject                 # default tier: uv bundled, deps fetched 1st run
 ./myproject                                 # run it — behaves like a native binary
 
 haru-pack build ./myproject --thin          # smallest; fetch uv+python+deps on target
 haru-pack build ./myproject --thick         # bundle everything, fully offline (chonky 🦣)
 haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux -> Windows
+haru-pack build ./myproject --target linux-aarch64        # Raspberry Pi
 
 # projects that declare more than one console script are AMBIGUOUS: haru-pack refuses and
 # lists them rather than guessing, because a wrong guess builds cleanly and runs the wrong
@@ -48,7 +50,7 @@ haru-pack build ./lotek --out lotek --entry-point "app.cli:main"
 |---|---|---|
 | `-o, --out PATH` | `<name>[.exe]` | output path |
 | `-e, --entry-point SPEC` | discovered | what to run: `app.py`, a console script (`lotek`), or `module:callable` (`app.cli:main`) |
-| `--target host\|windows` | `host` | build target (Windows = cross-compile) |
+| `--target host\|<os>-<arch>` | `host` | e.g. `linux-aarch64` (Raspberry Pi), `windows-x86_64`, `macos-aarch64` |
 | `--python X.Y` | auto | Python version to stage (else discovered from the project) |
 | `--wine` | off | run execute-required bundle steps under wine (thick + `--target windows`) |
 | `--tier thin\|default\|thick` | `default` | bundling tier (below) |

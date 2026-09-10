@@ -1,55 +1,23 @@
 from __future__ import annotations
-import json, os, platform, shutil, subprocess, sys, tempfile, zipfile
+import json, os, shutil, subprocess, sys, tempfile, zipfile
 from pathlib import Path
 from .archives import safe_extract_tar, fetch_verified, UnpinnedArtifact
 from .sources import Sources
+from .targets import Target
+from . import pins
 
 UV_VERSION = "0.10.4"
 
-# INV-SUPPLY-01. sha256 per uv release asset, keyed by uv version then asset name.
-# Captured 2026-09-09 from the release's published `<asset>.sha256` sidecars and
-# cross-checked against the release API's per-asset `digest` field; the two channels
-# agreed on all three assets. A version with no table entry has no pin, and
-# `bundle_uv` refuses rather than downloading an unverified uv.
-UV_SHA256 = {
-    "0.10.4": {
-        "uv-x86_64-pc-windows-msvc.zip":
-            "0f0e22d7507633bfb38d9b42fb6a0341f1f74b8e80b070a31231c354812432a3",
-        "uv-x86_64-unknown-linux-gnu.tar.gz":
-            "6b52a47358deea1c5e173278bf46b2b489747a59ae31f2a4362ed5c6c1c269f7",
-        "uv-x86_64-apple-darwin.tar.gz":
-            "df6dd1c3ebeab4369a098c516c15c233c62bf789a40a4864b30dad1d38d7604e",
-    },
-}
-
-# INV-SUPPLY-01. python-build-standalone interpreters, keyed by the *exact* URL uv's
-# catalog hands us (percent-encoding included). This one matters most: the staged
-# interpreter is copied into a customer deliverable that the operator then signs, so a
-# tampered archive here is code execution under the vendor's identity, EV certificate
-# and all.
+# INV-SUPPLY-01. The digests themselves live in pins.toml — data, hand-editable, each
+# entry carrying the publisher channel it came from. They were dict literals here until
+# 2026-09-09; a maintainer bumping uv should be editing a table, not Python, and a reader
+# auditing what a build trusted should not have to follow code to find out.
 #
-# Note for whoever bumps this: `uv python list --output-format json` does NOT carry a
-# digest. Checked against uv 0.10.4 on 2026-09-09 -- the entry keys are exactly
-# {arch, implementation, key, libc, os, path, symlink, url, variant, version,
-# version_parts}. INVARIANTS.md's claim that a `sha256` field is there to be picked up
-# is wrong for this uv. Digests below came from the release instead: the `<asset>.sha256`
-# sidecar where one is published (the 20250317 build), and the release API's per-asset
-# `digest` field where it is not (the 20260211 build ships no sidecars).
-_PBS = "https://github.com/astral-sh/python-build-standalone/releases/download/"
-PBS_SHA256 = {
-    _PBS + "20260211/cpython-3.12.12%2B20260211-x86_64-pc-windows-msvc-install_only_stripped.tar.gz":
-        "93bf8e8c05ede0077b197a29c99ebdaf253497f27190097494265150b4e70ba8",
-    _PBS + "20260211/cpython-3.12.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz":
-        "1dbaa624a09e15afe7efbdac08d42993135a68db8d34f986ef6977a6d77bdc3c",
-    _PBS + "20250317/cpython-3.12.9%2B20250317-x86_64-pc-windows-msvc-install_only_stripped.tar.gz":
-        "ee338839315bdd8af5fc935f9595eca20ebebdd250726c5816b2d0cf94d1e661",
-    _PBS + "20250317/cpython-3.12.9%2B20250317-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz":
-        "a36bc60c38fe146e908e2e71fc21266c8558b24a9407226b1d887212839437ef",
-    _PBS + "20260211/cpython-3.13.12%2B20260211-x86_64-pc-windows-msvc-install_only_stripped.tar.gz":
-        "b73415a86dcf298a2f4a585c5371fb1cf003576d2bdc2b80a34d5321284b2ed4",
-    _PBS + "20260211/cpython-3.13.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz":
-        "bab0e2aeec8a32a7f5cb62240d088d50ea468ef6d7522681bc171d527a5ba6f8",
-}
+# Loaded eagerly at import so a missing or malformed pins.toml fails immediately and
+# loudly, rather than at the moment of the first download when a fallback would be
+# tempting. `tools/add-pin.py` adds entries.
+UV_SHA256 = pins.uv_digests()
+PBS_SHA256 = pins.python_digests()
 
 def _run(cmd, **kw):
     r = subprocess.run(cmd, capture_output=True, text=True, **kw)
@@ -75,19 +43,6 @@ def _export_reqs(app_dir: Path) -> list:
         out.append(line.rstrip())
     return out
 
-_UV_ASSET = {
-    "windows": "uv-x86_64-pc-windows-msvc.zip",
-    "linux":   "uv-x86_64-unknown-linux-gnu.tar.gz",
-    "darwin":  "uv-x86_64-apple-darwin.tar.gz",
-}
-
-def _host_os() -> str:
-    if sys.platform == "win32": return "windows"
-    if sys.platform == "darwin": return "darwin"
-    return "linux"
-
-def _target_os(target: str) -> str:
-    return _host_os() if target == "host" else target  # target is "windows" for cross
 
 def _extract_find(archive: Path, name: str, dest: Path) -> None:
     with tempfile.TemporaryDirectory() as td:
@@ -116,30 +71,25 @@ def bundle_uv(target: str, vendor_dir: Path, version: str = UV_VERSION,
     from; the digest decides *whether we keep it*.
     """
     sources = sources or Sources()
+    tgt = target if isinstance(target, Target) else Target.parse(target)
     vendor_dir.mkdir(parents=True, exist_ok=True)
-    tos = _target_os(target)
-    exe = "uv.exe" if tos == "windows" else "uv"
+    exe = tgt.uv_exe
     dest = vendor_dir / exe
-    asset = _UV_ASSET[tos]
+    asset = tgt.uv_asset()
     digest = UV_SHA256.get(version, {}).get(asset)
     if not digest:                                                  # INV-SUPPLY-01
         raise UnpinnedArtifact(
             f"no pinned sha256 for uv {version} asset {asset}; haru-pack will not bundle an "
-            f"unverified uv. Record the publisher's digest in bundle.UV_SHA256 (the release "
-            f"publishes {asset}.sha256) before bumping UV_VERSION.")
+            f"unverified uv. Add it with:\n"
+            f"    python tools/add-pin.py uv {version} {asset}\n"
+            f"which fetches the publisher's digest into src/haru_pack/pins.toml.")
     url = sources.uv_url(version, asset)          # mirror-aware; the pin above is not
     with tempfile.TemporaryDirectory() as td:
         arc = Path(td) / asset
         fetch_verified(url, arc, digest, what=f"uv {version} ({asset})")       # INV-SUPPLY-01
         _extract_find(arc, exe, dest)
-    if tos != "windows": dest.chmod(0o755)
+    if tgt.os != "windows": dest.chmod(0o755)
     return dest
-
-def _host_arch() -> str:
-    m = platform.machine().lower()
-    return {"amd64": "x86_64", "x86_64": "x86_64",
-            "arm64": "aarch64", "aarch64": "aarch64"}.get(m, m)
-
 
 def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
     """Find the UPSTREAM python-build-standalone URL for an (os, arch, version).
@@ -151,12 +101,16 @@ def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
     Note for whoever maintains this: uv's catalog carries no `sha256` field (checked against
     uv 0.10.4), so digests come from the release, not from here.
     """
-    out = subprocess.run(["uv", "python", "list", "--all-platforms", "--all-versions",
-                          "--output-format", "json"], capture_output=True, text=True, check=True)
+    # --all-arches is REQUIRED, not decorative: without it uv lists only x86_64 and armv7,
+    # so every aarch64 lookup returns nothing and a Raspberry Pi target looks unsupported.
+    out = subprocess.run(["uv", "python", "list", "--all-platforms", "--all-arches",
+                          "--all-versions", "--output-format", "json"],
+                         capture_output=True, text=True, check=True)
     best = None
     for e in json.loads(out.stdout):
         if e.get("os") != target_os or e.get("arch") != arch: continue
         if e.get("implementation") != "cpython" or e.get("variant") != "default": continue
+        if e.get("libc") not in (None, "none", "gnu", "gnueabihf"): continue   # not musl
         if not e.get("version", "").startswith(version): continue
         url = e.get("url") or ""
         if "install_only" not in url: continue
@@ -182,27 +136,27 @@ def bundle_python(target: str, vendor_dir: Path, version: str = "3.12",
     digest up by that URL, download it (from a mirror if one is configured) and verify.
     """
     sources = sources or Sources()
+    tgt = target if isinstance(target, Target) else Target.parse(target)
     pydir = vendor_dir / "python"
     pydir.mkdir(parents=True, exist_ok=True)
-    target_os = _target_os(target)
-    arch = _host_arch() if target == "host" else "x86_64"
+    target_os, arch = tgt.os, tgt.arch
 
     upstream = _find_python_url(target_os, version, arch)
     digest = PBS_SHA256.get(upstream)
     if not digest:                                                  # INV-SUPPLY-01
         raise UnpinnedArtifact(
             f"no pinned sha256 for {upstream}; haru-pack will not stage an unverified "
-            "interpreter into a binary you are about to sign. Record the digest in "
-            "bundle.PBS_SHA256 (the python-build-standalone release publishes a "
-            "<asset>.sha256 sidecar, and the release API carries a per-asset digest). "
-            "Do not remove this check, and do not invent a digest to satisfy it.")
+            "interpreter into a binary you are about to sign. Add it with:\n"
+            f"    python tools/add-pin.py python {upstream}\n"
+            "which fetches the publisher's digest into src/haru_pack/pins.toml. Do not "
+            "remove this check, and do not invent a digest to satisfy it.")
     url = sources.python_url(upstream)                              # mirror, pin unchanged
     with tempfile.TemporaryDirectory() as td:
         arc = Path(td) / "py.tar.gz"
         fetch_verified(url, arc, digest,
                        what=f"python-build-standalone {version} ({target_os}/{arch})")
         safe_extract_tar(arc, pydir)                   # INV-SUPPLY-03
-    exe = "python.exe" if _target_os(target) == "windows" else "python3"
+    exe = tgt.python_exe
     cands = [c for c in {c.resolve() for c in pydir.rglob(exe)}
              if c.is_file() and "venv" not in (q.lower() for q in c.parts)]
     if not cands:

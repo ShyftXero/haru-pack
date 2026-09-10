@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import typer
+from typer.core import TyperGroup
 from . import __version__
 from .bootstrap import (find_nim, nim_version, install_nim, ensure_nim_deps,
                         detect_c_toolchain)
@@ -9,8 +10,84 @@ from .build import build as build_exe, BuildError
 from .discovery import AmbiguousProject
 from .entrypoints import EntryPointError
 from .overlay import verify as verify_exe
+from .targets import KNOWN_TARGETS, Target, TargetError
 
-app = typer.Typer(add_completion=False, help="haru-pack — pack a Python project into a single, signable native launcher.")
+class _DefaultToBuild(TyperGroup):
+    """Make `haru-pack somescript.py` mean `haru-pack build somescript.py`.
+
+    Implemented at the group level rather than as a callback with a positional argument.
+    A positional on the callback competes with subcommand dispatch: click binds the first
+    token to it, so `haru-pack version` was parsed as "build the project named 'version'".
+    Here the token is only rewritten when it is NOT a registered command and does not look
+    like a flag, so every subcommand keeps working untouched.
+    """
+
+    def parse_args(self, ctx, args):
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            args = ["build"] + args
+        return super().parse_args(ctx, args)
+
+
+app = typer.Typer(add_completion=False, cls=_DefaultToBuild,
+                  help="haru-pack — pack a Python project into a single, signable native "
+                       "launcher.\n\nThe simple case needs no subcommand: "
+                       "`haru-pack somescript.py`.")
+
+
+
+def _run_build(*, project, out=None, target="host", tier="default", thin=False, thick=False,
+               chonky=False, encrypt=False, secret=None, secret_env=None, secret_prompt=False,
+               embed_secret=False, expires="", machine="", user="", geo="", python="",
+               entry_point="", wine=False) -> None:
+    """The build, as a plain function with real Python defaults.
+
+    Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
+    form. Deliberately NOT via `ctx.invoke`, which leaves any parameter the caller did not
+    pass as a typer `OptionInfo` sentinel rather than its default — the first version of
+    the bare form did that and produced "🦣 chonky mode" on a plain `haru-pack hello.py`,
+    then crashed on `OptionInfo.encode()`. One implementation, ordinary keyword defaults.
+    """
+    if thin: tier = "thin"
+    if thick or chonky: tier = "thick"
+    if tier not in ("thin", "default", "thick"):
+        typer.secho(f"unknown tier '{tier}' (thin|default|thick)", fg="red"); raise typer.Exit(2)
+    if chonky:
+        typer.secho("🦣 chonky mode: bundling everything…", fg="magenta")
+    if out is None:
+        try:
+            suffix = Target.parse(target).exe_suffix
+        except TargetError as e:
+            typer.secho(f"haru-pack: {e}", fg="red"); raise typer.Exit(2)
+        out = Path(project.name or "app").with_suffix(suffix)
+    want_enc = encrypt or embed_secret or secret or secret_env or secret_prompt or expires or machine or user or geo
+    sec = None
+    if want_enc:
+        if secret:            sec = secret.encode()
+        elif secret_env:      sec = os.environ.get(secret_env, "").encode()
+        elif secret_prompt:
+            import getpass; sec = getpass.getpass("build secret: ").encode()
+        if not sec:
+            typer.secho("encryption requested but no secret — use --secret / --secret-env / --secret-prompt",
+                        fg="red"); raise typer.Exit(2)
+    try:
+        info = build_exe(project, out, target=target, tier=tier, secret=sec,
+                         expires=expires, geo=[g for g in geo.split(",") if g],
+                         machine=machine, user=user, embed_secret=embed_secret, python=python,
+                         wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
+                         entry_point=entry_point)
+    except AmbiguousProject as e:
+        _report_ambiguity(project, e)
+        raise typer.Exit(2)
+    except TargetError as e:
+        typer.secho(f"haru-pack: {e}", fg="red"); raise typer.Exit(2)
+    except EntryPointError as e:
+        typer.secho(str(e), fg="red"); raise typer.Exit(2)
+    except BuildError as e:
+        typer.secho(str(e), fg="red"); raise typer.Exit(2)
+    tag = " 🔒encrypted" if info.get("encrypted") else ""
+    typer.secho(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
+                f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", fg="green")
+
 
 @app.command()
 def version():
@@ -42,7 +119,8 @@ def _report_ambiguity(project: Path, e: "AmbiguousProject") -> None:
 
 @app.command()
 def doctor(path: Path = typer.Argument(None, help="project/script to scan for needed bundle/install steps"),
-           target: str = typer.Option("host", help="'host' or 'windows' (cross-compile)")):
+           target: str = typer.Option("host",
+               help="'host', or <os>-<arch>: " + ", ".join(KNOWN_TARGETS))):
     """Check the build toolchain, and (if given a project) detect needed bundle/post_install steps."""
     nim = find_nim()
     typer.secho(f"nim       : {nim_version(nim) if nim else 'NOT FOUND — run `haru-pack bootstrap`'}",
@@ -85,7 +163,8 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
         raise typer.Exit(1)
 
 @app.command()
-def bootstrap(target: str = typer.Option("host", help="also verify the toolchain for this target"),
+def bootstrap(target: str = typer.Option("host",
+                  help="also verify the toolchain for this target (<os>-<arch>)"),
               force: bool = typer.Option(False, help="reinstall Nim even if present")):
     """Install Nim (+zippy) into a managed dir and verify the C toolchain."""
     typer.echo("installing/locating Nim ...")
@@ -105,7 +184,8 @@ def bootstrap(target: str = typer.Option("host", help="also verify the toolchain
 @app.command()
 def build(project: Path = typer.Argument(..., help="payload dir (contains manifest.json + app/)"),
           out: Path = typer.Option(None, "--out", "-o", help="output exe path"),
-          target: str = typer.Option("host", help="'host' or 'windows'"),
+          target: str = typer.Option("host",
+              help="'host', or <os>-<arch>: " + ", ".join(KNOWN_TARGETS)),
           tier: str = typer.Option("default", help="thin | default | thick"),
           thin: bool = typer.Option(False, "--thin", help="bundle NOTHING; fetch uv+python+deps on target"),
           thick: bool = typer.Option(False, "--thick", help="bundle EVERYTHING; download nothing (offline)"),
@@ -128,40 +208,11 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
     (uv + Python bundled, fully offline)."""
-    if thin: tier = "thin"
-    if thick or chonky: tier = "thick"
-    if tier not in ("thin", "default", "thick"):
-        typer.secho(f"unknown tier '{tier}' (thin|default|thick)", fg="red"); raise typer.Exit(2)
-    if chonky:
-        typer.secho("🦣 chonky mode: bundling everything…", fg="magenta")
-    if out is None:
-        out = Path((project.name or "app")).with_suffix(".exe" if target == "windows" else "")
-    want_enc = encrypt or embed_secret or secret or secret_env or secret_prompt or expires or machine or user or geo
-    sec = None
-    if want_enc:
-        if secret:            sec = secret.encode()
-        elif secret_env:      sec = os.environ.get(secret_env, "").encode()
-        elif secret_prompt:
-            import getpass; sec = getpass.getpass("build secret: ").encode()
-        if not sec:
-            typer.secho("encryption requested but no secret — use --secret / --secret-env / --secret-prompt",
-                        fg="red"); raise typer.Exit(2)
-    try:
-        info = build_exe(project, out, target=target, tier=tier, secret=sec,
-                         expires=expires, geo=[g for g in geo.split(",") if g],
-                         machine=machine, user=user, embed_secret=embed_secret, python=python,
-                         wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
-                         entry_point=entry_point)
-    except AmbiguousProject as e:
-        _report_ambiguity(project, e)
-        raise typer.Exit(2)
-    except EntryPointError as e:
-        typer.secho(str(e), fg="red"); raise typer.Exit(2)
-    except BuildError as e:
-        typer.secho(str(e), fg="red"); raise typer.Exit(2)
-    tag = " 🔒encrypted" if info.get("encrypted") else ""
-    typer.secho(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
-                f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", fg="green")
+    _run_build(project=project, out=out, target=target, tier=tier, thin=thin, thick=thick,
+               chonky=chonky, encrypt=encrypt, secret=secret, secret_env=secret_env,
+               secret_prompt=secret_prompt, embed_secret=embed_secret, expires=expires,
+               machine=machine, user=user, geo=geo, python=python, entry_point=entry_point,
+               wine=wine)
 
 @app.command()
 def verify(exe: Path):

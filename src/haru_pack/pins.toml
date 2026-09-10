@@ -1,0 +1,177 @@
+# haru-pack — pinned artifact digests.
+#
+# Every third-party artifact haru-pack downloads and then executes is verified against a
+# digest recorded here BEFORE it is extracted (INV-SUPPLY-01). An artifact with no entry
+# is refused, not downloaded.
+#
+# This file is data, not code, and it is meant to be read and edited by hand. Add an entry
+# with `tools/add-pin.py`, which fetches the digest from the publisher and writes it here
+# with its provenance. Do NOT compute a digest by downloading the file and hashing it:
+# that pins whatever the server happened to send you, which is a different statement from
+# 'this is what the publisher says it published'.
+#
+# NEVER edit a digest to make a failing check pass. A mismatch means the artifact is not
+# the one this repo pinned — investigate it. See docs/CONFIG.md.
+
+schema_version = 1
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-aarch64-apple-darwin.tar.gz"
+sha256 = "a6852e4dc565c8fedcf5adcdf09fca7caf5347739bed512bd95b15dada36db51"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-apple-darwin.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-apple-darwin.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-aarch64-pc-windows-msvc.zip"
+sha256 = "77f859cfc26181bdfb94087ce42336d9e2d9e0700bc42f6668445cde517198ce"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-pc-windows-msvc.zip"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-pc-windows-msvc.zip.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-aarch64-unknown-linux-gnu.tar.gz"
+sha256 = "c84a6e6405715caa6e2f5ef8e5f29a5d0bc558a954e9f1b5c082b9d4708c222e"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-unknown-linux-gnu.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-unknown-linux-gnu.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-armv7-unknown-linux-gnueabihf.tar.gz"
+sha256 = "d1824ed14f3ad0e7cb7835b46bc0299859cd8141d039a66274a135ca9797bf9c"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-armv7-unknown-linux-gnueabihf.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-armv7-unknown-linux-gnueabihf.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-x86_64-apple-darwin.tar.gz"
+sha256 = "df6dd1c3ebeab4369a098c516c15c233c62bf789a40a4864b30dad1d38d7604e"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-apple-darwin.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-apple-darwin.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-x86_64-pc-windows-msvc.zip"
+sha256 = "0f0e22d7507633bfb38d9b42fb6a0341f1f74b8e80b070a31231c354812432a3"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-pc-windows-msvc.zip"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-pc-windows-msvc.zip.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "6b52a47358deea1c5e173278bf46b2b489747a59ae31f2a4362ed5c6c1c269f7"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "0a4647b7df3c8eca11071d6cea68a14a4b102bd6fc6afae314e9852510654b7d"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-apple-darwin-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "0354f70e7d3e2d0c36308edc1815c563d9bae1a3221830f7e222f6bb0a7e1a3a"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-armv7-unknown-linux-gnueabihf-install_only_stripped.tar.gz"
+sha256 = "5c5dd5237712f0e5edf88b886df005887a408d453a6829bb6a16da3bb1c3a755"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-armv7-unknown-linux-gnueabihf-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "ee338839315bdd8af5fc935f9595eca20ebebdd250726c5816b2d0cf94d1e661"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-pc-windows-msvc-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "a36bc60c38fe146e908e2e71fc21266c8558b24a9407226b1d887212839437ef"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "29d38bd5fbe267b37cecac990015c662796edcf51c2f5e321d59ec06a1850816"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-aarch64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "3a7068f8a0bc197d6a62908f62a3e2c177ef4ed8d63b78bcbff7a24996638aba"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "fdc5d80488b64fcef3b99f297618f68e5374c13d89e888a66abeff4967afd308"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-armv7-unknown-linux-gnueabihf-install_only_stripped.tar.gz"
+sha256 = "10e8297747b13b224de6a4728edd5ea5b9bf682366eb8dd03f085874abe1fc8b"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-aarch64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "4611a41c8653fd074f75999f5ae806ee151b59828fbe7d218e02e125187263fe"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "93bf8e8c05ede0077b197a29c99ebdaf253497f27190097494265150b4e70ba8"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "1dbaa624a09e15afe7efbdac08d42993135a68db8d34f986ef6977a6d77bdc3c"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.13.12%2B20260211-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "b73415a86dcf298a2f4a585c5371fb1cf003576d2bdc2b80a34d5321284b2ed4"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.13.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "bab0e2aeec8a32a7f5cb62240d088d50ea468ef6d7522681bc171d527a5ba6f8"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"

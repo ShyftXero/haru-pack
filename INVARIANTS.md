@@ -119,6 +119,51 @@ did). The generated argv sets `sys.argv[0]` and re-raises the callable's return 
 code would be reported as success.
 Territory: src/haru_pack/entrypoints.py, src/haru_pack/build.py, tests/test_entrypoints.py
 
+### INV-BUILD-05
+Status: active
+Statement: Every artifact a build bundles — the `uv` binary, the standalone interpreter, and
+the compiled launcher itself — is built for the target's architecture, and a target with no
+pinned artifact for its architecture is refused rather than silently served an x86_64 one.
+Actors: not an attacker — an operator building for a Raspberry Pi, and their customers.
+Assets: whether the shipped binary runs at all. The **default** tier bundles a `uv`
+executable, so an arch mismatch does not degrade gracefully: the target cannot execute it,
+and the failure appears on the customer's machine as "cannot execute binary file".
+Red-path: Hardcode a single asset name in `targets._UV_ASSETS` for two architectures, or drop
+`--all-arches` from `bundle._find_python_url`, or hardcode x86_64 in `uvfetch.nim`'s
+`uvAsset()`. Each has its own claiming test; the asset-uniqueness one goes red immediately.
+Source: Added 2026-09-09. `--target` meant an OS and x86_64 was implied everywhere:
+`_UV_ASSET` had one entry per OS, `_find_python_url` defaulted `arch="x86_64"`, and
+`uvfetch.nim` hardcoded three x86_64 asset names. A Raspberry Pi is an ordinary target here.
+Note: `--all-arches` is load-bearing and easy to lose. Without it `uv python list` returns
+only x86_64 and armv7 — checked against uv 0.10.4 — so an aarch64 lookup finds nothing and
+the target looks *unsupported* rather than *unpinned*, which sends you debugging the wrong
+thing entirely.
+Note: python-build-standalone ships gnu and musl builds for the same (os, arch) and they are
+not interchangeable, so the resolver filters on libc.
+Note: Verified end to end on 2026-09-09 — `bundle_uv` and `bundle_python` for
+`linux-aarch64` both downloaded, verified against their pinned digests, and `file(1)`
+reported "ELF 64-bit LSB, ARM aarch64" for each.
+Territory: src/haru_pack/targets.py, src/haru_pack/bundle.py, src/haru_pack/bootstrap.py,
+src/haru_pack/launcher/uvfetch.nim, tests/test_targets.py
+
+### INV-BUILD-06
+Status: active
+Statement: `haru-pack <path>` is a shortcut for `haru-pack build <path>`, and it never
+shadows a registered subcommand.
+Actors: anyone typing the obvious thing.
+Assets: the CLI's predictability. A shortcut that swallows `version` or `doctor` is worse
+than no shortcut.
+Red-path: Reimplement the shortcut as a `@app.callback(invoke_without_command=True)` with a
+positional argument. Click then binds the first token to it and `haru-pack version` is parsed
+as "build the project named 'version'"; the claiming test invokes `version` and goes red.
+Source: Added 2026-09-09 for the "point it at a script and a binary appears" UX. The callback
+approach was tried first and did exactly the above — it also left every unpassed option as a
+Typer `OptionInfo` sentinel, so a plain `haru-pack hello.py` printed "🦣 chonky mode" and then
+crashed on `OptionInfo.encode()`.
+Note: Both entry points call one plain `_run_build()` with ordinary keyword defaults, rather
+than `ctx.invoke`, which is what produced the sentinel bug. One implementation, two doors.
+Territory: src/haru_pack/cli.py, tests/test_targets.py
+
 ---
 
 ## CRYPTO — the container is what both implementations think it is

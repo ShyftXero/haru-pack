@@ -135,22 +135,64 @@ def _distro_mingw_cmd() -> str:
         return "brew install mingw-w64"
     return "install the 'mingw-w64' cross toolchain from your package manager"
 
-def detect_c_toolchain(target: str) -> dict:
-    """target: 'host' or 'windows'. Returns {ok, compiler, advice}."""
-    if target == "windows" and sys.platform != "win32":
-        cc = shutil.which("x86_64-w64-mingw32-gcc")
-        if cc:
-            return {"ok": True, "compiler": cc, "advice": ""}
+def detect_c_toolchain(target) -> dict:
+    """Is there a C compiler that can produce a binary for `target`? Returns {ok, compiler, advice}.
+
+    Cross-compiling is the whole reason this project uses Nim, so a missing toolchain has to
+    produce a sentence the operator can act on — the package name for their distro — rather
+    than a link error from deep inside a Nim build.
+    """
+    from .targets import Target, TargetError
+    try:
+        tgt = target if hasattr(target, "os") else Target.parse(target)
+    except TargetError as e:
+        return {"ok": False, "compiler": None, "advice": str(e)}
+
+    if tgt.is_host:
+        for c in ("cc", "gcc", "clang"):
+            p = shutil.which(c)
+            if p:
+                return {"ok": True, "compiler": p, "advice": ""}
+        if sys.platform == "win32":
+            return {"ok": False, "compiler": None,
+                    "advice": "no C compiler found; run `choosenim` (bundles mingw) or install "
+                              "MSVC Build Tools"}
         return {"ok": False, "compiler": None,
-                "advice": ("cross-compiling Linux->Windows needs the mingw-w64 toolchain "
-                           f"(provides x86_64-w64-mingw32-gcc):\n    {_distro_mingw_cmd()}")}
-    # host target
-    for c in ("cc", "gcc", "clang"):
-        p = shutil.which(c)
-        if p:
-            return {"ok": True, "compiler": p, "advice": ""}
-    if sys.platform == "win32":
+                "advice": "no C compiler found; install gcc/clang from your package manager"}
+
+    cc, pkg = tgt.cross_cc()
+    if cc is None:
         return {"ok": False, "compiler": None,
-                "advice": "no C compiler found; run `choosenim` (bundles mingw) or install MSVC Build Tools"}
+                "advice": f"haru-pack has no cross-compiler mapping for {tgt}. Build natively on "
+                          f"a {tgt} machine, or add one to targets._CROSS_CC."}
+    found = shutil.which(cc)
+    if found:
+        return {"ok": True, "compiler": found, "advice": ""}
     return {"ok": False, "compiler": None,
-            "advice": "no C compiler found; install gcc/clang from your package manager"}
+            "advice": (f"cross-compiling to {tgt} needs {cc}:\n"
+                       f"    {_install_hint(pkg)}\n"
+                       f"Alternatively, build natively on a {tgt} machine.")}
+
+
+def _install_hint(pkg: str) -> str:
+    """Best-effort package-manager line for this host. Wrong guesses are cheap; a bare
+    package name with no command is not actionable."""
+    info = {}
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1); info[k] = v.strip().strip('"')
+    except Exception:
+        pass
+    ident = (info.get("ID", "") + " " + info.get("ID_LIKE", "")).lower()
+    if sys.platform == "darwin":
+        return f"brew install {pkg}"
+    if any(d in ident for d in ("debian", "ubuntu", "raspbian")):
+        return f"sudo apt install {pkg}"
+    if any(d in ident for d in ("fedora", "rhel", "centos")):
+        return f"sudo dnf install {pkg}"
+    if "arch" in ident:
+        return f"sudo pacman -S {pkg}"
+    if any(d in ident for d in ("suse", "opensuse")):
+        return f"sudo zypper install {pkg}"
+    return f"install '{pkg}' with your package manager"

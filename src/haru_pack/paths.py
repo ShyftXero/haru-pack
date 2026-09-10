@@ -1,5 +1,4 @@
 from __future__ import annotations
-import sys
 from pathlib import Path
 from platformdirs import user_data_dir
 
@@ -18,5 +17,8 @@ def launcher_src_dir() -> Path:
     """Nim launcher source shipped inside the wheel."""
     return Path(__file__).resolve().parent / "launcher"
 
-def exe_suffix(target: str) -> str:
-    return ".exe" if target == "windows" or (target == "host" and sys.platform == "win32") else ""
+def exe_suffix(target) -> str:
+    """`.exe` iff the TARGET is Windows — not iff the build host is."""
+    from .targets import Target
+    tgt = target if hasattr(target, "os") else Target.parse(target)
+    return tgt.exe_suffix

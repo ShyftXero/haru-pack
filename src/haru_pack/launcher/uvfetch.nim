@@ -33,9 +33,26 @@ const
   FetchTimeoutSecs* = 120'f32
 
 proc uvAsset(): string =
-  when defined(windows): "uv-x86_64-pc-windows-msvc.zip"
-  elif defined(macosx):  "uv-x86_64-apple-darwin.tar.gz"
-  else:                  "uv-x86_64-unknown-linux-gnu.tar.gz"
+  ## The uv release asset for the machine THIS launcher was compiled for.
+  ##
+  ## Selected from `hostCPU`, which Nim resolves at compile time to the --cpu the binary is
+  ## being built for — so a launcher cross-compiled for a Raspberry Pi asks for the aarch64
+  ## asset, not the build host's. This was hardcoded to x86_64 on all three platforms, which
+  ## meant a thin-tier build for any ARM target downloaded an x86_64 uv at first run and died
+  ## with "cannot execute binary file" on the customer's machine.
+  ##
+  ## Keep these names in step with targets._UV_ASSETS on the Python side; the pinned digests
+  ## in bundle.UV_SHA256 are keyed by exactly these strings.
+  when defined(windows):
+    when hostCPU == "arm64": "uv-aarch64-pc-windows-msvc.zip"
+    else:                    "uv-x86_64-pc-windows-msvc.zip"
+  elif defined(macosx):
+    when hostCPU == "arm64": "uv-aarch64-apple-darwin.tar.gz"
+    else:                    "uv-x86_64-apple-darwin.tar.gz"
+  else:
+    when hostCPU == "arm64": "uv-aarch64-unknown-linux-gnu.tar.gz"
+    elif hostCPU == "arm":   "uv-armv7-unknown-linux-gnueabihf.tar.gz"
+    else:                    "uv-x86_64-unknown-linux-gnu.tar.gz"
 
 proc isValidUvVersion*(v: string): bool =
   ## The manifest is inside the payload, so it is attacker-controlled the moment the

@@ -201,7 +201,8 @@ def test_install_nim_refuses_a_platform_with_no_pinned_digest(monkeypatch, tmp_p
 def uv_download(monkeypatch, uv_tarball):
     """Force bundle_uv down its download path and serve it the fixture archive."""
     monkeypatch.setattr(bundle.shutil, "which", lambda name: None)   # no local uv to copy
-    asset = bundle._UV_ASSET[bundle._host_os()]
+    from haru_pack.targets import Target
+    asset = Target.parse("host").uv_asset()
     if asset.endswith(".zip"):
         pytest.skip("fixture archive is a tarball; host resolves a .zip asset")
 
@@ -296,9 +297,11 @@ def test_the_pinned_versions_are_the_ones_with_pins():
     """A version bump without a digest bump must be caught here, not at build time."""
     assert bundle.UV_VERSION in bundle.UV_SHA256, \
         f"UV_VERSION {bundle.UV_VERSION} has no entry in UV_SHA256"
-    for tos, asset in bundle._UV_ASSET.items():
+    from haru_pack.targets import KNOWN_TARGETS, Target
+    for spec in KNOWN_TARGETS:
+        asset = Target.parse(spec).uv_asset()
         assert asset in bundle.UV_SHA256[bundle.UV_VERSION], \
-            f"no pinned digest for the {tos} uv asset {asset}"
+            f"no pinned digest for the {spec} uv asset {asset}"
     for name in bootstrap.NIM_SHA256:
         assert bootstrap.NIM_VERSION in name, \
             f"stale Nim pin {name!r} does not belong to NIM_VERSION {bootstrap.NIM_VERSION}"
@@ -388,3 +391,68 @@ def test_nimble_specs_would_survive_a_shell():
     """`pkg@ver` is nimble's exact-version syntax; nothing here needs quoting."""
     for spec in bootstrap.nim_dep_specs():
         assert not set(spec) & set(" \t'\"`$;&|<>*?"), f"unsafe nimble spec {spec!r}"
+
+
+# ---------- pins live in data, not in code (INV-SUPPLY-01) ----------
+
+@pytest.mark.invariant("INV-SUPPLY-01")
+def test_pins_are_data_not_source_literals():
+    """Digests belong in pins.toml, hand-editable, each with its provenance.
+
+    Red-path: paste a `UV_SHA256 = {...}` literal back into bundle.py. A maintainer bumping
+    uv should edit a table, and a reader auditing what a build trusted should not have to
+    follow Python to find out what it trusted.
+    """
+    import inspect
+    from haru_pack import pins
+    src = inspect.getsource(bundle)
+    body = src[:src.index("def _run(")]
+    assert "pins.uv_digests()" in body and "pins.python_digests()" in body
+    assert '"uv-x86_64-unknown-linux-gnu.tar.gz":' not in body, (
+        "a digest literal is back in bundle.py"
+    )
+    assert pins.pins_path().exists()
+
+
+@pytest.mark.invariant("INV-SUPPLY-01")
+def test_every_pin_records_where_it_came_from():
+    """A digest with no provenance is indistinguishable from an invented one."""
+    from haru_pack import pins
+    prov = pins.provenance()
+    assert prov, "no provenance recorded at all"
+    for key, where in prov.items():
+        assert where, f"{key} has no provenance"
+        assert ("sha256" in where or "release API" in where), (
+            f"{key}: provenance {where!r} names neither a sidecar nor the release API — the "
+            "two channels that carry the publisher's own statement"
+        )
+
+
+@pytest.mark.invariant("INV-SUPPLY-01")
+def test_pins_file_is_packaged_with_the_wheel():
+    """An installed haru-pack must pin exactly what the release pinned. Red-path: drop
+    `src/haru_pack/pins.toml` from pyproject's hatch include list."""
+    from pathlib import Path
+    pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+    assert "src/haru_pack/pins.toml" in pyproject, (
+        "pins.toml is not packaged; an installed copy would fail to load its pins"
+    )
+
+
+@pytest.mark.invariant("INV-SUPPLY-01")
+def test_a_malformed_pins_file_is_fatal_not_a_fallback(tmp_path):
+    """Refusing beats degrading: a build that cannot read its pins must not proceed to
+    download things unverified."""
+    from haru_pack.pins import PinsError, load
+    bad = tmp_path / "pins.toml"
+    bad.write_text('schema_version = 1\n[[artifact]]\nkind = "uv"\nversion = "1"\n'
+                   'asset = "a"\nsha256 = "nope"\n')
+    load.cache_clear()
+    with pytest.raises(PinsError):
+        load(str(bad))
+    load.cache_clear()
+
+    bad.write_text('schema_version = 99\n')
+    with pytest.raises(PinsError):
+        load(str(bad))
+    load.cache_clear()
