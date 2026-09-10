@@ -30,9 +30,16 @@ appdata, skip on later runs. Explicitly reject onefile's re-extract-every-launch
   derive user-data paths from `__file__`.
 
 ## Signing + AV
+
+> _Two corrections from `research/05`: "EV signing" below should read "OV signing" (EV OIDs
+> were removed from Microsoft's trusted roots in Aug 2024), and on **Windows** prefer PE
+> resources over a tail overlay — uv appended a magic trailer exactly as described here and
+> signtool broke it (uv#15022, fixed by moving to `.rcdata`). Scan-backward remains correct
+> for ELF; on Mach-O a tail overlay is not possible at all._
+
 - **Append payload FIRST, sign LAST.** Appending after signing breaks it. Footer must
   stay locatable after the cert table is appended (scan-backward-for-magic).
-- **No UPX** (invalidates sig + trips heuristics). Persistent on-disk files + EV signing
+- **No UPX** (invalidates sig + trips heuristics). Persistent on-disk files + code signing
   + accrued SmartScreen reputation = the real AV mitigation. Onefile+UPX+unsigned = worst.
 - Offer an **external-payload mode** (launcher + sidecar archive, onedir-like) for
   enterprise AV that still distrusts a single self-extracting stub.

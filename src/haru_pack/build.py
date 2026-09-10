@@ -6,7 +6,7 @@ from .paths import launcher_src_dir, exe_suffix
 from .payload import build_payload_zip
 from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
-from .tiers import apply_tier
+from .tiers import apply_tier, bundles_uv
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine)
 
@@ -76,7 +76,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
         shutil.copytree(source, app, ignore=_IGNORE)
     manifest = apply_tier(dict(manifest), tier)
     vendor = payload / "vendor"
-    if tier in ("default", "thick"):
+    if bundles_uv(tier):
         bundle_uv(target, vendor)
     if tier == "thick":
         steps = manifest.get("bundle") or []

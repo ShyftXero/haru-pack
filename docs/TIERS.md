@@ -8,6 +8,14 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 | **default** | *(none)* | uv | Python + deps | ~23 MB | no (net on 1st run) |
 | **thick** | `--thick` / `--chonky` | uv + Python (+deps) | nothing | ~90 MB | **yes** |
 
+> **Invariant: uv is bundled in every tier except `thin`.** haru-pack never assumes the
+> target machine already has uv — no supported Ubuntu LTS ships it, Debian has no CLI
+> package (its ITP has been open since 2024 and only `python3-uv-build` landed), and NixOS
+> documents uv's interpreter fetching as problematic. `thin` is the sole opt-out and it pays
+> for that with a first-run download. Enforced in code by `tiers.bundles_uv()`, which is the
+> single source of truth for both the bundler and the manifest's `fetch_uv` flag.
+> Background: `research/05` §4.9.
+
 - **thin** — smallest artifact. On first run the launcher fetches the pinned uv release,
   then uv provisions Python + deps. The download is **one code path**: `puppy` (uses the
   OS-native TLS stack — **WinHTTP/Schannel** on Windows, **libcurl** on Linux/mac), so the

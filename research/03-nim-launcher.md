@@ -46,7 +46,12 @@ let rc = p.waitForExit(); p.close(); quit(rc)
   `--app:gui` (no console) would starve a console child's stdio. Use gui only for a
   windowed app that manages its own I/O.
 
-## Windows EV code signing
+## Windows code signing
+
+> _Superseded in one respect by `research/05` Part 7: "EV" below should read "OV". Microsoft
+> removed all EV code-signing OIDs from its trusted roots in August 2024; the certificate
+> class no longer affects SmartScreen. Everything else here stands._
+
 - Nim → normal C → normal Authenticode-capable PE. `signtool sign /fd SHA256 /tr <ts>
   /td SHA256 /a app.exe`.
 - **Order:** embedding via a PE section is inside the hash (fine). **Appending an overlay

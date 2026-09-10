@@ -7,6 +7,7 @@ from .bootstrap import (find_nim, nim_version, install_nim, ensure_nim_deps,
                         detect_c_toolchain)
 from .build import build as build_exe, BuildError
 from .overlay import verify as verify_exe
+from .tiers import TIERS
 
 app = typer.Typer(add_completion=False, help="haru-pack — pack a Python project into a single, signable native launcher.")
 
@@ -102,8 +103,8 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
     (uv + Python bundled, fully offline)."""
     if thin: tier = "thin"
     if thick or chonky: tier = "thick"
-    if tier not in ("thin", "default", "thick"):
-        typer.secho(f"unknown tier '{tier}' (thin|default|thick)", fg="red"); raise typer.Exit(2)
+    if tier not in TIERS:
+        typer.secho(f"unknown tier '{tier}' ({'|'.join(TIERS)})", fg="red"); raise typer.Exit(2)
     if chonky:
         typer.secho("🦣 chonky mode: bundling everything…", fg="magenta")
     if out is None:

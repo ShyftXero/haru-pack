@@ -1,8 +1,15 @@
 # haru-pack — Windows code signing
 
-Requirement: the produced exe **may ship unsigned but MUST support signing** with an EV
-code-signing certificate. The whole flow is **cross-platform (runs on Linux CI)** — no
-Windows machine required.
+Requirement: the produced exe **may ship unsigned but MUST support signing** with a
+publicly-trusted Authenticode code-signing certificate. The whole flow is **cross-platform
+(runs on Linux CI)** — no Windows machine required.
+
+> **Do not buy an EV certificate.** Microsoft Trusted Root Program requirements §3.D.3:
+> *"Starting February 2024, Microsoft will no longer accept or recognize EV Code Signing
+> Certificates… Beginning in August 2024, all EV Code Signing OIDs will be removed from
+> existing roots in the Microsoft Trusted Root Program, and **all Code Signing certificates
+> will be treated equally**."* EV is not "faster to earn reputation" — the distinction no
+> longer exists. An OV certificate is the correct purchase. See `research/05` Part 7.
 
 ## Why our design is signable
 - Nim compiles to a normal C-linked **Authenticode-capable PE** (mingw-w64 or MSVC).
@@ -30,18 +37,21 @@ python3 builder/attach.py build/app.exe app.uvcap build/app.attached.exe
 ## Signing options (all Linux-capable)
 `signtool` is Windows-only. For a cross-compiled pipeline use:
 
-### A. osslsigncode + hardware EV token (PKCS#11)
-EV private keys are non-exportable (FIPS 140-2 HSM/USB token, e.g. SafeNet/YubiHSM).
-Drive the token via the PKCS#11 engine:
+### A. osslsigncode + hardware token (PKCS#11)
+Since June 2023 the CA/Browser Forum baseline requirements put **all** code-signing private
+keys — OV included, not just EV — on FIPS-certified hardware (HSM/USB token, e.g.
+SafeNet/YubiHSM), so this path is unchanged by dropping EV. Drive the token via the PKCS#11
+engine:
 ```sh
 osslsigncode sign \
   -pkcs11engine /usr/lib/x86_64-linux-gnu/engines-3/pkcs11.so \
   -pkcs11module /usr/lib/libeToken.so \
-  -certs ev-cert.pem -key "pkcs11:object=...;type=private" \
+  -certs codesign-cert.pem -key "pkcs11:object=...;type=private" \
   -h sha256 -ts http://timestamp.digicert.com \
   -in build/app.attached.exe -out build/app.exe
 ```
-Caveat: many EV tokens require an interactive PIN → awkward for headless CI.
+Caveat: many hardware tokens require an interactive PIN → awkward for headless CI.
+Option B avoids this entirely and is the recommended path.
 
 ### B. jsign + cloud signer (preferred, modern, headless)
 `jsign` (Java, cross-platform) signs PE/MSI using cloud keys — **Azure Trusted Signing**,
@@ -62,7 +72,17 @@ signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a build\a
 
 ## Always
 - **RFC3161 timestamp** (`-ts` / `/tr` + `/td SHA256`) so the signature outlives cert expiry.
-- **EV cert** → immediate SmartScreen reputation (the real reason to buy EV over OV).
+- **RSA, not ECC.** Smart App Control "allows applications signed with RSA-based digital
+  certificates… It does not currently support elliptic-curve cryptography (ECC)", and the
+  Trusted Root Program likewise excludes ECC and keys > 4096. Choose this at provisioning
+  time — it is not changeable later without a new certificate.
+- **One signing identity, kept as long as possible.** SmartScreen reputation attaches to the
+  file hash *and* the publisher certificate; renewing to a new thumbprint appears to reset
+  publisher reputation with no documented recourse. Plan renewals accordingly.
+- **Keep the launcher's bytes stable across releases.** Reputation accrues to the stub's
+  hash, and a stub that rarely changes keeps it for years even as the app it carries
+  changes. This is the actual mechanism behind "signed installers stop getting warnings" —
+  not the certificate class.
 - **Verify**: `osslsigncode verify -in build/app.exe` — check *Calculated == Current
   message digest*. Then `python3 builder/verify.py build/app.exe` to confirm the payload
   footer + sha256 survived.
@@ -76,4 +96,14 @@ the sidecar via `getAppDir()`. Onedir-like, least-suspicious posture.
 Cross-compiled on Linux, attached payload, signed with `osslsigncode` (throwaway cert),
 `osslsigncode verify` reported matching Authenticode digests, and the Nim exe (under wine)
 relocated its footer + verified its payload sha256 from its own **signed** image. Only the
-cert *chain* failed (self-signed) — an EV cert resolves that. See `docs/PLAN.md` §10.
+cert *chain* failed (self-signed) — any publicly-trusted code-signing cert resolves that.
+See `docs/PLAN.md` §10.
+
+## Known gap: the payload we stage is not covered by our signature
+Signing the launcher says nothing about the uv and CPython it stages. uv's own binaries are
+signed and notarized as of uv 0.12.12; **python-build-standalone artifacts are not signed at
+all**. Under Windows Smart App Control — which requires every binary to be recognized or
+signed, not just the entry point — a signed stub confers nothing on an unsigned staged
+interpreter. Mitigation is to pin a SHA256 per staged artifact at build time, store it in
+the payload *before* signing, and fail closed on mismatch. See `research/05` Part 5 (#3) and
+Part 9.4.
