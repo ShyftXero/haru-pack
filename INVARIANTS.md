@@ -1194,6 +1194,36 @@ Note: Mirrors are for availability and policy. If a mismatch appears after point
 the mirror is wrong or stale. Do not edit the pin to make it pass.
 Territory: src/haru_pack/sources.py, src/haru_pack/bundle.py, tests/test_sources.py
 
+### INV-SUPPLY-11
+Status: active
+Statement: A python-build-standalone pin is keyed by the artifact's canonical GitHub release
+URL, not by whatever mirror uv currently reports. A uv upgrade that changes its download host
+never invalidates a pin, and haru-pack prefers a version that is already pinned over whatever
+patch uv's catalog has advanced to.
+Actors: whoever upgrades uv (the user did, mid-session); whoever later runs a thick build and
+expects the pins to still mean something.
+Assets: the stability of the pin set. haru-pack resolves python URLs live from uv's catalog, so
+if the pin key tracked uv's mirror, every uv release would silently invalidate every python pin
+and turn thick builds into a re-pinning treadmill.
+Red-path: Remove `_canonical_pbs_url` from `_find_python_url` so the pin is keyed by uv's raw
+URL. After a uv upgrade that moved the host (0.10 github.com → 0.12 releases.astral.sh), every
+python pin misses and thick builds fail with `UnpinnedArtifact`. Or delete the prefer-pinned
+branch so `_find_python_url` returns uv's newest patch even when an older pinned build is still
+in the catalog; a thick build then chases an unpinned version it did not need to. Both have
+claiming tests.
+Source: 2026-09-10. `uv self update` 0.10.4 → 0.12.12 moved the catalog host to
+releases.astral.sh and advanced the newest builds, which broke every thick python pin at once.
+The canonical-URL keying plus prefer-pinned restored 3 of 5 targets with no re-pinning; the two
+x86_64 targets were re-pinned to the 3.13.9 build the others already used, so all five now stage
+one uniform, verified interpreter.
+Note: This composes with INV-SUPPLY-10. Canonicalisation decides the pin KEY (publisher
+identity); `Sources.python_url` decides the download POINT (mirror). A mirror still cannot dodge
+the pin, because the key is the publisher URL regardless of where the bytes come from.
+Note: Prefer-pinned falls back to uv's newest only when NO pinned build for the minor is in the
+catalog — and then the pin check refuses it, loudly, which is the signal to run add-pin. It
+never silently stages an unverified interpreter.
+Territory: src/haru_pack/bundle.py, tests/test_supply_chain.py
+
 ### INV-SUPPLY-03
 Status: active
 Statement: No archive is extracted with a call that permits writes outside the destination
