@@ -49,6 +49,13 @@ packages = ["src/haru_pack"]
 include = [
   "src/haru_pack/**/*.py",
   "src/haru_pack/launcher/*.nim",
+  # The vendored XZ decoder is compiled by `nim c` at build time, so the C sources have to
+  # be in the wheel or every launcher build fails with "xz.h: No such file or directory".
+  # PROVENANCE.md ships with them deliberately: it is the audit trail for third-party C
+  # that ends up inside a binary the operator signs.
+  "src/haru_pack/launcher/xz/*.c",
+  "src/haru_pack/launcher/xz/*.h",
+  "src/haru_pack/launcher/xz/PROVENANCE.md",
   "src/haru_pack/pins.toml",
 ]
 
@@ -63,6 +70,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
   "invariant(id): claims an entry in INVARIANTS.md. Run the contract with `pytest -m invariant`.",
+  "slow: needs a real toolchain and compiles something. Skip with `-m 'not slow'`.",
 ]
 
 [tool.ruff]

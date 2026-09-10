@@ -1074,3 +1074,59 @@ Red-path: Not yet implemented — there is no launcher-side hook, so there is no
 red. Would require the stager to install an import hook that consults a pruned-path list
 shipped in the manifest.
 Source: Named as a known gap when `--shake` landed, 2026-09-10, rather than left implicit.
+
+---
+
+## The uv binary is compressed in the payload and byte-identical in the stage
+
+### INV-PAYLOAD-04
+Status: active
+Statement: When `uv` is bundled it is stored XZ-compressed in the payload and expanded
+during staging to a binary **byte-identical to the publisher's release**, before the stage
+manifest is recorded — so the file the launcher executes is covered by stage verification
+exactly as an uncompressed one was.
+Actors: the operator shipping over a metered or slow link; the recipient's AV and
+application-allowlisting stack; the auditor asking what `uv` is inside a signed artifact.
+Assets: ~8 MB of every non-thin binary, and the integrity chain around the one file the
+launcher runs first. Measured on uv 0.10.4 linux-x86_64 (2026-09-10): 55.59 MB raw,
+22.25 MB as the payload's DEFLATE, **14.17 MB** as XZ/LZMA2. A default-tier `hello`
+went 23 MB to 15.0 MB.
+Note — why not UPX, which was the original proposal: packing *modifies the executable*.
+That destroys uv's own Authenticode signature, makes the payload bytes match no publisher
+digest (so `INV-SUPPLY-01`'s verification becomes unrepeatable by a third party), trips the
+packer heuristics that AV engines apply to UPX above all others — on exactly the enterprise
+Windows targets this project exists to serve — and pays decompression on *every* launch
+rather than once. Compressing the payload *member* instead gets the same bytes back:
+verified 2026-09-10, staged `vendor/uv` sha256 `ae65ed04fee535f3ab8d31da7c2f9fde156dc5afdd6b5b5125e535ccc49bba34`,
+identical to the release tarball's, and present in `.stage-files` under that digest.
+Red-path: three, and each was a real failure caught while building this:
+(1) move the `expandCompressedMembers(root)` call in `stage.stageZip` to after
+`recordTree(root)` — the executed binary drops out of the recorded set;
+(2) add a BCJ filter (`lzma.FILTER_X86`) to `bundle.compress_uv`'s chain — Python still
+round-trips it, but `xz_dec_bcj.c` is deliberately not vendored, so the *launcher* rejects
+the stream on the target;
+(3) build `xzdec.nim`'s include path with `parentDir()` and `/` instead of explicit forward
+slashes — those use the TARGET's separator, so `--target windows-x86_64` emits
+`-I\home\...` and mingw cannot find `xz.h`. Walked all three 2026-09-10.
+Source: Eli asked whether haru-pack could UPX the uv binary before storing it, 2026-09-10.
+The answer was that the size win is real but belongs to LZMA rather than to packing, and is
+obtainable without modifying a signed third-party executable.
+Territory: src/haru_pack/bundle.py, src/haru_pack/launcher/xzdec.nim,
+src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/xz/
+
+### INV-PAYLOAD-05
+Status: active
+Statement: The vendored XZ decoder in `src/haru_pack/launcher/xz/` matches, file for file,
+the SHA-256 digests recorded in its own `PROVENANCE.md`, and no undeclared C or header file
+sits alongside it.
+Actors: whoever updates the vendored decoder; whoever audits third-party C that is compiled
+into a binary they Authenticode-sign.
+Assets: the audit trail for ~3 400 lines of third-party C in every launcher. This repo pins
+every *binary* it executes (`INV-SUPPLY-01`); vendored source that nothing checks would be
+the same trust gap with a friendlier appearance.
+Red-path: change one byte of `xz/xz_dec_lzma2.c`, or drop a new `.c` into `xz/`, without
+updating `PROVENANCE.md`. The claiming test goes red.
+Source: Written with `INV-PAYLOAD-04`, 2026-09-10 — the decoder was vendored rather than
+fetched precisely so it would be reviewable in a diff, which is only true if drift is
+detectable.
+Territory: src/haru_pack/launcher/xz/, tests/test_uv_compression.py

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, shutil, subprocess, sys, tempfile, zipfile
+import hashlib, json, os, shutil, subprocess, sys, tempfile, zipfile
 from pathlib import Path
 from .archives import safe_extract_tar, fetch_verified, UnpinnedArtifact
 from .sources import Sources
@@ -98,6 +98,58 @@ def bundle_uv(target: str, vendor_dir: Path, version: str = UV_VERSION,
         _extract_find(arc, exe, dest)
     if tgt.os != "windows": dest.chmod(0o755)
     return dest
+
+XZ_PRESET = 9
+
+def compress_uv(uv_path: Path, version: str = UV_VERSION, preset: int = XZ_PRESET,
+                log=None) -> tuple:
+    """Replace a staged `uv` with `uv.xz` + `uv.xz.size`; the launcher expands it (INV-PAYLOAD-04).
+
+    `uv` is the largest member of every non-thin payload and the payload zip only has
+    DEFLATE. Measured on uv 0.10.4 linux-x86_64 (2026-09-10): 55.59 MB raw, 22.25 MB
+    deflated, **14.17 MB** as XZ/LZMA2 — 8.08 MB off the finished binary.
+
+    Two deliberate constraints on the stream, both of which the launcher depends on:
+
+    * **`FORMAT_XZ`, `CHECK_CRC32`, LZMA2 only, no BCJ filter.** The vendored decoder is
+      built without `xz_dec_bcj.c` (see `launcher/xz/PROVENANCE.md`). A BCJ filter would
+      compress an x86 binary further and the decoder would reject it *on the customer's
+      machine*, so the filter chain is spelled out here rather than left to a preset.
+    * **The uncompressed size ships beside it.** The launcher decodes in one shot with
+      `XZ_SINGLE`, which needs the output size up front and in exchange needs no separate
+      64 MB dictionary — the difference between this being fine on a Raspberry Pi and not.
+
+    The result is cached under `paths.cache_dir()`, keyed by the digest of the input plus
+    the preset. Compressing at preset 9 takes ~100 s and is a pure function of its input,
+    so a second build reuses it. `uv` staged from this is byte-identical to the release —
+    that is the property that made this preferable to UPX.
+    """
+    import lzma
+    from .paths import cache_dir
+    say = log or (lambda _m: None)
+    raw = uv_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    ck = cache_dir() / "uv-xz" / f"{digest}-p{preset}.xz"
+    if ck.exists():
+        comp = ck.read_bytes()
+        say(f"uv: reusing cached xz ({len(comp) / 1e6:.1f} MB)")
+    else:
+        say(f"uv: compressing {len(raw) / 1e6:.1f} MB with xz preset {preset} "
+            f"(once per uv version; cached afterwards)")
+        comp = lzma.compress(raw, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC32,
+                             filters=[{"id": lzma.FILTER_LZMA2, "preset": preset}])
+        ck.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ck.with_suffix(".part")
+        tmp.write_bytes(comp)
+        tmp.replace(ck)                      # atomic: two builds may race here
+    dest = uv_path.with_name(uv_path.name + ".xz")
+    dest.write_bytes(comp)
+    dest.with_name(dest.name + ".size").write_text(str(len(raw)), encoding="utf-8")
+    uv_path.unlink()
+    say(f"uv: {len(raw) / 1e6:.1f} MB -> {len(comp) / 1e6:.1f} MB compressed in the "
+        f"payload; the launcher expands it to a byte-identical binary at stage time")
+    return len(raw), len(comp), digest
+
 
 def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
     """Find the UPSTREAM python-build-standalone URL for an (os, arch, version).

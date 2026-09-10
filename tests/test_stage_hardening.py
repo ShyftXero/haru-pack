@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import zipfile
@@ -366,7 +367,12 @@ def test_no_dead_key_helper_remains():
     is a trap for the next reader."""
     src = (LAUNCHER / "stage.nim").read_text(encoding="utf-8")
     assert "keyFor" not in src, "the unused keyFor helper is back in stage.nim"
-    assert "hashes" not in src, "std/hashes (the non-crypto hash) is imported again"
+    # Matched as the import, not as the bare word: `hashes` appears in ordinary prose about
+    # what recordTree does, so the substring form failed on a comment that mentioned it.
+    assert "std/hashes" not in src, "std/hashes (the non-crypto hash) is imported again"
+    assert not re.search(r"^\s*import\s+.*\bhashes\b", src, re.M), (
+        "std/hashes (the non-crypto hash) is imported again"
+    )
 
 
 # ---------------------------------------------------------------- runtime uv fetch

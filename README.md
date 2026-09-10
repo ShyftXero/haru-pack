@@ -90,6 +90,16 @@ rewritten, so a hostile mirror gets you a failed build, not a compromised one.
 you build Pi binaries on an x86_64 machine with `--target linux-aarch64`. You never need a
 toolchain on the Pi.
 
+**The bundled uv is compressed, not packed.** `uv` is the biggest thing in any non-thin
+payload and the payload zip only has DEFLATE, so uv ships XZ-compressed (55.59 → 14.17 MB
+vs 22.25 MB deflated) and the launcher expands it during staging — about 8 MB off every
+default and thick binary. It is expanded **byte-identically to the publisher's release** and
+recorded in the stage manifest like everything else, which is precisely why this is not UPX:
+packing modifies the executable, destroying uv's own signature, matching no publisher digest,
+tripping AV packer heuristics, and paying the cost on every launch instead of once. The
+decoder is decoder-only vendored C from xz-embedded, no target-side library.
+[`docs/TIERS.md`](docs/TIERS.md).
+
 **Thick can be shaken, on evidence, never on a guess.** `--shake` runs the project's own
 test suite under a file-access tracer, keeps the bundled files it touched, then rebuilds the
 environment from the pruned payload and re-runs the suite — and fails the build if that

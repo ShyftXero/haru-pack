@@ -12,7 +12,7 @@ from .targets import Target
 from .entrypoints import resolve_entrypoint
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
-                     warm_cache_for_script, install_dev_tools)
+                     warm_cache_for_script, install_dev_tools, compress_uv)
 from . import shake as shake_mod
 
 class BuildError(RuntimeError): ...
@@ -149,7 +149,13 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
     # tiers.bundles_uv is the single statement of which tiers ship a uv (main's
     # INV-TIER work); tgt/sources carry the arch and mirror plumbing.
     if bundles_uv(tier):
-        bundle_uv(tgt, vendor, sources=sources)
+        uv_exe = bundle_uv(tgt, vendor, sources=sources)
+        # INV-PAYLOAD-04. uv is the biggest thing in a non-thin payload and the payload zip
+        # is DEFLATE-only, so it ships XZ-compressed and the launcher expands it during
+        # staging. Guarded on the return value because `conftest.stub_toolchain` replaces
+        # bundle_uv with a stub that stages no binary at all.
+        if uv_exe and Path(uv_exe).is_file():
+            compress_uv(uv_exe, log=log)
     if tier == "thick":
         steps = manifest.get("bundle") or []
         if steps and not tgt.is_host and not wine:

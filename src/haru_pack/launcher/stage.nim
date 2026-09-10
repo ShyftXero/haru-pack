@@ -31,6 +31,7 @@
 import std/[os, strutils, algorithm]
 import zippy/ziparchives
 import nimcrypto/sha2
+import xzdec
 when defined(posix): import std/posix
 
 type StageError* = object of CatchableError
@@ -185,6 +186,56 @@ proc isRuntimeMutable*(rel: string): bool =
 #     PYTHONPYCACHEPREFIX at a directory outside the verified tree. A .pyc appearing
 #     inside the stage is therefore not ours.
 
+proc expandCompressedMembers(root: string) =
+  ## Expand any `<name>.xz` the build stored compressed, then delete the `.xz`.
+  ##
+  ## ORDERING IS THE WHOLE POINT, and it is why this is called from `stageZip` between
+  ## `extractAll` and `recordTree` rather than lazily at first use: after this runs the
+  ## tree looks exactly like a tree from an uncompressed payload, so `recordTree` records a
+  ## sha256 for the *expanded* `vendor/uv` in `.stage-files` and `verifyTree` re-checks it
+  ## on every reuse — the same protection `vendor/uv` has always had (INV-STAGE-01).
+  ## Expanding later would mean the one file `main.findUv` executes first was written into
+  ## the tree after the manifest was sealed, i.e. outside it. That exemption existed once
+  ## already and INV-STAGE-01's own note records why it was a hole.
+  ##
+  ## The `.xz` and its `.size` sidecar are removed before recording, so they never appear
+  ## in the recorded set and cost nothing on reuse.
+  # Collected before any mutation: this loop deletes the files it visits, and mutating a
+  # tree while `walkDirRec` is iterating it is undefined.
+  var members: seq[string]
+  for path in walkDirRec(root, relative = true):
+    let rel = path.replace('\\', '/')
+    if rel.endsWith(".xz"): members.add rel
+  for rel in members:
+    let full = root / rel
+    let sizePath = full & ".size"
+    if not fileExists(sizePath):
+      raise newException(StageError,
+        "payload has " & rel & " with no .size sidecar; refusing to guess how large it " &
+        "expands to. This payload was not produced by a matching haru-pack.")
+    var want: int
+    try:
+      want = parseInt(readFile(sizePath).strip())
+    except ValueError:
+      raise newException(StageError, "unreadable size sidecar for " & rel)
+    let dest = full[0 ..< full.len - 3]           # strip ".xz"
+    if fileExists(dest):
+      raise newException(StageError,
+        "payload contains both " & rel & " and its expanded form; refusing to choose")
+    var data: string
+    try:
+      data = xzDecode(readFile(full), want)
+    except XzError as e:
+      raise newException(StageError, "could not expand " & rel & ": " & e.msg)
+    writeFile(dest, data)
+    when defined(posix):
+      # uv is executed, so it needs the bit back. Group/other write is stripped by
+      # `hardenDir`/`recordTree` afterwards, as for every other staged file.
+      try: setFilePermissions(dest, {fpUserRead, fpUserWrite, fpUserExec})
+      except OSError: discard
+    removeFile(full)
+    removeFile(sizePath)
+
 proc recordTree(root: string): tuple[manifest: string, count: int] =
   var rels: seq[string]
   for p in walkDirRec(root, relative = true):
@@ -283,6 +334,7 @@ proc stageZip*(payload: string, key: string): string =
   let root = tmp / "root"
   extractAll(zipPath, root)           # dest must not pre-exist
   removeFile(zipPath)
+  expandCompressedMembers(root)       # BEFORE recordTree — see that proc's comment
   hardenDir(root)
   let (mf, count) = recordTree(root)
   writeHardened(root / FilesName, mf)

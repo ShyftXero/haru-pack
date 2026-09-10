@@ -5,8 +5,12 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 | Tier | Flag | Bundled | Fetched on target | Size (hello) | Offline |
 |------|------|---------|-------------------|--------------|---------|
 | **thin** | `--thin` | nothing | uv + Python + deps | ~0.4 MB | no (needs net on 1st run) |
-| **default** | *(none)* | uv | Python + deps | ~23 MB | no (net on 1st run) |
-| **thick** | `--thick` / `--chonky` | uv + Python (+deps) | nothing | ~90 MB | **yes** |
+| **default** | *(none)* | uv | Python + deps | ~15 MB | no (net on 1st run) |
+| **thick** | `--thick` / `--chonky` | uv + Python (+deps) | nothing | ~82 MB | **yes** |
+
+> The default and thick figures are ~8 MB smaller than they used to be because the bundled
+> `uv` now ships XZ-compressed; see below. `hello` at default tier measured 15.0 MB on
+> 2026-09-10.
 
 > **Invariant: uv is bundled in every tier except `thin`.** haru-pack never assumes the
 > target machine already has uv — no supported Ubuntu LTS ships it, Debian has no CLI
@@ -27,6 +31,33 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
   (staged via `uv python install`) and, for projects, a prebuilt env. Downloads **nothing**
   at runtime (`UV_OFFLINE=1`). The launcher **discovers the bundled interpreter at runtime**
   (robust to uv's version-alias symlink dir, which the zip doesn't preserve).
+
+## The bundled uv is compressed, not packed
+`uv` is the largest member of every non-thin payload, and the payload zip only has DEFLATE.
+So it ships as `vendor/uv.xz` and the launcher expands it while staging. On uv 0.10.4
+linux-x86_64: **55.59 MB raw → 22.25 MB deflated → 14.17 MB as XZ/LZMA2**, i.e. ~8 MB off
+the finished binary. `INV-PAYLOAD-04`.
+
+The staged `uv` is **byte-identical to Astral's release** — verified, digest
+`ae65ed04…`, and recorded in `.stage-files` like every other staged file. That identity is
+the reason this is compression of a payload member rather than UPX-packing the executable:
+packing modifies the binary, which destroys uv's own code signature, makes the shipped
+bytes match no publisher digest, trips the AV packer heuristics that target UPX most of
+all, and pays decompression on *every* launch instead of once.
+
+Cost: ~2.7 s of one-time expansion during the first run's staging, and ~100 s of
+compression on the *build* host the first time a given uv version is seen (cached under the
+user cache dir afterwards, keyed by input digest and preset). Decoding uses xz-embedded's
+`XZ_SINGLE` mode, which uses the output buffer as its own dictionary — so there is no 64 MB
+dictionary allocation, which is what makes it fine on a Raspberry Pi.
+
+Cross-platform: the decoder is ~3 400 lines of vendored, decoder-only C from
+[xz-embedded](https://github.com/tukaani-project/xz-embedded) (the one the Linux kernel
+uses to boot XZ kernels), with no dependencies beyond `memcpy`. Verified compiling and
+round-tripping byte-identically on Linux x86_64 and on Windows x86_64 cross-compiled from
+Linux (run under wine). `aarch64` and macOS were **not** compile-tested — the toolchains
+were absent on the build host — but the C is architecture-neutral. Provenance and per-file
+digests: `src/haru_pack/launcher/xz/PROVENANCE.md`, enforced by `INV-PAYLOAD-05`.
 
 ## What thick does NOT carry
 The bundled dependency cache holds the project's **runtime** resolution only. `uv sync`
