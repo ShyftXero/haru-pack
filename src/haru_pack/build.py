@@ -167,7 +167,7 @@ def _resolve(project: Path, tier: str, python_cli: str,
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:
             manifest[k] = decl[k]
-    pyver = python_cli or decl.get("python", "") or disc.get("python", "") or "3.12"
+    pyver = python_cli or decl.get("python", "") or disc.get("python", "") or "3.13"
     e = decl.get("encryption", {})
     enc = {
         # INV-BUILD-02: an explicit --encrypt must enable encryption on its own. It was
@@ -357,10 +357,10 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     if obfuscate and obfuscate != "none" and tier != "thick":
         say = log or (lambda _m: None)
         say(f"WARNING: --obfuscate with tier={tier}. Obfuscation is bound to Python "
-            f"{python or '3.12'} EXACTLY, and only --thick bundles that interpreter. On "
+            f"{python or '3.13'} EXACTLY, and only --thick bundles that interpreter. On "
             f"thin/default the target may resolve a different Python minor and the binary "
             f"will fail to start with an 'undefined symbol' import error. Use --thick, or "
-            f"ensure the target has exactly Python {python or '3.12'}.")
+            f"ensure the target has exactly Python {python or '3.13'}.")
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")

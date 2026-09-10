@@ -1,5 +1,6 @@
 from __future__ import annotations
-import json, os, shutil, subprocess, sys, tempfile, zipfile
+import json
+import re, os, shutil, subprocess, sys, tempfile, zipfile
 from pathlib import Path
 from .archives import safe_extract_tar, fetch_verified, UnpinnedArtifact
 from .sources import Sources
@@ -114,7 +115,11 @@ def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
         if not e.get("version", "").startswith(version): continue
         url = e.get("url") or ""
         if "install_only" not in url: continue
-        if best is None or e["version"] > best[0]:
+        # Version comparison must be numeric, not lexical: "3.13.9" > "3.13.14" as strings,
+        # which would pick an older patch as "newest". Compare (major, minor, patch) tuples.
+        def _vt(v: str) -> tuple:
+            return tuple(int(x) for x in re.findall(r"\d+", v.split("+")[0])[:3])
+        if best is None or _vt(e["version"]) > _vt(best[0]):
             best = (e["version"], url)
     if not best:
         raise RuntimeError(
@@ -122,7 +127,7 @@ def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
             f"`uv python list --all-platforms --all-versions` shows what is available.")
     return best[1]
 
-def bundle_python(target: str, vendor_dir: Path, version: str = "3.12",
+def bundle_python(target: str, vendor_dir: Path, version: str = "3.13",
                   sources: Sources | None = None) -> Path:
     """Stage a standalone Python into vendor/python — ONE path for host and cross.
 

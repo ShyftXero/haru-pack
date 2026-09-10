@@ -102,7 +102,7 @@ class PyArmorEngine(ObfuscationEngine):
     reasons this is right rather than importing pyarmor directly:
 
       * pyarmor binds its obfuscated code to the interpreter version that produced it. The
-        binary stages a specific Python (the manifest's `python`, default 3.12), so the
+        binary stages a specific Python (the manifest's `python`, default 3.13), so the
         obfuscation MUST target that version or the app fails to load at runtime — measured:
         obfuscating under 3.14 and staging 3.12 produces a bootstrap the staged interpreter
         cannot execute. Running pyarmor under the target version via uv fixes this exactly.
@@ -117,7 +117,7 @@ class PyArmorEngine(ObfuscationEngine):
     all obfuscate and run when targeted). pyarmor does NOT support free-threaded (GIL-less)
     CPython — the `+freethreaded` / `python3.14t` builds — and a bare "3.14" can resolve to
     one of those via uv, so that failure is caught and re-raised with the real constraint.
-    There is nothing special about 3.12; it is only haru-pack's default `python`.
+    There is nothing special about 3.13; it is only haru-pack's default `python`.
     """
 
     name = "pyarmor"
@@ -141,7 +141,7 @@ class PyArmorEngine(ObfuscationEngine):
             raise ObfuscationError(
                 f"obfuscation entrypoint {entry_rel!r} does not exist in the app tree")
 
-        pyver = python or "3.12"
+        pyver = python or "3.13"
         out = Path(tempfile.mkdtemp(prefix="haru-pyarmor-"))
         try:
             cmd = ["uv", "run", "--python", pyver, "--with", "pyarmor", "--",

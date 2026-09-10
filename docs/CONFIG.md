@@ -5,7 +5,7 @@
 - **kind** — `pyproject.toml` with `[project]` → project; a single `.py` (or a `.py` path) →
   PEP 723 script.
 - **Python version** — `requires-python` (pyproject or PEP 723 block) → `.python-version` →
-  else `3.12`. Override with `--python X.Y` or `haru_pack.toml` `python`.
+  else `3.13`. Override with `--python X.Y` or `haru_pack.toml` `python`.
 - **entrypoint** — `[project.scripts]` first entry, else `python -m <name>` for a project;
   the script filename for a script.
 - **name** — `[project].name` or the script stem.
@@ -26,7 +26,7 @@ name = "myapp"                   # usually discovered
 kind = "project"                 # usually discovered
 app_subdir = "app"               # where source is placed inside the payload
 entrypoint = ["python", "-m", "myapp"]   # string (script) or argv (command)
-python = "3.12"                  # staged Python version
+python = "3.13"                  # staged Python version
 cwd_policy = "exe"               # "launch" (native cwd, default) | "exe" (exe-adjacent)
 verbose_uv = false
 uv_run_args = ["--isolated"]

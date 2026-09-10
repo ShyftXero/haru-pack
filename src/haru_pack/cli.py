@@ -253,7 +253,7 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           machine: str = typer.Option("", "--machine", help="bind to this machine-id (cryptographic)"),
           user: str = typer.Option("", "--user", help="bind to this OS username (cryptographic)"),
           geo: str = typer.Option("", "--geo", help="allowed country codes, comma-separated"),
-          python: str = typer.Option("", "--python", help="Python version to stage (e.g. 3.12); default auto/3.12"),
+          python: str = typer.Option("", "--python", help="Python version to stage (e.g. 3.13); default auto/3.13"),
           entry_point: str = typer.Option("", "--entry-point", "-e",
               help="what to run: a script (app.py), a console script (lotek), or "
                    "module:callable (app.cli:main) — same spelling as [project.scripts]"),
