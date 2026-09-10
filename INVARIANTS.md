@@ -149,6 +149,31 @@ those turned up on the first real run, and conflating them with product defects 
 what the split prevents.
 Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_ledger.py
 
+### INV-CHAOS-02
+Status: active
+Statement: Every working directory a chaos run creates is removed when the run ends, however
+it ends — success, a raising case, or an interrupt — except artifacts deliberately held for a
+finding, which are reported with their size.
+Actors: not an attacker — whoever owns the disk. Also the next person to run the suite on a
+box that has been quietly filling up.
+Assets: the machine. At the thick tier each work directory holds a staged interpreter;
+measured, three cases leaked 489.7 MB. A harness nobody can afford to run is a harness
+nobody runs.
+Red-path: Move `reaper.reap()` out of `main()`'s `finally` block onto the success path.
+Interrupt a run, or let a case raise, and the directories survive. One claiming test parses
+`main()`'s AST and fails if the reap call is not reachable from a `finally`, because "we put
+it back on the happy path" is the regression worth catching, not the absence of the call.
+Source: A correctness bug in the first version of busybody, found on 2026-09-09 while adding
+the ledger. Work dirs were removed only when a case succeeded — and a chaos harness is the
+program most likely to be interrupted, so best-effort cleanup was exactly the wrong shape.
+Note: `Reaper.reap()` never raises. It runs in a `finally`, so an exception there would mask
+the original failure — the one actually worth reading.
+Note: Orphan reaping and run pruning follow lotek's `cleanup.py` heartbeat rule: if any run
+has a fresh heartbeat, something may still be using its directories and nothing is touched. A
+missing or unreadable heartbeat means not live, and both are safe to reap, because a live run
+always has a fresh one.
+Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_ledger.py
+
 ---
 
 ## FLEX — the harness that decides what haru-pack is tested against
