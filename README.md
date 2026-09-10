@@ -25,6 +25,11 @@ haru-pack build ./myproject                 # default tier: uv bundled, deps fet
 haru-pack build ./myproject --thin          # smallest; fetch uv+python+deps on target
 haru-pack build ./myproject --thick         # bundle everything, fully offline (chonky 🦣)
 haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux -> Windows
+
+# projects that declare more than one console script are AMBIGUOUS: haru-pack refuses and
+# lists them rather than guessing, because a wrong guess builds cleanly and runs the wrong
+# program. Say which one you meant, in the same spelling [project.scripts] uses:
+haru-pack build ./lotek --out lotek --entry-point "app.cli:main"
 ```
 
 ## Commands
@@ -42,6 +47,7 @@ haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-o, --out PATH` | `<name>[.exe]` | output path |
+| `-e, --entry-point SPEC` | discovered | what to run: `app.py`, a console script (`lotek`), or `module:callable` (`app.cli:main`) |
 | `--target host\|windows` | `host` | build target (Windows = cross-compile) |
 | `--python X.Y` | auto | Python version to stage (else discovered from the project) |
 | `--wine` | off | run execute-required bundle steps under wine (thick + `--target windows`) |
@@ -124,6 +130,7 @@ user data — the code lives in the stage dir.
 - [docs/TIERS.md](docs/TIERS.md) — bundling tiers + the Playwright example
 - [docs/SIGNING.md](docs/SIGNING.md) — Windows EV code signing (cross-platform)
 - [docs/ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) — `--encrypt` + license checks
+- [docs/RELEASING.md](docs/RELEASING.md) — cutting a release (`./scripts/cut-release.sh`)
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — publishing to PyPI
 - [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)
 
@@ -133,7 +140,16 @@ fidelity, all three tiers, EV-signable output, offline Playwright+Firefox, and e
 + license checks.
 
 Read [THREAT_MODEL.md](THREAT_MODEL.md) before relying on `--encrypt` for anything
-commercial. Two things worth knowing up front: the launcher does **not** verify its
-payload before running it ([`INV-LAUNCH-01`](INVARIANTS.md)), and the `--expires` / `--geo`
-checks read the local clock and an environment variable supplied by the person being
-restricted — they are not enforcement. Machine and user binding *are* cryptographic.
+commercial. What the licensing feature does and does not enforce:
+
+- **Machine and user binding are cryptographic.** The identity is folded into the KDF, so a
+  different machine id yields a different key and decryption fails. Note that
+  `/etc/machine-id` is a writable file, so this binds to a value the target *reports*.
+- **`--expires` and `--geo` are not enforcement.** Geo reads `HARUPACK_GEO` — an environment
+  variable set by the person being restricted — and expiry reads their clock. Both run after
+  decryption inside a binary they control.
+- **The launcher verifies its payload digest before staging or executing**
+  ([`INV-LAUNCH-01`](INVARIANTS.md)), but that digest is **not a MAC**: it lives in the same
+  footer an attacker would edit, so someone who modifies the payload can recompute it. Real
+  tamper-evidence needs a signature ([`INV-LAUNCH-03`](INVARIANTS.md), not yet implemented),
+  or Authenticode on a signed Windows build.
