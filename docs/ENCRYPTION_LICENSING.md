@@ -46,13 +46,16 @@ haru-pack build ./app --encrypt --secret s --embed-secret
 Get a target machine's id: `haru-pack machine-id` (customer runs it, sends you the value).
 
 ## Runtime secret resolution (precedence)
-1. env `HARUPACK_SECRET`  2. embedded (if `--embed-secret`)  3. interactive prompt (TTY).
+1. env `HARU_SECRET`  2. embedded (if `--embed-secret`)  3. interactive prompt (TTY).
+`HARU_SECRET` is the SECRET knob's default canary (read as `<canary>_SECRET`); `--env-canary`
+/ `--stub-env-secret-canary` change the prefix, and the retired `HARUPACK_SECRET` is no longer
+read (INV-CANARY-01).
 Location check reads `HARUPACK_GEO` (offline geo is weak — online lookup is future work).
 
 ## Failure messages (exit codes)
 - expired → `license expired (DATE)` (3)
 - location → `not licensed for this location` (3)
-- no secret available → prompt to set `HARUPACK_SECRET` (4)
+- no secret available → prompt to set `HARU_SECRET` (or the build's chosen canary) (4)
 - wrong secret / wrong machine / wrong user / tampered → single message (5)
 
 ## Honest ceiling, part 2: what expiry and geo actually are

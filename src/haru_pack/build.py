@@ -1,7 +1,7 @@
 from __future__ import annotations
 import datetime as _dt
 import re as _re
-import shutil, subprocess, tempfile
+import secrets, shutil, string, subprocess, tempfile
 from pathlib import Path
 from . import tomlio, discovery, crypto
 from .paths import launcher_src_dir
@@ -41,6 +41,123 @@ _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv", "*.egg
 # choice produce identical binaries, and the one place the difference shows up is a customer
 # resolving a relative path from the wrong directory.
 CWD_POLICIES = ("launch", "exe")
+
+# ── Stub-config + per-knob canary (docs/adr/0003-stub-config-and-canary.md §2/§3/§5) ──
+# The closed knob catalogue, in the fixed order the cleartext stub-config section writes them.
+# Matches launcher/stubconfig.nim `Knob{kSecret,kUvVer,kSourceUrl,kBasePath}` and its lowercase
+# `[canary]` keys — adding a knob is a format change on BOTH halves, on purpose (INV-CANARY-02).
+CANARY_KNOBS = ("secret", "uv_ver", "source_url", "base_path")
+DEFAULT_CANARY = "HARU"
+# ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced here at build time,
+# re-validated by the launcher's parseStubConfig, so neither half trusts the other blindly.
+_CANARY_RE = _re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# inject (env-append) reserved keys (docs/adr/0003 §4.3). The launcher sets its own reserved
+# vars AFTER the inject loop and so WINS on a collision (INV-LAUNCH-09); an inject that lands on
+# one of these would be silently dropped. A silently-ineffective inject is exactly the class
+# INV-BUILD-01/02 exist to forbid, so the build refuses it outright rather than shipping a lie.
+_RESERVED_INJECT_KEYS = frozenset({
+    "UV_CACHE_DIR", "UV_PYTHON", "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_DOWNLOADS",
+    "UV_OFFLINE", "UV_PROJECT_ENVIRONMENT", "PYTHONPYCACHEPREFIX", "PYTHONPATH",
+})
+# Secret-shaped inject detection (docs/adr/0003 §4.3) — deterministic, so the warning is
+# reproducible. Same honesty as --embed-secret (INV-SECRET-02): an unencrypted payload ships the
+# value recoverable in plaintext, and haru-pack says so rather than letting the operator assume.
+_SECRET_KEY_MARKERS = ("SECRET", "TOKEN", "PASSWORD", "PASSWD", "APIKEY", "API_KEY",
+                       "PRIVATE_KEY", "ACCESS_KEY")
+_SECRET_VALUE_RE = _re.compile(r"[A-Za-z0-9+/=_-]{20,}\Z")
+
+
+def _random_canary() -> str:
+    """One random `[A-Z][A-Z0-9]{7}` token (8 chars) for --env-canary-random."""
+    return (secrets.choice(string.ascii_uppercase)
+            + "".join(secrets.choice(string.ascii_uppercase + string.digits)
+                      for _ in range(7)))
+
+
+def resolve_canary(env_canary: str = "", env_canary_random: bool = False,
+                   per_knob: dict | None = None, log=None) -> dict:
+    """Resolve the per-knob canary map (docs/adr/0003 §5). Precedence, per knob independently:
+
+        --stub-env-<knob>-canary  >  --env-canary / --env-canary-random  >  built-in "HARU"
+
+    Refuses two conflicting all-knobs defaults, and any resolved token (default or per-knob)
+    that is not a valid env-name prefix (§5.2). On --env-canary-random, logs each knob's final
+    token so the packager can record what to set at runtime (§5.3). The map is NOT secret
+    (INV-SECRET-02 covers the secret VALUE only)."""
+    per_knob = per_knob or {}
+    if env_canary and env_canary_random:
+        raise BuildError(
+            "--env-canary and --env-canary-random set two conflicting all-knobs canary "
+            "defaults. Pass one or the other.")
+    default = _random_canary() if env_canary_random else (env_canary or DEFAULT_CANARY)
+    canary: dict = {}
+    for knob in CANARY_KNOBS:
+        tok = per_knob.get(knob) or default
+        if not _CANARY_RE.fullmatch(tok):
+            src = (f"--stub-env-{knob.replace('_', '-')}-canary" if per_knob.get(knob)
+                   else ("--env-canary-random" if env_canary_random else "--env-canary"))
+            raise BuildError(
+                f"canary token {tok!r} (from {src}) is not a valid env-name prefix.\n"
+                f"The launcher reads knob {knob.upper()} from <canary>_{knob.upper()} at "
+                f"runtime, so the canary must match ^[A-Za-z_][A-Za-z0-9_]*$.")
+        canary[knob] = tok
+    if env_canary_random:
+        say = log or (lambda _m: None)
+        say("--env-canary-random: record these — the launcher reads each knob at runtime "
+            "as <TOKEN>_<KNOB>:")
+        for knob in CANARY_KNOBS:
+            say(f"  {knob:10} -> {canary[knob]}_{knob.upper()}")
+    return canary
+
+
+def stub_config_bytes(canary: dict) -> bytes:
+    """The cleartext stub-config TOML section (docs/adr/0003 §2.1), UTF-8, in fixed knob
+    order. Tokens are validated env-name prefixes, so no TOML escaping is needed. Read before
+    decryption by launcher/stubconfig.parseStubConfig; sha-checked first (INV-STUB-01)."""
+    lines = ["stub_config_version = 1", "", "[canary]"]
+    lines += [f'{knob} = "{canary[knob]}"' for knob in CANARY_KNOBS]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _looks_secret_shaped(key: str, value: str) -> bool:
+    """Deterministic 'this inject looks like a credential' test (docs/adr/0003 §4.3)."""
+    ku = key.upper()
+    if ku.endswith("_KEY") or any(m in ku for m in _SECRET_KEY_MARKERS):
+        return True
+    return bool(_SECRET_VALUE_RE.fullmatch(value))
+
+
+def resolve_injects(env_append, encrypted: bool, log=None) -> list:
+    """Validate --env-append into the manifest `inject` list (docs/adr/0003 §4.3).
+
+    Refuses a malformed (`no '='`, empty KEY) or reserved-KEY inject — an inject the launcher
+    would silently drop is the class INV-BUILD-01/02 forbid. On an UNENCRYPTED build, warns
+    loudly for a secret-shaped inject, the same honesty as --embed-secret (INV-SECRET-02): the
+    value ships recoverable in plaintext. An ENCRYPTED build hides the payload, so no warning.
+    Called 'inject', never 'project'. Each entry is stored verbatim; the launcher splits on the
+    FIRST '=' (INV-LAUNCH-09), so an odd VALUE containing '=' round-trips faithfully."""
+    injects: list = []
+    for raw in (env_append or []):
+        if "=" not in raw:
+            raise BuildError(f"--env-append must be KEY=VALUE; got {raw!r} with no '='.")
+        key, value = raw.split("=", 1)
+        if not key:
+            raise BuildError(f"--env-append has an empty KEY: {raw!r}.")
+        if key.startswith("HARUPACK_") or key in _RESERVED_INJECT_KEYS:
+            raise BuildError(
+                f"--env-append {key}=… uses a reserved key. The launcher sets its own "
+                f"HARUPACK_*, the managed UV_*, PYTHONPYCACHEPREFIX and PYTHONPATH AFTER the "
+                f"injects and wins on a collision (INV-LAUNCH-09), so this inject would be "
+                f"silently dropped. Rename it, or configure the launcher's behaviour directly.")
+        if not encrypted and _looks_secret_shaped(key, value):
+            say = log or (lambda _m: None)
+            say(f"WARNING: --env-append {key}=… looks secret-shaped and this build is NOT "
+                f"encrypted, so the value ships recoverable in plaintext in the binary. Add "
+                f"--encrypt to hide it inside the payload, or confirm it is not a secret "
+                f"(INV-SECRET-02).")
+        injects.append(raw)
+    return injects
 
 
 def validate_encryption(enc: dict) -> None:
@@ -444,7 +561,10 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           obfuscate: str = "none", obfuscate_args=(),
           python: str = "", wine: bool = False, encrypt: bool = False,
           entry_point: str = "", shake: bool = False, shake_keep=(),
-          log=None) -> dict:
+          env_canary: str = "", env_canary_random: bool = False,
+          stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
+          stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
+          env_append=None, log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -484,6 +604,20 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
+    # Canary map + injects are resolved BEFORE any compilation, so a bad token or a reserved
+    # inject fails fast (like --shake's preconditions) rather than after producing a payload.
+    # The secret-shaped inject WARNING depends on whether the payload will be encrypted, which
+    # is known here (INV-INJECT-01). One resolution rule for all four knobs (INV-CANARY-02).
+    canary = resolve_canary(env_canary, env_canary_random,
+                            per_knob={"secret": stub_env_secret_canary,
+                                      "uv_ver": stub_env_uv_ver_canary,
+                                      "source_url": stub_env_source_url_canary,
+                                      "base_path": stub_env_base_path_canary}, log=log)
+    injects = resolve_injects(env_append, encrypted=enc["enabled"], log=log)
+    if injects:
+        # Lives in the PAYLOAD manifest (post-decrypt), so --encrypt hides it (docs/adr/0003
+        # §4). Carried through assemble_payload's manifest dump; the launcher reads `inject`.
+        manifest["inject"] = injects
     shake_report: dict = {}
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -513,7 +647,10 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
                 "Refusing to emit a binary whose build receipt would be wrong.")
         launcher = compile_launcher(nim, tgt, tdp)
-        info = attach(launcher, payload, out, flags=flags)
+        # Every NEW binary is v2: it always carries the cleartext, signature-covered
+        # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
+        info = attach(launcher, payload, out, flags=flags,
+                      stub_config=stub_config_bytes(canary))
     try:
         out.chmod(0o755)
     except Exception:
@@ -523,6 +660,10 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     info.update(sources=sources.describe(),
                 tier=tier, target=str(tgt), nim=nim, compiler=tc["compiler"], out=str(out),
                 encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver,
+                # The resolved canary map (env-name prefixes) is not secret — recording it aids
+                # auditing (INV-CANARY-02). The secret VALUE still lands in no artifact
+                # (INV-SECRET-02).
+                canary=canary,
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
     if shake_report:

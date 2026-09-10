@@ -217,7 +217,7 @@ def test_an_intact_encrypted_container_passes_the_digest_check(
     """
     exe = tmp_path / "app.exe"
     build_exe(release_launcher, encrypted_container, exe, flags=1)
-    r = run_exe(exe, tmp_path, env_extra={"HARUPACK_SECRET": "s3cret"})
+    r = run_exe(exe, tmp_path, env_extra={"HARU_SECRET": "s3cret"})
     assert r.returncode != EXIT_DIGEST_MISMATCH, (
         "an untouched encrypted build failed its own digest check — the digest is being "
         f"taken over the wrong layer ({r.stderr})")
@@ -232,7 +232,7 @@ def test_edited_encrypted_container_is_caught_by_the_digest_before_the_aead(
     exe = tmp_path / "app.exe"
     info = build_exe(release_launcher, encrypted_container, exe, flags=1)
     flip(exe, info["payload_off"] + info["payload_len"] - 1)   # last ciphertext byte
-    r = run_exe(exe, tmp_path, env_extra={"HARUPACK_SECRET": "s3cret"})
+    r = run_exe(exe, tmp_path, env_extra={"HARU_SECRET": "s3cret"})
     assert r.returncode == EXIT_DIGEST_MISMATCH, (
         "the digest check must fire on the container, ahead of decryption "
         f"(got {r.returncode}: {r.stderr})")

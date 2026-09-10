@@ -32,7 +32,7 @@ becomes a distribution channel."
 | The vendor's code-signing identity | the signed PE | the whole reason to buy an EV cert |
 | The build host's toolchain | Nim, uv, mingw, python-build-standalone | compromise here contaminates every artifact built afterwards |
 | The operator's own secrets | `.env`, keys, sitting in the project directory being packed | packaged and distributed by accident — the highest-likelihood incident in this list |
-| The license secret | `--secret`, `HARUPACK_SECRET`, or embedded | the only trust anchor; there is no PKI |
+| The license secret | `--secret`, `HARU_SECRET` (default canary), or embedded | the only trust anchor; there is no PKI |
 | The customer's machine | the staging cache, PATH, environment | where the launcher does its work |
 
 ## Actors
@@ -55,7 +55,7 @@ That last row is deliberate. It is the actor this repo has actual incident histo
 | B1 | project source → payload | `shutil.copytree` with an exclusion list | **[V]** filtered, `INV-PAYLOAD-01` |
 | B2 | payload → launcher overlay | append + 68-byte footer | **[V]** build-time digest only, `INV-PAYLOAD-02` |
 | B3 | overlay → running process | launcher reads its own image and stages it | **[V]** *unverified at runtime*, `INV-LAUNCH-01` (proposed) |
-| B4 | environment → launcher behavior | `HARUPACK_DEV_STAGE`, `HARUPACK_SECRET`, `HARUPACK_GEO`, PATH | **[V]** unguarded, `INV-LAUNCH-02`/`04` (proposed) |
+| B4 | environment → launcher behavior | `HARUPACK_DEV_STAGE` (dev-only), `HARU_SECRET` (SECRET-knob canary), `HARUPACK_GEO`, PATH | **[V]** `INV-LAUNCH-02`/`04`, `INV-CANARY-01` |
 | B5 | network → build host | Nim, uv, python-build-standalone downloads | **[V]** TLS only, no digest, `INV-SUPPLY-01` (proposed) |
 | B6 | network → customer machine | `thin` tier fetches uv at runtime | **[V]** TLS only, no digest, `INV-SUPPLY-01` (proposed) |
 | B7 | archive → filesystem | tar/zip extraction on both host and target | **[V]** host filtered (`INV-SUPPLY-03`); target relies on `zippy`, **[R]** unverified here |

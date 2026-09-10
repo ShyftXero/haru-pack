@@ -991,6 +991,46 @@ Note: busybody's own work directories now live outside the repository for the sa
 chaos harness that can damage the tree it is testing is worse than no harness.
 Territory: src/haru_pack/launcher/main.nim, tools/busybody.py, tests/test_launcher_isolation.py
 
+### INV-LAUNCH-08
+Status: active
+Statement: The launcher's footer reader loads both the v1 (68B, payload only) and the v2
+(116B, payload + stub-config) footer format, dispatching on `format_ver`, and validates the
+v2 stub-config extent by size exactly as it validates the payload extent.
+Actors: anyone who can write to a distributed binary; a truncated or partially-copied
+download. `stubOff`/`stubLen` are attacker-controlled u64s read off disk.
+Assets: the launcher's ability to keep loading today's single-payload binaries AND to load a
+new stub-carrying one, and to refuse a hostile stub locator by size rather than by crashing
+inside `setPosition`/`readStr`.
+Red-path: In `overlay.footerSizeFor` return `FooterV1Size` for version 2 (ignore the
+version), rebuild — a v2 binary's TAIL check lands on the stub-offset field, the footer is
+not found, and the exe reports "no payload appended" while a v1 binary still loads. Walked
+2026-09-10: v1 green, v2 red. Separately, guard out the `if ft.hasStub:` extent block in
+`footerFault` and set `stub_off` to 2**63 in a built v2 exe — observed `fatal.nim(53)
+sysFatal` / RangeDefect, exit 1; the guard turns that into a clean `ExitBadFooter`. Walked
+2026-09-10: 4 red.
+Source: docs/adr/0003-stub-config-and-canary.md §1.5/§1.6. Extends INV-LAUNCH-05 territory to
+the stub-config locator; the version dispatch is what keeps v1 binaries loading.
+Territory: src/haru_pack/launcher/overlay.nim, src/haru_pack/launcher/main.nim, src/haru_pack/overlay.py
+
+### INV-LAUNCH-09
+Status: active
+Statement: The launcher sets every manifest `inject` (env-append) KEY=VALUE pair in the child
+environment before invoking uv or the app, so both inherit them; the launcher's own reserved
+variables are set afterward and win on any collision.
+Actors: not an attacker — the packager choosing licensing/API-key env for the app. The
+security edge (an inject must not repoint a reserved var such as `UV_PYTHON` off the host,
+INV-LAUNCH-04) is defence in depth alongside the build-time refusal of reserved keys.
+Assets: the app's declared configuration actually reaching it, and the thick tier's
+hermeticity.
+Red-path: Delete the `for (k, v) in m.inject: putEnv(k, v)` loop in `main.launch`, rebuild —
+a fake uv that echoes an injected var sees it empty. Walked 2026-09-10: 1 red. Separately,
+move the loop AFTER the reserved `putEnv` block — an inject of `HARUPACK_STAGE` then wins and
+the collision assertion goes red. Walked 2026-09-10: 1 red.
+Source: docs/adr/0003-stub-config-and-canary.md §4.2. The pairs live in the PAYLOAD manifest
+(post-decrypt), so an encrypted build hides them; the launcher splits each entry on the first
+`=` only.
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/manifest.nim
+
 ---
 
 ## SUPPLY — what we execute that we did not write
@@ -1681,3 +1721,102 @@ verified. Colour is never the carrier of meaning: every state that is coloured i
 stated in words (`payload integrity: OK`, `nim deps: FAILED`), because a colour is invisible
 to anyone reading a log file.
 Territory: src/haru_pack/ui.py, src/haru_pack/cli.py, tests/test_ui.py
+
+---
+
+## STUB — the cleartext, signature-covered stub-config section
+
+### INV-STUB-01
+Status: active
+Statement: The launcher verifies the v2 stub-config's SHA-256 against the `stub_sha256` in
+its own footer BEFORE parsing the canary map, and refuses a mismatch with `ExitBadStub`.
+Actors: anyone who can write to a distributed binary. The stub bytes and the digest they are
+checked against both live in the same attacker-writable region.
+Assets: the per-knob canary map — which env var the launcher reads for the decryption key
+and (in later phases) for the other knobs. A silently-altered map is a silently-altered
+launcher input.
+Red-path: Replace `verifyStubDigest(stubBytes, ft.stubSha)` in `main.launch` with `discard`,
+rebuild, then change one canary letter inside the stub-config region of a built UNENCRYPTED
+v2 exe (`HARU` -> `XARU`, still a valid prefix). Without the guard the altered-but-valid map
+parses and the build runs (rc 0); with it, `ExitBadStub`. Walked 2026-09-10: 1 red.
+Source: docs/adr/0003-stub-config-and-canary.md §1.7. Analog of INV-LAUNCH-01 with the same
+self-referential caveat.
+Note: Like the payload digest (INV-LAUNCH-01) this is NOT tamper-evidence — both the stub
+bytes and `stub_sha256` come from the same footer, so an editor can recompute it. It detects
+corruption/truncation/naive edits and is the precondition for a real signature
+(INV-LAUNCH-03, still proposed). It must not be described as tamper-proof.
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/overlay.nim
+
+---
+
+## CANARY — per-knob env-name resolution
+
+### INV-CANARY-01
+Status: active
+Statement: The SECRET knob's decryption key is read from the single env var
+`<canary.secret>_SECRET` named by the stub-config (default `HARU_SECRET`); the retired
+`HARUPACK_SECRET` is not read, and no other knob's prefix resolves the secret.
+Actors: not an attacker — the packager choosing a per-build canary, plus the property that a
+stale or guessed env name (legacy `HARUPACK_SECRET`, or the wrong knob's prefix) does not
+decrypt.
+Assets: correct resolution of the decryption key's env name. A launcher that still honoured
+`HARUPACK_SECRET` would silently accept a secret set under the retired name, defeating the
+canary's purpose.
+Red-path: Hardcode `cryptbox.resolveSecret` back to `getEnv("HARUPACK_SECRET")` (ignore
+`secretEnv`), rebuild. A default build run with `HARU_SECRET` set then fails to decrypt (rc 4
+"no secret"); a build whose stub sets the secret canary to `MARK`, run with `MARK_SECRET`
+set, also fails. Walked 2026-09-10: 2 red.
+Source: docs/adr/0003-stub-config-and-canary.md §3.2/§3.3. One resolution rule,
+`stubconfig.envForKnob`, serves all four knobs; only SECRET is consumed in Phase 1.
+Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/launcher/main.nim
+
+### INV-CANARY-02
+Status: active
+Statement: The build resolves the per-knob canary map with the precedence
+`--stub-env-<knob>-canary` > `--env-canary`/`--env-canary-random` > built-in `HARU`, refuses
+two conflicting all-knobs defaults and any resolved token that is not a valid env-name prefix
+(`^[A-Za-z_][A-Za-z0-9_]*$`), emits the map as the cleartext stub-config section of a v2
+binary, and records it in the build receipt. The map is not secret; the secret VALUE never
+appears in it (INV-SECRET-02).
+Actors: the packager choosing a per-build canary — not an attacker. The dangerous outcome is
+a build that silently ships a stub the launcher then reads a different env name for than the
+packager was told, or a receipt/auditor that cannot see which env names a binary watches.
+Assets: agreement between what the packager asked for, what the binary carries, and what the
+receipt reports; and the property that every NEW binary carries the section at all.
+Red-path: In `build.resolve_canary`, delete the `if env_canary and env_canary_random: raise`
+and `test_conflicting_all_knob_defaults_refused` goes red; delete the
+`if not _CANARY_RE.fullmatch(tok): raise` and `test_invalid_canary_token_refused` goes red.
+Drop `stub_config=` from the `build.build` `attach()` call (emit a v1 footer) and
+`test_build_emits_a_v2_binary_carrying_the_canary_map` goes red (`format_ver == 1`); drop
+`canary=canary` from the receipt `info.update` and both the emit test and
+`test_receipt_records_the_canary_map_but_not_the_secret` go red. Walked 2026-09-10.
+Source: docs/adr/0003-stub-config-and-canary.md §2.1/§5. The build half of the one resolution
+rule INV-CANARY-01 defends at runtime; every new binary is v2 (carries the section).
+Territory: src/haru_pack/build.py, src/haru_pack/cli.py, src/haru_pack/overlay.py
+
+---
+
+## INJECT — env-append lives in the payload, and the build is honest about it
+
+### INV-INJECT-01
+Status: active
+Statement: The build validates each `--env-append KEY=VALUE` into the payload manifest `inject`
+list — refusing a malformed entry (no `=`, empty KEY) or a reserved KEY (`HARUPACK_*`, the
+launcher-managed `UV_*`, `PYTHONPYCACHEPREFIX`, `PYTHONPATH`) — and, on an UNENCRYPTED build
+only, warns loudly when a value is secret-shaped. An encrypted build hides the payload and so
+warns nothing.
+Actors: the packager injecting licensing/API-key env — plus the honesty edge from
+INV-SECRET-02: a plaintext payload ships the value recoverable, and the operator must not
+assume otherwise. A reserved KEY is the silently-ineffective-config class INV-BUILD-01/02 forbid.
+Assets: the operator's correct understanding of what an unencrypted inject exposes, and the
+guarantee that an inject the launcher would silently drop is refused at build time, not shipped.
+Red-path: In `build.resolve_injects`, remove the
+`if not encrypted and _looks_secret_shaped(...)` warning branch and
+`test_secret_shaped_inject_warns_on_unencrypted_build` goes red; remove the reserved-key
+`raise` and `test_reserved_inject_key_refused` goes red; in `build.build`, remove
+`manifest["inject"] = injects` and `test_build_writes_inject_into_the_payload_manifest` goes
+red. Walked 2026-09-10.
+Source: docs/adr/0003-stub-config-and-canary.md §4.3. The pairs live post-decrypt; the
+launcher applies them before uv + the app and its own reserved vars win on a collision
+(INV-LAUNCH-09). Called "inject", never "project".
+Territory: src/haru_pack/build.py, src/haru_pack/cli.py

@@ -7,7 +7,7 @@
 ## (run-in-place), exposing exe-dir + stage-dir to the child.
 import std/[os, osproc, strutils, sequtils]
 import nimcrypto/sha2
-import overlay, stage, manifest, uvfetch, cryptbox
+import overlay, stage, manifest, uvfetch, cryptbox, stubconfig
 when defined(posix):
   import std/posix
   # A CUSTOM handler (not SIG_IGN) is reset to SIG_DFL across exec, so the child
@@ -21,6 +21,9 @@ const
   ExitInternalError*  = 7   ## unexpected failure; a clean diagnostic, never a traceback
   ExitBadFooter*      = 8   ## footer's payload extent does not fit inside this file
   ExitNoUv*           = 9   ## no usable uv, and the tier forbids looking for one
+  ExitBadStub*        = 10  ## stub-config: digest mismatch, unparseable TOML, unsupported
+                            ## stub_config_version, or an invalid/missing canary. One-line
+                            ## diagnostic, never a traceback (INV-LAUNCH-06 / INV-STUB-01).
 
 proc die(msg: string, code = 1) =
   stderr.writeLine "haru-pack: " & msg
@@ -41,6 +44,8 @@ proc findUv(stageRoot: string, m: Manifest): string =
   let onPath = findExe("uv")
   if onPath.len > 0: return onPath
   if m.fetchUv:
+    # TODO(phase-uv): UV_VER knob — when getEnv(sc.envForKnob(kUvVer)) is set, override
+    # m.uvVersion with it here (sc threaded in from launch()). Phase 1 only carries the knob.
     let got = ensureUv(stageRoot, m.uvVersion)
     if got.len > 0: return got
     die("thin tier: failed to fetch uv (need curl/powershell + network on first run)")
@@ -82,6 +87,24 @@ proc verifyPayloadDigest(payload: string, want: array[32, byte]) =
     stderr.writeLine "haru-pack:   expected sha256 " & hexOf(want)
     stderr.writeLine "haru-pack:   actual   sha256 " & hexOf(got.data)
     quit(ExitDigestMismatch)
+
+proc verifyStubDigest(stub: string, want: array[32, byte]) =
+  ## INV-STUB-01. The v2 footer records SHA-256 over the cleartext stub-config bytes.
+  ## Verify it BEFORE parsing the canary map, mirroring verifyPayloadDigest.
+  ##
+  ## Like the payload digest this is self-referential (both the bytes and the digest come
+  ## from the same attacker-writable region), so it is NOT tamper-evidence: it detects
+  ## corruption/truncation/naive edits and is the precondition for a real signature
+  ## (INV-LAUNCH-03, still proposed).
+  let got = sha256.digest(stub)
+  var diff = 0'u8
+  for i in 0 .. 31: diff = diff or (got.data[i] xor want[i])
+  if diff != 0'u8:
+    stderr.writeLine "haru-pack: stub-config integrity check FAILED — this executable has " &
+                     "been modified since it was built."
+    stderr.writeLine "haru-pack:   expected sha256 " & hexOf(want)
+    stderr.writeLine "haru-pack:   actual   sha256 " & hexOf(got.data)
+    quit(ExitBadStub)
 
 proc runChild(exe: string, args: seq[string], workDir: string): int =
   let p = startProcess(exe, workingDir = workDir, args = args,
@@ -138,13 +161,31 @@ proc launch(): int =
         die("no payload appended and HARUPACK_DEV_STAGE unset")
       else:
         die("no payload appended to this executable")
-    let fault = footerFault(ft, getFileSize(self).int, footerAt)   # W9
+    let fault = footerFault(ft, getFileSize(self).int, footerAt)   # W9 / INV-LAUNCH-05/08
     if fault.len > 0: die("corrupt payload footer: " & fault, ExitBadFooter)
+    # Stub-config: cleartext, signature-covered, read BEFORE decrypt/stage so the per-knob
+    # canary map decides which env name holds each knob. A v1 (single-payload) binary carries
+    # no stub -> the all-HARU default. Only SECRET is consumed in Phase 1 (below); UV_VER /
+    # SOURCE_URL / BASE_PATH ride in `sc` for later phases (TODOs at their future consumers).
+    var sc = defaultStubConfig()
+    if ft.hasStub:
+      let stubBytes = readStub(self, ft, footerAt)
+      verifyStubDigest(stubBytes, ft.stubSha)   # INV-STUB-01 — before we parse the map
+      try:
+        sc = parseStubConfig(stubBytes)
+      except ValueError as e:
+        die(e.msg, ExitBadStub)
+    # TODO(phase-remote): SOURCE_URL knob — when getEnv(sc.envForKnob(kSourceUrl)) is set,
+    # fetch the payload over HTTP through the one payload pipeline instead of readPayload.
     var payload = readPayload(self, ft, footerAt)
     verifyPayloadDigest(payload, ft.payloadSha)   # INV-LAUNCH-01 — before we decrypt
     let shahex = hexOf(ft.payloadSha)
     if (ft.flags and 1'u16) != 0'u16 or isEncrypted(payload):
-      payload = openContainer(payload)     # decrypt + license checks (dies on failure)
+      # SECRET knob (INV-CANARY-01): the decryption key's env NAME is sc.envForKnob(kSecret)
+      # (default HARU_SECRET), replacing the retired hardcoded HARUPACK_SECRET.
+      payload = openContainer(payload, sc.envForKnob(kSecret))   # dies on failure
+    # TODO(phase-base): BASE_PATH knob — when getEnv(sc.envForKnob(kBasePath)) is set, use it
+    # as the stage root override in place of stage.baseDir() below.
     stageRoot = stageZip(payload, shahex[0..15])
 
   # 2. manifest
@@ -155,7 +196,12 @@ proc launch(): int =
     die("manifest declares no entrypoint: " & mfPath)
   let appDir = stageRoot / m.appSubdir
 
-  # 3. env wiring (three roots + uv offline knobs)
+  # 3. env wiring (inject first, then three roots + uv offline knobs)
+  # inject (env-append) is applied FIRST so both uv AND the app inherit it, while every
+  # reserved var the launcher sets below WINS on a collision — an inject cannot repoint
+  # UV_PYTHON off the host and defeat the thick tier's hermeticity (INV-LAUNCH-04). The
+  # build refuses reserved keys outright, so this ordering is belt-and-braces (ADR §4.2).
+  for (k, v) in m.inject: putEnv(k, v)
   putEnv("HARUPACK_EXE_DIR", exeDir)
   putEnv("HARUPACK_STAGE", stageRoot)
   putEnv("UV_CACHE_DIR", if m.cacheDir.len > 0: stageRoot / m.cacheDir else: baseDir() / "uv-cache")
