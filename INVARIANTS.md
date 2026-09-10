@@ -318,6 +318,56 @@ Territory: tools/busybody.py, tests/test_busybody_ledger.py
 
 ---
 
+### INV-CHAOS-07
+Status: active
+Statement: A declaration that cannot be honoured as written is refused at build time, with a
+message naming both sides of the contradiction. haru-pack never resolves a config conflict
+silently and hands back an artifact whose damage is discovered on the target.
+Actors: whoever edits `haru_pack.toml` — often by copying a block from another project — and
+whoever receives the binary that edit produced.
+Assets: the operator's ability to predict an artifact from its config. Every other guard in
+this file protects the binary at runtime; this one protects the meaning of the build. A
+config wedge that builds cleanly is the worst shape available, because the build is the last
+point at which the person who can fix it is still watching.
+Red-path: Remove the `validate_manifest` call from `_resolve` and `app_subdir = "../x"`
+builds a binary whose entrypoint is outside the payload — measured as
+`can't open file '.../escaped/app.py'` on first run. Remove `validate_encryption` and
+`expires = "2001-01-01"` builds a binary that refuses every run forever. Add a value to
+`CWD_POLICIES` that `main.nim` does not implement and the config accepts a policy the
+launcher silently treats as `launch`. Each has a claiming test, plus a live case in
+busybody's `wedge` persona.
+Source: 2026-09-10. The `wedge` persona was built to attack declarations rather than
+binaries, and found three defects on its first run:
+
+  1. `app_subdir` containing `..` — the payload builder copies the project to
+     `payload/<app_subdir>`, so the application landed OUTSIDE the payload. The zip is
+     assembled from the payload root, the app was not under it, and the launcher staged a
+     binary with no entrypoint. Same class as a zip-slip: a path from config escaping the
+     root it is resolved against.
+  2. `expires` in the past. `cryptbox.nim` compares the policy date to now and quits with
+     "license expired", so the artifact was dead on arrival and the failure read as a
+     licensing problem rather than a typo.
+  3. An unrecognised `cwd_policy`. `main.nim` compares it against `"exe"` and treats
+     everything else as `"launch"`, so a typo and a deliberate choice produced identical
+     binaries, and the difference only surfaced as a relative path resolving from the wrong
+     directory on someone else's machine.
+
+Note: The persona also caught two of its OWN cases passing for the wrong reason. Both
+refused, but for an unrelated guard that fired first — no secret supplied, and an ambiguous
+entrypoint — so neither had reached the wedge it claimed to test. That is the same mistake
+`payload_edited_and_footer_recomputed` made when it took a CRC32 rejection as proof of
+tamper detection. `REFUSED-UNRELATED` now names it: the build refused without mentioning
+either side of the conflict, so the case missed its target and is a note against busybody
+rather than a pass for haru-pack.
+Note: `SILENT-WEDGE` is in `FATAL`. `WARNED` deliberately is not — resolving a conflict and
+saying which side lost is the behaviour this invariant asks for, not a defect.
+Note: Wedge cases are `per_fixture=False`. They build their own artifact and say nothing
+about the packed package, so running them once per fixture would repeat one answer 25 times
+and inflate the census that INV-CHAOS-04 exists to keep honest.
+Territory: src/haru_pack/build.py, tools/busybody.py, tests/test_config_wedges.py
+
+---
+
 ## FLEX — the harness that decides what haru-pack is tested against
 
 ### INV-FLEX-01

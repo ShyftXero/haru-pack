@@ -124,18 +124,24 @@ RUNS = OUT / "runs"
 MARKER = "BUSYBODY_OK"
 
 # Never acceptable, in any case, whatever it declared.
-#   CRASHED  the LAUNCHER dumped a traceback on the user
-#   HUNG     nothing exited
-#   SILENT   exit 0 and the app never ran
+#   CRASHED       the LAUNCHER dumped a traceback on the user
+#   HUNG          nothing exited
+#   SILENT        exit 0 and the app never ran
+#   SILENT-WEDGE  a contradictory config built cleanly, said nothing, and produced a
+#                 damaged artifact. Fatal for the same reason SILENT is: the operator was
+#                 given no reason to look, and the failure surfaces at the customer.
 # APP-CRASHED is deliberately NOT here: an application that raises under a limit a persona
 # imposed on purpose is behaving correctly, and a case must opt into accepting it.
-FATAL = ("CRASHED", "HUNG", "SILENT")
+#
+# WARNED is not here either, and cannot be: it means haru-pack resolved a conflict AND said
+# which side lost. That is the behaviour the wedge persona is asking for, not a defect.
+FATAL = ("CRASHED", "HUNG", "SILENT", "SILENT-WEDGE")
 
 CASES = []
 
 
 def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",
-         serial: bool = False):
+         serial: bool = False, per_fixture: bool = True):
     """Register a chaos case.
 
     `expect`  outcomes that are acceptable.
@@ -149,11 +155,18 @@ def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",
               for CPU. Under --jobs these run in a separate serial pass, after the rest.
               Marking a case serial costs wall clock; not marking one that needs it costs
               a flaky result that looks like a regression.
+    `per_fixture`
+              whether this case has anything to say about the packed package. The runtime
+              personas attack a binary, so they run once per fixture. The `wedge` persona
+              attacks a DECLARATION and builds its own artifact, so running it 25 times
+              would repeat one answer 25 times and inflate the census — the exact thing
+              --analyze exists to expose.
     """
     def deco(fn):
         CASES.append({"name": fn.__name__, "persona": persona,
                       "expect": tuple(expect) if isinstance(expect, (list, tuple)) else (expect,),
-                      "why": why, "inv": inv, "remedy": remedy, "serial": serial, "fn": fn})
+                      "why": why, "inv": inv, "remedy": remedy, "serial": serial,
+                      "per_fixture": per_fixture, "fn": fn})
         return fn
     return deco
 
@@ -274,6 +287,10 @@ def blame(out: str, err: str) -> str:
                 binary to 000, so exec is denied. Calling that "app" would be a lie in the
                 direction that hides defects.
       harness   busybody itself broke (CASE-ERROR). Never a statement about haru-pack.
+      builder   `haru-pack build` reported it, or should have. The wedge persona attacks a
+                declaration rather than a binary, so its findings belong to the build, not
+                to the launcher — a config contradiction is fixed in a different file by a
+                different person.
 
     Every non-RAN result carries one. A missing blame surfaces in --analyze as a "?" bucket,
     which is a hole in triage rather than a finding — there were 25 in the 2026-09-10 sweep,
@@ -874,6 +891,11 @@ OUTCOME_MEANING = {
     "SILENT": "exit 0, but the app never ran",
     "APP-CRASHED": "the packaged application raised; the launcher was not at fault",
     "CASE-ERROR": "the chaos case itself failed; this is a bug in busybody, not in haru-pack",
+    "WARNED": "a contradictory config built, and the build said which side it overrode",
+    "SILENT-WEDGE": ("a contradictory config built with no mention of the conflict, and the "
+                     "artifact carries the damage"),
+    "REFUSED-UNRELATED": ("the build refused, but for something other than the wedge — the "
+                          "case never reached what it meant to test"),
 }
 
 
@@ -1010,12 +1032,14 @@ def severity_for(c: dict, r: dict, ok: bool) -> str:
     """
     if ok:
         return "note"
-    if r["outcome"] in ("CRASHED", "SILENT", "HUNG"):
+    if r["outcome"] in ("CRASHED", "SILENT", "HUNG", "SILENT-WEDGE"):
         return "critical"      # a traceback at the user, the wrong code running, or a wedge
     if r["outcome"] == "APP-CRASHED":
         return "note"          # the app declined the box it was given; not haru-pack's doing
     if r["outcome"] == "CASE-ERROR":
         return "note"          # busybody's own bug, not haru-pack's — say so, do not inflate
+    if r["outcome"] == "REFUSED-UNRELATED":
+        return "note"          # the CASE missed its target; fix the case before believing it
     return "warning"           # refused where it should have run, or the reverse
 
 
@@ -1578,6 +1602,300 @@ def calibrate(fixtures: list, log=print) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- wedge: hostile config
+
+# A "wedge" is a configuration where two directives cannot both be honoured. Every other
+# persona attacks a binary that was already built; this one attacks the DECLARATION, and it
+# is a different class of bug — a wedge that builds cleanly ships an artifact whose
+# behaviour nobody predicted from reading the config.
+#
+# Three acceptable answers, and one that is not:
+#
+#   REFUSED       the build stopped and the message named BOTH sides of the contradiction.
+#                 Best outcome: the wedge cannot reach a customer.
+#   WARNED        it built, and said what it had to override to do so. Acceptable when one
+#                 side has documented precedence.
+#   RAN           it built AND the predicted artifact damage did not occur, because the
+#                 wedge was not actually a contradiction. The case is wrong, not the tool.
+#   SILENT-WEDGE  it built, said nothing, and the artifact carries the damage. A FINDING.
+#
+# The last one is why this persona exists. Each case names the artifact property it expects
+# to be damaged, so a finding is not "config was weird" but "config was weird AND here is
+# the resulting binary's specific defect".
+
+WEDGE_HINTS = ("warning", "conflict", "contradict", "ignored", "overrid", "precedence",
+               "but ", "instead of", "cannot", "refus", "expired", "excluded")
+
+
+def _wedge_project(work: Path, decl: str, app: str = "", extra: dict | None = None) -> Path:
+    """A minimal project with a hostile haru_pack.toml. Returns the project directory."""
+    proj = work / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "app.py").write_text(app or APP)
+    (proj / "haru_pack.toml").write_text(decl)
+    for name, body in (extra or {}).items():
+        f = proj / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body)
+    return proj
+
+
+def _build(proj: Path, out: Path, *args, timeout: int = 900) -> tuple:
+    haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
+    r = subprocess.run([haru, "build", str(proj), "-o", str(out), *args],
+                       capture_output=True, text=True, timeout=timeout)
+    return r.returncode, (r.stdout or ""), (r.stderr or "")
+
+
+def _wedge(work: Path, decl: str, *, sides: tuple, damage, build_args=(),
+           app: str = "", extra: dict | None = None) -> dict:
+    """Build a wedged project and classify what haru-pack did about it.
+
+    `sides`  the two halves of the contradiction, as substrings that a good diagnostic would
+             mention. A message that names only one half is not much better than silence:
+             it tells you what happened without telling you what it collided with.
+    `damage` callable(exe) -> str. Runs the artifact and returns a description of the
+             predicted damage, or "" if the artifact is actually fine. Only consulted when
+             the build succeeded quietly.
+    """
+    proj = _wedge_project(work, decl, app=app, extra=extra)
+    out = work / "wedged"
+    rc, so, se = _build(proj, out, *build_args)
+    blob = (so + se)
+    low = blob.lower()
+
+    if rc != 0 or not out.exists():
+        named = [x for x in sides if x.lower() in low]
+        if not named:
+            # It refused, but for something other than the wedge — so this case did not
+            # actually exercise its contradiction, and calling it a pass would be the same
+            # mistake `payload_edited_and_footer_recomputed` made when it took a CRC32
+            # rejection as proof of tamper detection. The case is what needs fixing here,
+            # not necessarily the product.
+            return {"outcome": "REFUSED-UNRELATED", "rc": rc, "seconds": 0,
+                    "blame": "builder", "stdout": "", "stderr": (
+                        f"build refused without mentioning either side of {sides}, so the "
+                        f"wedge itself was never reached: {blob.strip()[-300:]}")}
+        return {"outcome": "REFUSED", "rc": rc, "seconds": 0, "blame": "builder",
+                "stdout": "", "stderr": (
+                    f"build refused, naming {len(named)}/{len(sides)} side(s) of the "
+                    f"conflict {sides}: {blob.strip()[-300:]}")}
+
+    said = any(h in low for h in WEDGE_HINTS) and any(x.lower() in low for x in sides)
+    if said:
+        return {"outcome": "WARNED", "rc": 0, "seconds": 0, "blame": "builder",
+                "stdout": blob.strip()[-300:], "stderr": ""}
+
+    harm = damage(out) if damage else ""
+    if harm:
+        return {"outcome": "SILENT-WEDGE", "rc": 0, "seconds": 0, "blame": "builder",
+                "stdout": "", "stderr": (
+                    f"built with no mention of the conflict {sides}, and the artifact is "
+                    f"damaged: {harm}")}
+    return {"outcome": "RAN", "rc": 0, "seconds": 0, "blame": "none",
+            "stdout": f"{MARKER} built quietly and the artifact was undamaged", "stderr": ""}
+
+
+def _run_artifact(exe: Path, work: Path, args=()) -> tuple:
+    """Run a wedged artifact once. Returns (outcome, message)."""
+    r = run_exe(exe, work, env=clean_env(work / "wc"), timeout=180, args=args)
+    return r["outcome"], (r.get("stderr") or r.get("stdout") or "").strip()[:200]
+
+
+@case("wedge", ("REFUSED", "WARNED"),
+      "The declared entrypoint is a file the payload builder deliberately excludes. "
+      "`_SECRET_PATTERNS` drops `secrets.*` so a credentials file cannot be packed by "
+      "accident — but the same rule silently removes a file someone named as the "
+      "entrypoint. Two correct rules, one artifact, and they disagree.",
+      inv="INV-CHAOS-07",
+      remedy="Name both sides: the entrypoint that was requested and the ignore rule that "
+             "removed it. Refusing is better than shipping a binary with no entrypoint.",
+      per_fixture=False)
+def entrypoint_is_excluded_by_secret_hygiene(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        outcome, msg = _run_artifact(out, work)
+        return "" if outcome == "RAN" else f"artifact does not run: {outcome} {msg}"
+    return _wedge(
+        work,
+        'name = "wedged"\nkind = "script"\nentrypoint = ["secrets.py"]\n',
+        sides=("secrets.py", "entrypoint"),
+        damage=damage,
+        extra={"secrets.py": APP},
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED"),
+      "haru_pack.toml pins an interpreter older than the project says it needs. The "
+      "declaration beats discovery by design, so the pin wins and the binary ships a "
+      "Python the application cannot run on. Nothing about the build looks wrong.",
+      inv="INV-CHAOS-07",
+      remedy="Compare the declared python against requires-python and say which one lost. "
+             "Precedence is fine; silent precedence on an incompatible version is not.",
+      per_fixture=False)
+def declared_python_is_older_than_the_app_requires(exe: Path, work: Path) -> dict:
+    app = ('# a 3.12-only construct: PEP 695 type parameter syntax\n'
+           'type Alias = int\n'
+           'def f[T](x: T) -> T: return x\n'
+           f'print("{MARKER}", f(1))\n')
+
+    def damage(out: Path):
+        outcome, msg = _run_artifact(out, work)
+        return "" if outcome == "RAN" else f"artifact does not run: {outcome} {msg}"
+    return _wedge(
+        work,
+        'name = "wedged"\nkind = "script"\npython = "3.9"\n',
+        sides=("3.9", "python"),
+        damage=damage,
+        app=app,
+        extra={"pyproject.toml": '[project]\nname = "wedged"\n'
+                                 'requires-python = ">=3.12"\nversion = "0"\n'},
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED"),
+      "`app_subdir` climbs out of the payload with `..`. Every path the launcher resolves "
+      "is relative to the payload root, so a subdir that escapes it either writes files "
+      "the launcher will never look for, or writes them somewhere it should not.",
+      inv="INV-CHAOS-07",
+      remedy="Reject an app_subdir that is absolute or contains `..`. This is the same "
+             "class as a zip-slip and deserves the same flat refusal.",
+      per_fixture=False)
+def app_subdir_escapes_the_payload(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        outcome, msg = _run_artifact(out, work)
+        return "" if outcome == "RAN" else f"artifact does not run: {outcome} {msg}"
+    return _wedge(
+        work,
+        'name = "wedged"\nkind = "script"\napp_subdir = "../escaped"\n',
+        sides=("app_subdir", ".."),
+        damage=damage,
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED"),
+      "The licence expires before the binary is built. Encryption accepts the policy and "
+      "seals it in, producing an artifact that is dead on arrival — it will refuse every "
+      "run, forever, and the refusal will look like a licensing bug to whoever receives it.",
+      inv="INV-CHAOS-07",
+      remedy="An expiry in the past is a typo, not a policy. Refuse at build time, where "
+             "the person who can fix it is still watching.",
+      per_fixture=False)
+def licence_expires_before_it_is_built(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        outcome, msg = _run_artifact(out, work)
+        # REFUSED here is the artifact being dead on arrival, which IS the damage
+        return "" if outcome == "RAN" else f"artifact is dead on arrival: {outcome} {msg}"
+    return _wedge(
+        work,
+        'name = "wedged"\nkind = "script"\n\n[encryption]\nenabled = true\n'
+        'expires = "2001-01-01"\nembed_secret = true\n',
+        sides=("2001", "expire"),
+        damage=damage,
+        # A secret is required before the expiry is even looked at — refusing without one
+        # is a correct guard, and without this the case never reached its own wedge.
+        build_args=("--secret", "wedge-test-key"),
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED", "RAN"),
+      "`--tier thin` says bundle nothing; the declaration asks to bundle python and uv. "
+      "One of them is not happening. Which one, and does the binary's actual size agree "
+      "with the tier it claims?",
+      inv="INV-CHAOS-07",
+      remedy="Tier is the coarse control and should win, but say so. A 60 MB binary from a "
+             "`thin` build, or a 6 MB one that claims to bundle Python, is a lie about "
+             "what the artifact needs at runtime.",
+      per_fixture=False)
+def thin_tier_asked_to_bundle_everything(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        # thin must not carry an interpreter. Size is the cheap, robust check.
+        mb = out.stat().st_size / 1e6
+        if mb > 20:
+            return (f"thin-tier artifact is {mb:.0f}MB, so it bundled what thin says it "
+                    f"does not; the tier no longer predicts the runtime requirement")
+        return ""
+    return _wedge(
+        work,
+        'name = "wedged"\nkind = "script"\nbundle = ["python", "uv"]\n',
+        sides=("thin", "bundle"),
+        damage=damage,
+        build_args=("--tier", "thin"),
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED", "RAN"),
+      "`cwd_policy` is set to a value that does not exist. The launcher reads it with a "
+      "string default, so an unknown value is not an error anywhere — it silently takes "
+      "whichever branch the comparison falls through to, and the binary resolves relative "
+      "paths differently than the config says it will.",
+      inv="INV-CHAOS-07",
+      remedy="Validate the enum at build time against the values the launcher actually "
+             "implements. A typo'd policy should not be indistinguishable from a chosen one.",
+      per_fixture=False)
+def cwd_policy_is_not_a_policy(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        outcome, msg = _run_artifact(out, work)
+        if outcome != "RAN":
+            return f"artifact does not run: {outcome} {msg}"
+        # It ran. The damage is that an invalid enum was accepted in silence — a typo is
+        # now indistinguishable from a decision. Report it as a note-level wedge.
+        return ("an unknown cwd_policy was accepted without comment, so a typo and a "
+                "deliberate choice produce identical builds")
+    return _wedge(
+        work,
+        'name = "wedged"\nkind = "script"\ncwd_policy = "sideways"\n',
+        sides=("cwd_policy", "sideways"),
+        damage=damage,
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED"),
+      "A machine-locked binary with no key anywhere. The policy demands a specific host, "
+      "`embed_secret` is off, and no secret is supplied — so the artifact can never be "
+      "decrypted by anyone, including the person who built it.",
+      inv="INV-CHAOS-07",
+      remedy="A policy with no reachable key is unusable by construction. Refuse, and name "
+             "the missing key rather than the policy.",
+      per_fixture=False)
+def locked_to_a_machine_with_no_key(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        outcome, msg = _run_artifact(out, work)
+        return "" if outcome == "RAN" else f"artifact cannot be decrypted: {outcome} {msg}"
+    return _wedge(
+        work,
+        'name = "wedged"\nkind = "script"\n\n[encryption]\nenabled = true\n'
+        'machine = "some-other-host"\nembed_secret = false\n',
+        sides=("machine", "secret"),
+        damage=damage,
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED", "RAN"),
+      "Three names for one artifact: pyproject says one thing, haru_pack.toml another, "
+      "`-o` a third. Precedence exists and is documented, but a build that never mentions "
+      "the two it discarded leaves the operator to guess which name the manifest carries "
+      "— and the manifest name is what the launcher reports about itself.",
+      inv="INV-CHAOS-07",
+      remedy="`-o` names the FILE; `name` names the artifact in the manifest. If those "
+             "differ, say so once — they are different fields and conflating them is how "
+             "a binary reports a name nobody recognises.",
+      per_fixture=False)
+def three_names_for_one_artifact(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        outcome, msg = _run_artifact(out, work)
+        return "" if outcome == "RAN" else f"artifact does not run: {outcome} {msg}"
+    return _wedge(
+        work,
+        # The entrypoint is declared so that ENTRYPOINT ambiguity is not what gets
+        # refused. The wedge under test is the name, and a case has to isolate its wedge
+        # or it measures whichever guard happens to fire first.
+        'name = "from-haru-toml"\nkind = "script"\nentrypoint = ["app.py"]\n',
+        sides=("from-haru-toml", "wedged"),
+        damage=damage,
+        extra={"pyproject.toml": '[project]\nname = "from-pyproject"\nversion = "0"\n'},
+    )
+
+
 # ---------------------------------------------------------------- parallel execution
 
 def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
@@ -1780,7 +2098,9 @@ def main() -> int:
         if a.calibrate:
             return calibrate(fixtures)
 
-        total = len(fixtures) * len(picked)
+        # fixture-free cases run once; everything else once per fixture
+        _ff = len([c for c in picked if not c.get("per_fixture", True)])
+        total = len(fixtures) * (len(picked) - _ff) + _ff
         jr.write("started", planned=[c["name"] for c in picked], tier=a.tier,
                  fixtures=[n for n, _ in fixtures], cases=len(picked), total=total)
         jr.beat()
@@ -1815,13 +2135,20 @@ def main() -> int:
                   f"{rec['outcome']:9}{'  ' if ok else '<-'}"
                   + (f" [{rec['fixture']}]" if len(fixtures) > 1 else ""))
 
+        # A case that says nothing about the packed package runs once, not once per
+        # fixture. Running it 25 times would repeat one answer 25 times and inflate the
+        # census, which is precisely what --analyze exists to expose.
+        fixture_free = [c for c in picked if not c.get("per_fixture", True)]
+        picked = [c for c in picked if c.get("per_fixture", True)]
         parallel_cases = [c for c in picked if not c.get("serial")]
         serial_cases = [c for c in picked if c.get("serial")]
         pool = worker_pool(jobs) if jobs > 1 and parallel_cases else None
         if pool is None:
-            # Either --jobs 1, or mpire is missing. Both mean everything runs in the serial
-            # pass; the two passes exist to protect timing, not to be the only way in.
-            if jobs > 1:
+            # Three ways to get here — --jobs 1, mpire missing, or nothing to parallelise —
+            # and they must not print the same thing. Reporting "mpire is not installed"
+            # when the real reason is "every selected case builds its own artifact" sends
+            # the reader to install a package that would not have helped.
+            if jobs > 1 and parallel_cases:
                 print("mpire is not installed; running serially. "
                       "`uv sync --group dev` installs it.")
             parallel_cases, serial_cases = [], picked
@@ -1838,6 +2165,14 @@ def main() -> int:
                 # census reproducible rather than merely repeatable.
                 for rec in pool.imap(run_one, items):
                     record(rec)
+
+        if fixture_free:
+            print(f"\n-- config pass: {len(fixture_free)} case(s) that build their own "
+                  f"artifact (once, not per fixture)")
+            first = fixtures[0][1] if fixtures else Path("/nonexistent")
+            for c in fixture_free:
+                record(run_one("(config)", str(first), c["name"], str(run_dir),
+                               str(WORK_ROOT or ""), a.keep))
 
         if serial_cases:
             if parallel_cases:

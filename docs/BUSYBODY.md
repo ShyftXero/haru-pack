@@ -40,6 +40,72 @@ plainly that the number is machine-specific and does not transfer.
 
 Neither needs a model. Neither needs you to open the raw records.
 
+## wedge — the persona that attacks the config
+
+The other twelve personas abuse a binary that was already built. `wedge` attacks the
+**declaration**, and it is a different class of bug: a config contradiction that builds
+cleanly ships an artifact whose behaviour nobody predicted from reading the config, and the
+build is the last point at which the person who can fix it is still watching.
+
+A *wedge* is a configuration where two directives cannot both be honoured. Four outcomes:
+
+| outcome | meaning |
+|---|---|
+| `REFUSED` | the build stopped and named at least one side of the conflict. Best case. |
+| `WARNED` | it built and said which side it overrode. Fine when precedence is documented. |
+| `RAN` | it built and the predicted damage did not occur — the wedge was not a real contradiction. The **case** is wrong, not the tool. |
+| `SILENT-WEDGE` | it built, said nothing, and the artifact carries the damage. **A finding.** |
+
+`SILENT-WEDGE` is in `FATAL`. `WARNED` deliberately is not: resolving a conflict and saying
+which side lost is the behaviour this persona is asking for.
+
+Each case names the artifact property it expects to be damaged and then checks it, so a
+finding is never "the config was weird" — it is "the config was weird **and** here is the
+resulting binary's specific defect."
+
+### Three defects on the first run
+
+**`app_subdir` containing `..`** — the payload builder copies the project to
+`payload/<app_subdir>`, so the application landed *outside* the payload. The zip is
+assembled from the payload root, the app was not under it, and the launcher staged a binary
+with no entrypoint: `can't open file '.../escaped/app.py'`. Same class as a zip-slip — a
+path from config escaping the root it is resolved against.
+
+**`expires` in the past** — `cryptbox.nim` compares the policy date to now and quits with
+`license expired`, so the artifact was dead on arrival and the failure read as a licensing
+problem rather than the typo it was.
+
+**An unrecognised `cwd_policy`** — `main.nim` compares it against `"exe"` and treats
+everything else as `"launch"`, so a typo and a deliberate choice produced identical binaries.
+The difference surfaced only as a relative path resolving from the wrong directory on someone
+else's machine.
+
+All three are now refused at build time by `validate_manifest` / `validate_encryption`, with
+messages that name both sides. `tests/test_config_wedges.py` claims them, including a check
+that `CWD_POLICIES` only lists values `main.nim` actually branches on — so the validator
+cannot drift into validating against a fiction.
+
+### It also caught two of its own cases cheating
+
+`licence_expires_before_it_is_built` and `three_names_for_one_artifact` both *passed* at
+first, and both were wrong. They refused — but for an unrelated guard that fired earlier: no
+secret supplied, and an ambiguous entrypoint. Neither had reached the wedge it claimed to
+test.
+
+That is the same mistake `payload_edited_and_footer_recomputed` made when it took a CRC32
+rejection as proof of tamper detection. `REFUSED-UNRELATED` now names it: *the build refused
+without mentioning either side of the conflict, so the case missed its target.* It is a note
+against busybody, not a pass for haru-pack. Fixing the two cases to isolate their wedges is
+what exposed the expiry defect.
+
+**A case must isolate its wedge, or it measures whichever guard happens to fire first.**
+
+### Wedge cases run once
+
+They are registered `per_fixture=False`. They build their own artifact and say nothing about
+the packed package, so running them once per fixture would repeat one answer 25 times and
+inflate exactly the census INV-CHAOS-04 exists to keep honest.
+
 ## Running it wide
 
 ```sh
