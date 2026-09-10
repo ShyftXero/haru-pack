@@ -56,7 +56,10 @@ include = [
 include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproject.toml"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6",
+       # busybody --jobs only. A dev-tool dependency: nothing haru-pack SHIPS uses
+       # it, and the harness runs serially when it is absent.
+       "mpire>=2.10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

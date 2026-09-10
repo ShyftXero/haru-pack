@@ -281,6 +281,43 @@ tests/test_busybody_ledger.py
 
 ---
 
+### INV-CHAOS-06
+Status: active
+Statement: Running the harness in parallel changes how long a sweep takes and nothing else.
+A case that measures elapsed time runs in a serial pass; a case run is executed by one
+function whether it runs in a worker or inline; and the journal has exactly one writer.
+Actors: whoever runs `--jobs 8` to get an answer before lunch, and whoever later has to
+explain why a case only fails at `--jobs 8`.
+Assets: the meaning of an outcome. A harness whose results depend on how many workers it
+used has no results — every finding becomes "is that real, or was the box just busy?"
+Red-path: Drop `serial=True` from `interrupted_while_the_app_runs` (it sleeps 0.7 s and then
+signals, so under load the signal arrives at a different point in startup) and the case
+begins flipping between RAN and REFUSED with no code change. Give the parallel and serial
+passes separate implementations and they drift, surfacing as "only fails under --jobs 8".
+Let a worker call `jr.write` and the journal interleaves partial lines, breaking the
+fsync-per-line contract INV-CHAOS-01 depends on. Each has a claiming test.
+Source: 2026-09-10. Measured on this 20-core box, top-25 tier=thick, 37 cases:
+
+    jobs=1   389.9s    37/37 behaved as expected
+    jobs=4   142.1s    37/37 behaved as expected
+    jobs=8    70.5s    37/37 behaved as expected
+
+Identical outcomes at all three widths is the evidence that matters; the speedup is only
+the reason to bother.
+Note: `JOBS_MAX = 8` is a cap, not a default. Each worker stages a real interpreter — peak
+452 MB measured — and spawns processes with their own rlimits. The ceiling exists because
+past it the timing-sensitive cases start reporting the load rather than the product.
+Note: `--keep` forces one worker. It retains every work directory, which is 131 GB for a
+top-25 sweep, and running wide only makes that peak arrive sooner.
+Note: mpire is a dev-group dependency. Nothing haru-pack ships uses it, and a sweep runs
+serially and says so when it is absent — a missing convenience must not stop the work.
+Note: ordered `imap`, not `imap_unordered`. An unordered journal is not byte-comparable
+between two runs of the same sweep, and that comparability is what makes the fingerprint
+census reproducible rather than merely repeatable.
+Territory: tools/busybody.py, tests/test_busybody_ledger.py
+
+---
+
 ## FLEX — the harness that decides what haru-pack is tested against
 
 ### INV-FLEX-01

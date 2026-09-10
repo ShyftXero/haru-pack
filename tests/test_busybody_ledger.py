@@ -535,8 +535,8 @@ def test_an_environment_failure_aborts_the_sweep_and_spares_the_ledger():
     Reverting `if bad and not aborted` to `if bad` writes them to the ledger permanently.
     """
     src = _module_code(REPO / "tools" / "busybody.py")
-    assert "infra_failure_reason(r)" in src, (
-        "the case loop must test each result for an environment failure"
+    assert "infra_failure_reason(rec)" in src, (
+        "every record must be tested for an environment failure as it is collected"
     )
     assert "raise InfraFailure(" in src, "detection without an abort is just a log line"
     assert "if bad and (not aborted):" in src, (
@@ -595,12 +595,18 @@ def test_the_case_loop_releases_scratch_and_the_finally_is_only_the_backstop():
     """Deleting the per-case release call reinstates the 100 GB sweep. Nothing else catches
     it, because the totals reported at the end are identical either way."""
     src = _module_code(REPO / "tools" / "busybody.py")
-    assert "reaper.release(work)" in src, (
+    assert "free_dir(work)" in src, (
         "each completed case must free its own scratch; the run-level reap() is a backstop"
     )
     assert "reaper.reap()" in src, "the backstop must still exist for a raise or a Ctrl-C"
     assert "SCRATCH_CAP_GB" in src, (
         "a leak should stop the sweep at a number the operator chose"
+    )
+    # A worker process cannot share the parent's Reaper, so both go through one function.
+    # Two copies would drift into a leak that only appears at one --jobs setting.
+    led = _module_code(REPO / "tools" / "busybody_ledger.py")
+    assert "def free_dir(" in led and "size = free_dir(d)" in led, (
+        "Reaper.release and the parallel worker must share one implementation"
     )
 
 
@@ -688,3 +694,92 @@ def test_the_blame_vocabulary_is_closed():
     assert bb.blame("", "haru-pack: nope") == "launcher"
     assert bb.blame("", "Traceback (most recent call last):") == "app"
     assert bb.blame("", "") == "unknown"
+
+
+# ---------------------------------------------------------------- parallel execution
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_cases_that_measure_time_never_share_the_machine():
+    """A case that sleeps for a fixed interval and then signals is asking "where had the
+    process got to after 0.7 s?" — and the answer changes when seven other cases are
+    competing for CPU. Those cases run in a separate serial pass.
+
+    Red-path: drop `serial=True` from any of them and the case starts reporting the load
+    instead of the product, intermittently, in a way that reads as a regression.
+    """
+    bb = _load_busybody()
+    serial = {c["name"] for c in bb.CASES if c.get("serial")}
+    expected = {"killed_mid_stage", "two_cold_starts_at_once",
+                "interrupted_while_the_app_runs", "terminated_mid_run"}
+    assert expected <= serial, f"timing-sensitive cases not marked serial: {expected - serial}"
+
+    # and the marking has to be justified by the code, not just declared
+    import ast
+    import inspect
+    for name in expected:
+        fn = next(c["fn"] for c in bb.CASES if c["name"] == name)
+        body = ast.unparse(ast.parse(inspect.getsource(fn).lstrip()))
+        assert ("time.sleep" in body or "Popen" in body), (
+            f"{name} is marked serial but does not appear to measure time; either the mark "
+            f"is stale or the case changed"
+        )
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_the_worker_count_is_capped_not_merely_defaulted():
+    """Each worker stages a real interpreter (measured peak 452 MB) and spawns processes with
+    their own rlimits. Past the cap the timing cases measure the load."""
+    bb = _load_busybody()
+    assert bb.JOBS_DEFAULT == 4
+    assert bb.JOBS_MAX == 8
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "min(a.jobs, JOBS_MAX)" in src, "--jobs must be clamped, not trusted"
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_one_code_path_runs_a_case_whether_parallel_or_serial():
+    """The parallel pass hands work items to a pool; the serial pass calls the same function
+    inline. Two implementations would drift, and the drift would show up as "it only fails
+    under --jobs 8", which is the least debuggable shape available."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert src.count("def run_one(") == 1, "run_one must have exactly one definition"
+    assert "run_one(fname, str(exe)" in src, "the serial pass must call run_one inline"
+    assert "pool.imap(run_one, items)" in src, (
+        "ordered imap: an unordered journal is not byte-comparable between two runs of the "
+        "same sweep, which is what makes the fingerprint census reproducible"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_keeping_artifacts_forces_serial():
+    """--keep retains every work dir — 452 MB each, 131 GB for a top-25 sweep. Running 8
+    wide makes that peak arrive 8x sooner without helping anyone read them."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "if a.keep and jobs > 1:" in src, "--keep must downgrade to one worker"
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_a_missing_optional_dependency_does_not_stop_a_sweep():
+    """mpire is in the dev group. --jobs is a convenience for whoever is iterating on the
+    harness; a missing optional package must degrade to serial, not fail at the point where
+    the work would have started."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "except ImportError" in src and "return None" in src
+    assert "running serially" in src, (
+        "falling back silently would make a 6x slowdown look like the machine"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_the_worker_does_not_write_shared_state():
+    """The journal and the findings ledger have exactly one writer: the parent. A worker that
+    appended to the journal would interleave partial lines and break the fsync-per-line
+    contract that makes an interrupted run readable (INV-CHAOS-01)."""
+    bb = _load_busybody()
+    import ast
+    import inspect
+    body = ast.unparse(ast.parse(inspect.getsource(bb.run_one).lstrip()))
+    for forbidden in ("jr.write", "ledger_append", "jr.beat"):
+        assert forbidden not in body, (
+            f"run_one calls {forbidden} from a worker process; the parent is the only writer"
+        )

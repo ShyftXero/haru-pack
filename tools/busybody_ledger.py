@@ -263,6 +263,25 @@ def _tree_size(path: Path) -> int:
     return total
 
 
+def free_dir(path: Path) -> int:
+    """Remove one directory tree now and return the bytes it held. Never raises.
+
+    The single implementation of "this scratch is finished with". Two callers need it and
+    they cannot share a Reaper: the serial path has one, and a parallel worker runs in
+    another process. Two copies of this would drift, and the drift would be a leak that only
+    appears at one --jobs setting.
+    """
+    d = Path(path)
+    try:
+        if not d.exists():
+            return 0
+        size = _tree_size(d)
+        shutil.rmtree(d, ignore_errors=True)
+        return 0 if d.exists() else size
+    except OSError:
+        return 0
+
+
 class Reaper:
     """Tracks every working directory a run creates and guarantees all of them are removed.
 
@@ -309,18 +328,10 @@ class Reaper:
         d = Path(path)
         if str(d) in self._held:
             return 0
-        size = 0
-        try:
-            if d.exists():
-                size = _tree_size(d)
-                shutil.rmtree(d, ignore_errors=True)
-                if not d.exists():
-                    self.reaped += 1
-                    self.freed += size
-                else:
-                    size = 0
-        except OSError:
-            return 0
+        size = free_dir(d)
+        if size:
+            self.reaped += 1
+            self.freed += size
         self._dirs = [x for x in self._dirs if x != d]
         return size
 

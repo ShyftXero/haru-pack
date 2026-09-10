@@ -40,6 +40,54 @@ plainly that the number is machine-specific and does not transfer.
 
 Neither needs a model. Neither needs you to open the raw records.
 
+## Running it wide
+
+```sh
+python tools/busybody.py --fixtures top25 --tier thick --jobs 8
+```
+
+Measured on a 20-core box, top-25 at tier=thick, 37 cases:
+
+| jobs | wall clock | result |
+|---|---|---|
+| 1 | 389.9 s | 37/37 behaved as expected |
+| 4 | 142.1 s | 37/37 behaved as expected |
+| 8 | 70.5 s | 37/37 behaved as expected |
+
+**Identical outcomes at all three widths is the point; the speedup is only the reason to
+bother.** A harness whose results depend on how many workers it used has no results — every
+finding becomes "is that real, or was the box just busy?"
+
+Default is 4, cap is 8. The cap is not a shrug: each worker stages a real interpreter (peak
+452 MB measured) and spawns processes with their own rlimits, and past 8 the timing-sensitive
+cases start reporting the load rather than the product.
+
+### Four cases never share the machine
+
+`killed_mid_stage`, `two_cold_starts_at_once`, `interrupted_while_the_app_runs` and
+`terminated_mid_run` are marked `serial=True` and run in their own pass afterwards. Each
+sleeps for a fixed interval and then signals — they are asking *where had the process got to
+after 0.7 seconds?*, and the answer changes when seven other cases are competing for CPU.
+
+Marking a case serial costs wall clock. Not marking one that needs it costs a flaky result
+that reads as a regression, which is worse.
+
+### One code path
+
+`run_one()` executes a case. The parallel pass hands work items to a pool; the serial pass
+calls the same function inline. Two implementations would drift, and the drift shows up as
+"it only fails under `--jobs 8`" — the least debuggable shape available.
+
+The journal and the findings ledger have exactly one writer: the parent. Workers return
+records and never touch shared state, which keeps the fsync-per-line contract that makes an
+interrupted run readable. Results come back through ordered `imap`, not `imap_unordered`, so
+two runs of the same sweep produce comparable journals — that comparability is what makes the
+fingerprint census reproducible rather than merely repeatable.
+
+`--keep` forces one worker: it retains every work directory, 131 GB for a top-25 sweep, and
+running wide only makes that peak arrive sooner. mpire is a dev-group dependency; without it
+the sweep runs serially and says so.
+
 ## When the box fails, not the product
 
 A 925-run sweep on 2026-09-10 reported **470 findings**. All of them were one disk quota.

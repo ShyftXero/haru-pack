@@ -108,8 +108,8 @@ from haru_pack import overlay  # noqa: E402
 
 from busybody_analyze import analyze_run, format_analysis  # noqa: E402
 from busybody_ledger import (  # noqa: E402
-    Journal, Reaper, fingerprint, human_bytes, ledger_append, ledger_path, ledger_rollup,
-    prune_runs, reap_orphans, scan_runs)
+    Journal, Reaper, fingerprint, free_dir, human_bytes, ledger_append, ledger_path,
+    ledger_rollup, prune_runs, reap_orphans, scan_runs)
 
 OUT = REPO / "busybody" / "out"
 # Overridable because the default scratch filesystem may be quota'd; see
@@ -134,7 +134,8 @@ FATAL = ("CRASHED", "HUNG", "SILENT")
 CASES = []
 
 
-def case(persona: str, expect, why: str, inv: str = "", remedy: str = ""):
+def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",
+         serial: bool = False):
     """Register a chaos case.
 
     `expect`  outcomes that are acceptable.
@@ -142,13 +143,28 @@ def case(persona: str, expect, why: str, inv: str = "", remedy: str = ""):
     `inv`     the INVARIANTS.md entry that governs it, if any.
     `remedy`  what to do when it fails. Written into the report so the reader does not
               have to work it out, or ask anyone.
+    `serial`  this case measures TIME, so it must not share the machine. A case that sleeps
+              for a fixed interval and then signals is asking "where had the process got to
+              after 0.7 s?" — and the answer changes when seven other cases are competing
+              for CPU. Under --jobs these run in a separate serial pass, after the rest.
+              Marking a case serial costs wall clock; not marking one that needs it costs
+              a flaky result that looks like a regression.
     """
     def deco(fn):
         CASES.append({"name": fn.__name__, "persona": persona,
                       "expect": tuple(expect) if isinstance(expect, (list, tuple)) else (expect,),
-                      "why": why, "inv": inv, "remedy": remedy, "fn": fn})
+                      "why": why, "inv": inv, "remedy": remedy, "serial": serial, "fn": fn})
         return fn
     return deco
+
+
+# The number of workers is capped rather than merely defaulted. Chaos cases run real
+# binaries that stage real interpreters, so each worker holds a work directory (measured
+# peak 452 MB) and spawns processes with their own rlimits. 8 was the ceiling asked for on
+# this 20-core box; past that the timing-sensitive cases start reporting the load rather
+# than the product.
+JOBS_DEFAULT = 4
+JOBS_MAX = 8
 
 
 # ---------------------------------------------------------------- outcome classification
@@ -409,7 +425,8 @@ def payload_lopped_off(exe: Path, work: Path) -> dict:
       "not poison every later run — recovery is the whole point of a cache.",
       inv="INV-STAGE-01",
       remedy="A leftover .tmp- directory or a stage with no .ready must be discarded and "
-             "rebuilt, not reused and not treated as fatal. Check stageZip's reuse path.")
+             "rebuilt, not reused and not treated as fatal. Check stageZip's reuse path.",
+      serial=True)
 def killed_mid_stage(exe: Path, work: Path) -> dict:
     cache = work / "cache"
     cache.mkdir(parents=True, exist_ok=True)
@@ -797,7 +814,8 @@ def hostile_umask(exe: Path, work: Path) -> dict:
       inv="INV-STAGE-01",
       remedy="Staging is meant to be atomic: build in a per-process .tmp- directory, then "
              "move into place. A failure here means the move is not atomic or the loser "
-             "reads a partially written tree.")
+             "reads a partially written tree.",
+      serial=True)
 def two_cold_starts_at_once(exe: Path, work: Path) -> dict:
     cache = work / "racecache"
     cache.mkdir(parents=True, exist_ok=True)
@@ -1264,7 +1282,8 @@ def stdout_closed_early(exe: Path, work: Path) -> dict:
       "read a change here as a regression without checking the machine.",
       inv="INV-LAUNCH-06",
       remedy="A HUNG means the signal reached neither process and the run is wedged. A "
-             "launcher traceback means the parent took the signal instead of the child.")
+             "launcher traceback means the parent took the signal instead of the child.",
+      serial=True)
 def interrupted_while_the_app_runs(exe: Path, work: Path) -> dict:
     cache, first = warm(exe, work)       # stage first, so the interrupt lands on the app
     if first["outcome"] != "RAN":
@@ -1292,7 +1311,8 @@ def interrupted_while_the_app_runs(exe: Path, work: Path) -> dict:
       "SIGTERM instead of SIGINT — what a process supervisor or `docker stop` sends. The "
       "launcher must not leave the child orphaned and running.",
       remedy="Check for a stray child process afterwards. An orphan holding the stage is "
-             "how a later run finds a directory being written to.")
+             "how a later run finds a directory being written to.",
+      serial=True)
 def terminated_mid_run(exe: Path, work: Path) -> dict:
     cache, _ = warm(exe, work)
     t0 = time.monotonic()
@@ -1558,6 +1578,68 @@ def calibrate(fixtures: list, log=print) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- parallel execution
+
+def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
+            work_root_str: str, keep: bool) -> dict:
+    """Run one (case, fixture) pair and return its record. Safe to call in a worker process.
+
+    Everything this needs arrives as arguments rather than through module state, and nothing
+    it touches is shared: its own work directory, its own subprocesses, its own rlimits. The
+    two things that ARE shared — the journal and the findings ledger — are deliberately not
+    written here. The parent does that as records come back, which keeps the append order
+    deterministic and the fsync-per-line contract intact with one writer.
+
+    Args are strings because a work item crosses a process boundary; Path survives pickling
+    but strings make it obvious that this is a message, not a reference.
+    """
+    c = next(x for x in CASES if x["name"] == case_name)
+    exe, run_dir = Path(exe_str), Path(run_dir_str)
+    work = Path(tempfile.mkdtemp(prefix=f"bb-{case_name}-",
+                                 dir=work_root_str or None))
+    try:
+        try:
+            r = c["fn"](exe, work)
+        except Exception as e:
+            r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0, "blame": "harness",
+                 "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+        r.setdefault("blame", blame(r.get("stdout", ""), r.get("stderr", "")))
+        r["scratch_bytes"] = dir_bytes(work)
+
+        ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
+        msg = (r.get("stderr") or r.get("stdout") or "").strip()
+        rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
+               **r, "ok": ok, "expect": list(c["expect"]), "fixture": fixture_name,
+               "severity": severity_for(c, r, ok),
+               "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
+        if not ok:
+            rec["artifacts"] = preserve(run_dir, f"{fixture_name}--{case_name}", work)
+        if keep:
+            rec.setdefault("artifacts", str(work))
+        return rec
+    finally:
+        # Same rule as the serial path, and the same function: the work dir goes away here,
+        # not at the end of the run. With 8 workers, deferring it would multiply the peak
+        # footprint by 8 on top of already holding the whole sweep. A worker cannot share
+        # the parent's Reaper, so both go through free_dir().
+        if not keep:
+            free_dir(work)
+
+
+def worker_pool(jobs: int):
+    """An mpire pool, or None if mpire is not installed.
+
+    mpire is a dev-group dependency: `--jobs` is a convenience for whoever is iterating on
+    the harness, and a missing optional package must not stop a sweep from running. It falls
+    back to serial and says so, rather than failing at the point where the work would start.
+    """
+    try:
+        from mpire import WorkerPool
+    except ImportError:
+        return None
+    return WorkerPool(n_jobs=jobs, use_dill=False)
+
+
 def main() -> int:
     global WORK_ROOT, SCRATCH_CAP_GB
     ap = argparse.ArgumentParser(description=__doc__,
@@ -1583,6 +1665,9 @@ def main() -> int:
     ap.add_argument("--work-root", metavar="DIR", default=None,
                     help="filesystem for scratch dirs (default $TMPDIR; move it if a long "
                          "sweep dies with errno 122)")
+    ap.add_argument("-j", "--jobs", type=int, default=JOBS_DEFAULT, metavar="N",
+                    help=f"run cases in N worker processes (default {JOBS_DEFAULT}, max "
+                         f"{JOBS_MAX}). Timing-sensitive cases always run serially.")
     ap.add_argument("--scratch-cap-gb", type=float, default=SCRATCH_CAP_GB,
                     metavar="N", help=f"abort if the scratch root exceeds N GiB "
                                       f"(default {SCRATCH_CAP_GB}; guards against a leak)")
@@ -1591,6 +1676,19 @@ def main() -> int:
     a = ap.parse_args()
 
     SCRATCH_CAP_GB = a.scratch_cap_gb
+
+    jobs = max(1, min(a.jobs, JOBS_MAX))
+    if a.jobs > JOBS_MAX:
+        print(f"--jobs {a.jobs} clamped to {JOBS_MAX}: each worker stages a real "
+              f"interpreter, and past this the\ntiming-sensitive cases measure the load "
+              f"instead of the product.", file=sys.stderr)
+    if a.keep and jobs > 1:
+        # --keep retains every work dir; at 452 MB each that is 131 GB for a top-25 sweep,
+        # and running 8 wide makes the peak arrive 8x sooner. Keeping artifacts is an
+        # inspection workflow, so serial is the right shape for it.
+        print("--keep implies --jobs 1 (every work dir is retained; parallel would make "
+              "the peak arrive sooner without helping you read them)", file=sys.stderr)
+        jobs = 1
 
     if a.work_root:
         WORK_ROOT = Path(a.work_root).expanduser().resolve()
@@ -1692,69 +1790,64 @@ def main() -> int:
             print(ln)
         print()
 
-        for fname, exe in fixtures:
-            if len(fixtures) > 1:
-                print(f"-- {fname} ({exe.stat().st_size / 1e6:.0f}MB)")
-            for c in picked:
-                work = reaper.track(Path(tempfile.mkdtemp(prefix=f"bb-{c['name']}-", dir=WORK_ROOT)))
-                try:
-                    r = c["fn"](exe, work)
-                except Exception as e:
-                    r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0,
-                         "blame": "harness", "stdout": "",
-                         "stderr": f"{type(e).__name__}: {e}"}
-                # Every non-RAN result carries a blame. A missing one shows up in
-                # --analyze as a "?" bucket, which is a hole in triage rather than a
-                # finding: 25 of them in the 2026-09-10 sweep were all `not_executable`,
-                # whose result is built by hand from an OSError and never saw run_exe().
-                r.setdefault("blame", blame(r.get("stdout", ""), r.get("stderr", "")))
-
-                scratch = dir_bytes(work)
-                r["scratch_bytes"] = scratch
-                peak_scratch = max(peak_scratch, scratch)
-
-                if reason := infra_failure_reason(r):
-                    # Abort rather than score. Continuing would attribute the box's failure
-                    # to 30 different personas across every remaining fixture.
+        # One code path for a case run: run_one(). The parallel pass hands work items to
+        # a pool, the serial pass calls the same function inline. Records come back and the
+        # parent — the only writer — journals them, which keeps the append order
+        # deterministic and the one-fsync-per-line contract honest.
+        def record(rec: dict) -> None:
+            nonlocal peak_scratch
+            peak_scratch = max(peak_scratch, rec.get("scratch_bytes") or 0)
+            if reason := infra_failure_reason(rec):
+                raise InfraFailure(
+                    f"{rec['persona']}/{rec['name']} on {rec['fixture']}: {reason}")
+            results.append(rec)
+            jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
+            if len(results) % 25 == 0:
+                live = dir_bytes(WORK_ROOT or Path(tempfile.gettempdir()))
+                if live > SCRATCH_CAP_GB * 1024**3:
                     raise InfraFailure(
-                        f"{c['persona']}/{c['name']} on {fname}: {reason}")
-                ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
-                msg = (r.get("stderr") or r.get("stdout") or "").strip()
-                rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
-                       **r, "ok": ok, "expect": list(c["expect"]), "fixture": fname,
-                       "severity": severity_for(c, r, ok),
-                       "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
+                        f"scratch root holds {human_bytes(live)} after {len(results)} "
+                        f"case(s), over the {SCRATCH_CAP_GB} GiB cap. Reaping is "
+                        f"per-case, so this is a leak, not normal growth.")
+            jr.beat()
+            ok = rec["ok"]
+            print(f"  {'ok ' if ok else 'BAD'} {rec['persona']:14} {rec['name']:42} "
+                  f"{rec['outcome']:9}{'  ' if ok else '<-'}"
+                  + (f" [{rec['fixture']}]" if len(fixtures) > 1 else ""))
 
-                if not ok:
-                    rec["artifacts"] = preserve(run_dir, f"{fname}--{c['name']}", work)
-                    reaper.hold(work) if a.keep else None
-                if a.keep:
-                    reaper.hold(work)
-                    rec.setdefault("artifacts", str(work))
+        parallel_cases = [c for c in picked if not c.get("serial")]
+        serial_cases = [c for c in picked if c.get("serial")]
+        pool = worker_pool(jobs) if jobs > 1 and parallel_cases else None
+        if pool is None:
+            # Either --jobs 1, or mpire is missing. Both mean everything runs in the serial
+            # pass; the two passes exist to protect timing, not to be the only way in.
+            if jobs > 1:
+                print("mpire is not installed; running serially. "
+                      "`uv sync --group dev` installs it.")
+            parallel_cases, serial_cases = [], picked
 
-                results.append(rec)
-                jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
+        if parallel_cases:
+            items = [(fname, str(exe), c["name"], str(run_dir), str(WORK_ROOT or ""), a.keep)
+                     for fname, exe in fixtures for c in parallel_cases]
+            print(f"  {len(items)} run(s) across {jobs} worker(s)"
+                  + (f", then {len(serial_cases) * len(fixtures)} timing-sensitive run(s) "
+                     f"serially" if serial_cases else ""))
+            with pool:
+                # imap, not imap_unordered: ordered results keep the journal byte-comparable
+                # between two runs of the same sweep, which is what makes the fingerprint
+                # census reproducible rather than merely repeatable.
+                for rec in pool.imap(run_one, items):
+                    record(rec)
 
-                # Free this case's scratch NOW. The run-level reap() in the finally is the
-                # backstop for a raise or a Ctrl-C, not the primary mechanism: holding 925
-                # thick-tier work dirs until the end needs ~100 GB.
-                if not a.keep and "artifacts" not in rec:
-                    reaper.release(work)
-
-                # With per-case release the work root should stay near one case's footprint.
-                # If it climbs, something is leaking and the sweep should stop while the
-                # number is still small enough to read.
-                if len(results) % 25 == 0:
-                    live = dir_bytes(WORK_ROOT or Path(tempfile.gettempdir()))
-                    if live > SCRATCH_CAP_GB * 1024**3:
-                        raise InfraFailure(
-                            f"scratch root holds {human_bytes(live)} after {len(results)} "
-                            f"case(s), over the {SCRATCH_CAP_GB} GiB cap. Reaping is "
-                            f"per-case, so this is a leak, not normal growth.")
-                jr.beat()
-                prefix = f"  {'ok ' if ok else 'BAD'} "
-                label = f"{c['persona']:14} {c['name']:42}"
-                print(f"{prefix}{label} {r['outcome']:9}{'  ' if ok else '<-'}")
+        if serial_cases:
+            if parallel_cases:
+                print(f"\n-- serial pass: {len(serial_cases)} case(s) that measure time")
+            for fname, exe in fixtures:
+                if len(fixtures) > 1 and not parallel_cases:
+                    print(f"-- {fname} ({exe.stat().st_size / 1e6:.0f}MB)")
+                for c in serial_cases:
+                    record(run_one(fname, str(exe), c["name"], str(run_dir),
+                                   str(WORK_ROOT or ""), a.keep))
 
     except InfraFailure as e:
         aborted = True
