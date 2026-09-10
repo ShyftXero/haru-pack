@@ -396,6 +396,29 @@ README as the case for bundling.
 21. **Microsoft Store MSI/EXE submission path** — the only non-MSIX route to a genuinely
     warning-free first run.
 
+**Non-negotiable invariants** *(detail and sources in Part 9)*
+
+- **`--only-binary :all:` / `no-build = true` in every cross build.** uv's `--python-platform`
+  selects *target* wheels but **silently builds any sdist for the *host***. pip refuses to start
+  in this situation; uv just proceeds. Without this flag a Linux-built `.so` lands in a Windows
+  bundle and the failure surfaces at the user's first run. **This is the highest-severity finding
+  in the survey.**
+- **Pin an exact python-build-standalone release tag; never track latest.** Release 20260320
+  shipped `libpython3.14.so` with the executable-stack flag set (rejected on SELinux/hardened
+  kernels); 20260310 was clean.
+- **Never use a pbs release from before 2023** — those may link `readline`/GDBM and are therefore
+  **GPLv3**. 2023+ builds use libedit and disable `_gdbm` specifically to avoid this.
+- **Default to the baseline `x86_64` triple.** pbs's own docs: `x86_64_v3`/`v4` binaries "will
+  crash if you attempt to run them on an older CPU."
+- **Default uv to `--system-certs`** and propagate `SSL_CERT_FILE`. uv uses bundled Mozilla roots
+  where pip 24.2+ uses the OS store — so on a TLS-intercepting corporate box `pip install` works
+  and `uv` fails from the same shell. "But pip works" will be the top bug report.
+- **Never emit `--index-strategy unsafe-best-match`**, and warn loudly on any generated
+  `--extra-index-url`. uv's `first-index` default is what makes it dependency-confusion-safe;
+  `unsafe-best-match` is pip's behaviour and is named "unsafe" for the `torchtriton` reason.
+- **Ship `certifi`/`truststore` and set `SSL_CERT_FILE` for the staged interpreter.** pbs's
+  compiled-in OpenSSL defaults are wrong on RHEL/UBI and NixOS in opposite directions.
+
 **Explicitly reject**
 
 - PyInstaller onefile's re-extract-every-launch (already rejected in `research/04`).
@@ -494,6 +517,260 @@ standalone Python, content-addressed caching.
 
 ---
 
+## Part 9 — The substrate: what the prior art learned the hard way
+
+Sharp edges in the layers haru-pack delegates to. Everything here is sourced; the items that
+change a design decision are marked **⚠**.
+
+### 9.1 python-build-standalone
+
+**Stewardship.** Astral maintains it; Szorc handed off the umbrella but stated in 2024-03 that
+"PyOxidizer and all the projects under its umbrella are effectively in a zombie state… I still
+actively support python-build-standalone." Worth watching:
+[python/prebuilt-cpython](https://github.com/python/prebuilt-cpython) — an official CPython effort
+to ship prebuilt binaries for all tier-1 platforms via python.org, with pbs and BeeWare as named
+representatives. Planning-phase only, but it is the thing that could obsolete pbs as our source.
+
+**⚠ Licensing.** pbs's own docs:
+
+> "Notable exceptions to this are GDBM and readline, which are both licensed under GPL Version 3.
+> We build CPython against libedit — as opposed to readline — to avoid this GPL dependency…
+> **Distribution releases before 2023 may link against readline and are therefore subject to the
+> GPL.** … **Distribution releases before 2023 may link against GDBM and be subject to the GPL.**"
+
+Pin a ≥2023 release and we are GPL-free. Separately: `install_only` archives are built by
+rewriting `python/install/*` → `python/*`, and **"all files not under `python/install/*` are not
+carried forward"** — which includes `PYTHON.json`, the file that carries the licensing metadata.
+**Open obligation:** extract one and check whether license texts survive; if not, vendor them at
+build time. (Listed in Part 8.)
+
+**⚠ Platform selection.** `x86_64_v3`/`v4` binaries "will crash if you attempt to run them on an
+older CPU not supporting the newer instructions." Windows minimums: CPython 3.14+ needs Win10+,
+≤3.13 supports 8.1+. Linux glibc ≥2.17 (2.28 riscv64). Non-x86_64/aarch64 targets are
+cross-compiled on x86_64 and "not as highly optimized"; pbs also states "the entire Python test
+harness is not run on a regular basis" and publishes no stability guarantee or deprecation policy.
+
+**⚠ Pin an exact tag.** Release 20260320 shipped `libpython3.14.so` with the **executable-stack
+flag set** — rejected on SELinux/hardened kernels, flagged by scanners. 20260310 was clean. It
+went unnoticed because only embedders broke ([pbs#1061](https://github.com/astral-sh/python-build-standalone/issues/1061)).
+
+**Relocatability — this is the real story.** `_sysconfigdata_*.py`, Makefiles and `PYTHON.json`
+embed build-infrastructure absolute paths. pbs's docs: *"When installed by uv, these absolute
+paths are fixed up to point to the actual location on your system, so this quirk generally does
+not affect uv users."* → **let uv do the install, or inherit the fixup work.** Anything calling
+`sysconfig.get_paths()` — build backends, source builds of C extensions — sees garbage otherwise.
+Third-party fixer if we ever need it: [`sysconfigpatcher`](https://github.com/bluss/sysconfigpatcher).
+
+**Windows CRT.** `PYTHON.json`'s `crt_features` records the vcruntime version. Historically the
+DLLs were **stripped** from the archives; release **20251120**'s changelog says *"MSCV runtime
+DLLs are no longer stripped on windows."* → **pin pbs ≥ 20251120 and app-local `vcruntime140.dll`
+ships with the interpreter.** Below that we must supply it. Note the UCRT is a Windows OS
+component and is always present on Win10+; only the VC++ redistributable part is our problem.
+
+**⚠ The SSL cert bundle is a first-run failure *inside our own app*.**
+[uv#16703](https://github.com/astral-sh/uv/issues/16703): a uv-managed Python on RHEL/UBI8 reports
+`cafile=None, capath='/etc/ssl/certs'` while the distro Python on the same box correctly reports
+`/etc/pki/tls/cert.pem` — so HTTPS from the staged Python fails. NixOS has the mirror image.
+**Ship `certifi`/`truststore` and set `SSL_CERT_FILE` explicitly.**
+
+**Other quirks that reach users:** terminfo not found → broken REPL arrows in stripped containers
+(set `TERMINFO_DIRS`); libedit not readline on Linux 3.10+ (subtle behavioural differences); **no
+`Scripts/pip.exe` on Windows** because "the way these executables are built isn't portable" — so
+any shim we generate must not assume console-script `.exe`s exist. **Tkinter is a moving target:**
+as of Aug 2025 pbs split `_tkinter`, `libtcl8.6` and `libtk8.6` into separate dynamic libraries
+relying on `DT_RPATH`/`LC_RPATH` into `lib/` — **both break if we flatten or relocate the
+directory layout.** If we support tkinter apps, preserve pbs's layout verbatim, set
+`TCL_LIBRARY`/`TK_LIBRARY`, and add a smoke test.
+
+**Signing gap, restated precisely:** the staged **uv** is signed and notarized as of 0.12.12; the
+staged **CPython is not** — pbs docs and release notes never mention signing, notarization or
+attestations. Re-signing it on macOS hits
+[pbs#749](https://github.com/astral-sh/python-build-standalone/issues/749) (`codesign -f -o
+runtime` on `_tkinter` fails, insufficient headerpad). This is why Part 5 #6 recommends *ad-hoc*
+signing only.
+
+### 9.2 Cross-compilation — the highest-severity finding
+
+**⚠ `--python-platform` silently builds sdists for the host.** uv's own CLI help:
+
+> "**WARNING: When specified, uv will select wheels that are compatible with the *target*
+> platform; as a result, the installed distributions may not be compatible with the *current*
+> platform. Conversely, any distributions that are built from source may be incompatible with the
+> *target* platform, as they will be built for the *current* platform.** The `--python-platform`
+> option is intended for advanced use cases."
+
+**pip refuses to start in this situation** (`check_dist_restriction`: "either `--no-deps` must be
+set, or `--only-binary=:all:` must be set"). **uv just proceeds.** A Linux-built `.so` goes into
+the Windows bundle, no error, failure at the user's first run.
+
+**→ `--only-binary :all:` / `no-build = true` must be a non-optional invariant of every haru-pack
+cross build.** It converts silent corruption into a loud failure.
+
+**Checked against our code: we are currently correct.** `--python-platform` appears exactly once,
+in `warm_cache_windows()` at `src/haru_pack/bundle.py:144-146`, and that call already passes
+`--only-binary :all:` alongside `--python-version`. The risk is regression, not a present bug —
+**any future `--python-platform` call site must carry it**, so this belongs in a test or a helper
+that refuses to build the argv without it, not in a docstring.
+
+Two related limits: uv's resolver is best-effort on markers — "Python's environment markers expose
+far more information about the current machine than can be expressed by a simple
+`--python-platform` argument… may lose fidelity for complex package and platform combinations."
+And a **dynamic-metadata sdist forces a local PEP 517 build during a cross resolve**, because uv
+only builds when it can't find static metadata. `required-environments` is the only mechanism that
+*asserts* "a Windows wheel must exist"; `environments` narrows scope instead. Version-splitting
+across platforms (a package whose Windows and Linux wheels exist at different versions) is
+**open and unsolved** — [uv#13332](https://github.com/astral-sh/uv/issues/13332),
+[#9711](https://github.com/astral-sh/uv/issues/9711).
+
+**⚠ `--wine` is the documented industry workaround, not a hack.** Everyone else refuses to
+cross-compile, and two of them point at Wine explicitly:
+
+| Tool | Verdict |
+|---|---|
+| **PyInstaller** | Refuses. FAQ: *"No, this is not supported. **Please use Wine for this, PyInstaller runs fine in Wine.**"* |
+| **cx_Freeze** | Refuses, blesses Wine: *"Starting with version 8.0… creating executables in Wine is possible with **no difference compared to Windows**."* |
+| **PyOxidizer** | Refuses: *"Cross compiling is not yet supported."* Project is a zombie. |
+| **conda constructor** | Refuses — "OS-native tools are needed to generate the Windows `.exe` files." |
+| **pyapp** | Supports it, via `cross` containers, with the repo-relative-path constraint. |
+| **Nuitka** | No documented cross mode in either direction (negative finding, unverified). |
+
+**⚠ Legal loose end:** if we obtain MSVC CRT bits via `xwin`/`cargo-xwin`, note cargo-xwin's own
+disclaimer — *"By using this software you are consented to accept the license at
+go.microsoft.com/fwlink/?LinkId=2086102"* (the Windows SDK EULA). Whether that permits
+redistributing CRT bits inside a shipped artifact **needs a human legal read**. A
+`*-pc-windows-gnu` (MinGW) launcher sidesteps xwin entirely.
+
+### 9.3 First-run-fetch failure modes at scale
+
+**⚠ Corporate TLS: uv fails where pip works.** uv uses **bundled Mozilla roots** by default (rustls
++ aws-lc-rs), *not* the OS trust store. pip **24.2+** goes the other way, using system certificates
+by default via `truststore`. On a Zscaler/Netskope box, `pip install` succeeds and `uv` fails from
+the same shell. The fix is `--system-certs` / `UV_SYSTEM_CERTS`, or `SSL_CERT_FILE` /
+`SSL_CERT_DIR` / `SSL_CLIENT_CERT`. "uv does not use `/etc/ssl/certs/ca-certificates.crt`" was
+closed **not planned** ([uv#12871](https://github.com/astral-sh/uv/issues/12871)).
+**Default to `--system-certs` and put the remediation string in our error message.**
+
+**⚠ Kerberos/NTLM proxies are a hard wall.** [uv#11494](https://github.com/astral-sh/uv/issues/11494)
+(open, `wish`): *"Enterprise environments often have a proxy with Kerberos authentication. **This
+is currently not supported in reqwest**"* — blocked upstream on reqwest#953. **On a
+Kerberos-authenticated egress proxy a uv-based first-run fetch cannot succeed, period.** This is
+the strongest argument that **thick should be the default tier for enterprise targets**, not an
+option. Also raise `UV_HTTP_TIMEOUT` (default 30s) on flaky corporate links.
+
+**⚠ The definitive thin-tier argument, twelve days before this survey.** PyPI's
+[File Hosting Errors](https://blog.pypi.org/posts/2026-09-08-file-hosting-errors/) incident,
+**Aug 15–28 2026**: two weeks of intermittent 502/503s from `files.pythonhosted.org`, caused by a
+partial canary rollback leaving one Seattle POP's caching config reverted while routing was not —
+plus pre-existing Fastly bugs in fallback routing and **range-request handling**. Diagnosis hinged
+on a single user reporting one cache node.
+
+A single POP misbehaving produced two weeks of *intermittent, geographically localized,
+vendor-unreproducible* install failures. Our stub looks broken to the end user and is undebuggable
+by us. **And note the range-request angle: if the stub does ranged or resumable downloads, it
+inherits that bug class specifically.**
+
+**PyPI tells us not to do this at scale.** Their API docs: *"If your consumer is actually an
+organization or service that will be downloading a lot of packages from PyPI, **consider using
+your own index mirror or cache**."* The AUP reserves the right to throttle "significantly
+excessive" usage. **A widely adopted thin tier turns every end-user machine into a PyPI client.
+Document that as a stated scaling limit of the tier.**
+
+**⚠ Dependency confusion — why uv's default matters.** The canonical incident is PyTorch's
+`torchtriton`, Dec 2022, with a [first-party postmortem](https://pytorch.org/blog/compromised-nightly-dependency/):
+
+> "**Since the PyPI index takes precedence, this malicious package was being installed instead of
+> the version from our official repository.**"
+
+Payload exfiltrated `/etc/passwd`, `~/.gitconfig`, `~/.ssh/*` and the first 1,000 files in `$HOME`
+over encrypted DNS. uv's default `first-index` strategy prevents this; `unsafe-best-match` is
+pip's behaviour and is named "unsafe" for exactly this reason. **Never emit it.**
+
+**⚠ Playwright is the worst-case first-run fetch, and it is unauthenticated.** From the source
+(`registry/index.ts`, `browserFetcher.ts`): three rotating CDN mirrors, 5 retries — and **no hash,
+checksum or signature verification of the downloaded browser archive.** The only post-download
+validation is a marker-file existence check. Disk usage 281M chromium / 187M firefox / 180M
+webkit. `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` is real but undocumented on the current browsers page.
+**Two traps for us:** pointing `PLAYWRIGHT_DOWNLOAD_HOST` at a mirror is an unauthenticated-content
+trust decision, so *we* must verify; and **unused browsers are auto-reaped** unless
+`PLAYWRIGHT_SKIP_BROWSER_GC=1` — a haru-pack bundle that vendors browsers into the shared cache
+can have them deleted by an unrelated Playwright install. Version coupling is hard: *"If the
+Playwright version in your Docker image does not match the version in your project/tests,
+Playwright will be unable to locate browser executables."*
+
+**Neighbours, for calibration:** rustup's own security page says it *"does not validate signatures
+of downloaded toolchains"* and is "secure enough for most people, but it still needs work"; nvm has
+mirror env vars and `--offline` but **no corporate-proxy or air-gap section at all**.
+
+### 9.4 Overlay vs signature — the spec answer
+
+Read from the *Windows Authenticode Portable Executable Signature Format* v1.0 spec directly.
+The PE hash omits the Checksum field, the 8-byte Certificate Table data-directory entry, and the
+Attribute Certificate Table itself — "because they are modified by the act of adding an
+Authenticode signature." Step 14 of the hashing procedure is the whole answer:
+
+> "If `FILE_SIZE` is greater than `SUM_OF_BYTES_HASHED`, the file contains extra data that must be
+> added to the hash. This data begins at the `SUM_OF_BYTES_HASHED` file offset, and its length is:
+> `(File Size) – ((Size of AttributeCertificateTable) + SUM_OF_BYTES_HASHED)`"
+> "…specified in the second ULONG value in the Certificate Table entry (**32 bit: offset 132,
+> 64 bit: offset 148**)."
+
+| Placement | In the hash? | Signature survives? |
+|---|---|---|
+| **(a)** Overlay at EOF, appended **after** signing | **Yes** | **NO — breaks** |
+| **(b)** Smuggled in the WIN_CERTIFICATE PKCS#7 **padding** | No | Survives — **unless `EnableCertPaddingCheck`**; this is CVE-2013-3900 |
+| **(c)** Extra **unauthenticated attributes** in the PKCS#7 | No | Survives — the legitimate channel |
+| **(d)** Payload appended **before** signing | **Yes** | **YES — the correct design** |
+
+**⚠ The exact historical attack was signed downloader stubs — our architecture.** Eric Lawrence:
+
+> "In December 2013, Microsoft announced that some developers had foolishly used this trick to
+> store URLs of code that would be downloaded and installed by a signed 'stub' installer. The bad
+> guys noticed that they could edit these 'stub' installers, changing the embedded URLs to point
+> to malware, and the signature of the stub wouldn't change."
+
+His best-practice list is worth following literally: don't do it at all; if you must, sign the data
+block yourself and reject it if it doesn't validate; **"if the data contains URLs to other code,
+validate that code's signature when it is downloaded."** That last line is Part 5 #3, written in
+2013. Microsoft Advisory 2915720 confirms the check remains **opt-in and off by default** —
+enforcement was announced for June 2014, slipped to August, then cancelled ("the impact to
+existing software could be high") — and warns that non-Microsoft signing tools carry a risk of
+producing non-compliant signatures. Note the advisory also flags that *"binaries most likely to be
+affected are PE installer files distributed via the Internet that are customized at time of
+download"* — i.e. exactly a per-project stub.
+
+**⚠ The implementation detail that will bite us: alignment padding.** osslsigncode's `pe.c` pads
+the file to an 8-byte boundary before appending the PKCS#7 blob (`len = 8 - fileend % 8`), and pads
+the blob itself. **After signing, our payload is followed by up to 7 zero bytes and then the entire
+certificate table.** A footer parser assuming "magic at `EOF − sizeof(footer)`" **breaks the moment
+we sign** — which is precisely what happened to uv (uv#15022). Either read the certificate-table
+offset from the optional header and treat that as effective EOF (tolerating ≤7 padding bytes), or
+scan backwards for the magic, as `research/04` already specifies and as PyInstaller had to do.
+
+**⚠ On macOS a tail overlay is not an option at all.** PyInstaller: *"Appending data at the end of
+executable breaks the Mach-o format structure"* — `codesign` reports `__LINKEDIT segment does not
+cover the end of the file`. `LC_CODE_SIGNATURE` data lives at the end of `__LINKEDIT`, which must
+be last. **Use a `.app` bundle with the payload as a resource, or a Mach-O section.** (Related
+constraint if we ever ship universal binaries: `lipo`-merging two PyInstaller onefile executables
+produces a binary that still runs on only one platform, because the bootloader finds only the last
+embedded archive.)
+
+**Placement prior art:** Chrome's `mini_installer` stores its payload as **PE resources**
+(`kLZMAResourceType`, `kBinResourceType`, …) — inside a section, fully covered by the hash, no tail
+scanning at all. Go's `embed` has the same property. NSIS, 7-Zip SFX and AppImage all append an
+overlay and all work only because you **sign last**; AppImage additionally reserves ELF sections
+(`.sha256_sig`, `.sig_key`) for its own independent signature. The general zip-append trick works
+because zip is read from the end while PE is parsed from the start.
+
+**Signing a PE from Linux** is well supported: `osslsigncode` (PE/CAB/CAT/MSI/APPX, PKCS#11 tokens
+and networked HSMs; **no Mach-O**) and `jsign` (platform-independent, Azure Artifact Signing, AWS
+and Google KMS, DigiCert ONE). Both carry Advisory 2915720's non-Microsoft-tooling caveat.
+
+> **The rule, once:** emit the stub → embed or append the payload → **sign last**. On Windows
+> prefer **PE resources**. If keeping an overlay, parse relative to the certificate-table offset.
+> On macOS, no tail overlay.
+
+---
+
 ## Sources
 
 Astral: [uv docs](https://docs.astral.sh/uv/) · [uv#5802](https://github.com/astral-sh/uv/issues/5802) ·
@@ -517,7 +794,35 @@ Field: [aider on uv](https://aider.chat/2025/01/15/uv.html) ·
 [pydevtools, shipping to end users](https://pydevtools.com/handbook/explanation/how-do-i-ship-a-python-application-to-end-users/) ·
 [Hynek, uv in Docker](https://hynek.me/articles/docker-uv/)
 
+Substrate (Part 9): [pbs quirks](https://gregoryszorc.com/docs/python-build-standalone/main/quirks.html) ·
+[pbs running/licensing](https://gregoryszorc.com/docs/python-build-standalone/main/running.html) ·
+[pbs distributions](https://raw.githubusercontent.com/astral-sh/python-build-standalone/main/docs/distributions.rst) ·
+[pbs status](https://gregoryszorc.com/docs/python-build-standalone/main/status.html) ·
+[python/prebuilt-cpython](https://github.com/python/prebuilt-cpython) ·
+[uv resolution concepts](https://docs.astral.sh/uv/concepts/resolution/) ·
+[uv indexes / dependency confusion](https://docs.astral.sh/uv/concepts/indexes/) ·
+[uv certificates](https://docs.astral.sh/uv/concepts/authentication/certificates/) ·
+[uv build failures](https://github.com/astral-sh/uv/blob/main/docs/reference/troubleshooting/build-failures.md) ·
+[uv#11494 Kerberos proxies](https://github.com/astral-sh/uv/issues/11494) ·
+[PyPI file hosting incident, Aug 2026](https://blog.pypi.org/posts/2026-09-08-file-hosting-errors/) ·
+[PyPI API guidance](https://docs.pypi.org/api/) ·
+[PyTorch torchtriton postmortem](https://pytorch.org/blog/compromised-nightly-dependency/) ·
+[pip secure installs](https://pip.pypa.io/en/stable/topics/secure-installs/) ·
+[Playwright browsers](https://playwright.dev/docs/browsers) ·
+[PyInstaller FAQ (cross-compilation)](https://github.com/pyinstaller/pyinstaller/wiki/FAQ) ·
+[cx_Freeze FAQ (Wine)](https://cx-freeze.readthedocs.io/en/stable/faq.html) ·
+[PyOxidizer status](https://pyoxidizer.readthedocs.io/en/stable/pyoxidizer_status.html) ·
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin)
+
 Signing: [Microsoft Trusted Root Program requirements](https://learn.microsoft.com/en-us/security/trusted-root/program-requirements) ·
+[Authenticode PE Signature Format v1.0](https://www.symbolcrash.com/wp-content/uploads/2019/02/Authenticode_PE-1.pdf) ·
+[Understanding PE signatures](https://learn.microsoft.com/en-us/windows/win32/secbp/understanding-pe-signatures) ·
+[Advisory 2915720 (CVE-2013-3900)](https://learn.microsoft.com/en-us/security-updates/SecurityAdvisories/2014/2915720) ·
+[Eric Lawrence, caveats for Authenticode signing](https://learn.microsoft.com/en-us/archive/blogs/ieinternals/caveats-for-authenticode-code-signing) ·
+[osslsigncode](https://github.com/mtrojnar/osslsigncode) · [jsign](https://ebourg.github.io/jsign/) ·
+[Chrome mini_installer](https://chromium.googlesource.com/chromium/src/+/main/chrome/installer/mini_installer/mini_installer.cc) ·
+[PyInstaller macOS signing recipe](https://github.com/pyinstaller/pyinstaller/wiki/Recipe-OSX-Code-Signing) ·
+[rustup security](https://rust-lang.github.io/rustup/security.html) ·
 [Eric Lawrence on SmartScreen AppRep](https://textslashplain.com/2024/11/15/best-practices-for-smartscreen-apprep/) ·
 [Smart App Control code signing](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/code-signing-for-smart-app-control) ·
 [App Control managed installer](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/design/use-appcontrol-with-intelligent-security-graph) ·
