@@ -783,3 +783,66 @@ def test_the_worker_does_not_write_shared_state():
         assert forbidden not in body, (
             f"run_one calls {forbidden} from a worker process; the parent is the only writer"
         )
+
+
+# ---------------------------------------------------------------- where the ledger lives
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_the_ledger_is_outside_every_worktree():
+    """The findings ledger has to outlive the branch that produced the findings.
+
+    Resolving it relative to __file__ put it at
+    `.claude/worktrees/<name>-busybody-findings.jsonl` when run from a worktree — inside the
+    directory that gets deleted when the worktree is removed, which defeats the entire
+    reason for keeping it out of the repo. A week of findings would vanish with whichever
+    branch happened to be last.
+
+    Red-path: resolve from `Path(__file__).parent.parent` again and this fails whenever the
+    suite runs in a worktree, which is where it usually runs.
+    """
+    where = bl.ledger_path()
+    assert ".claude" not in where.parts, (
+        f"the ledger is inside .claude ({where}); it dies with the worktree"
+    )
+    assert "worktrees" not in where.parts, f"the ledger is inside a worktree: {where}"
+    assert where.name.endswith("-busybody-findings.jsonl")
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_the_ledger_sits_beside_the_main_checkout_not_the_linked_one():
+    """Same directory whichever worktree you are in, so `--triage` sees one history."""
+    here = REPO
+    main = bl.main_checkout(here)
+    assert ".claude" not in main.parts, f"main_checkout returned a worktree: {main}"
+    assert (main / ".git").exists(), (
+        f"{main} does not look like the main checkout (no .git)"
+    )
+    if ".claude" in here.parts:
+        assert main != here, (
+            "running from a worktree, but main_checkout returned the worktree itself"
+        )
+    assert bl.ledger_path().parent == main.parent
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_the_ledger_location_is_still_overridable(monkeypatch, tmp_path):
+    """A fixed location is right for the default and wrong as the only option: the tests
+    themselves must be able to write somewhere disposable."""
+    target = tmp_path / "elsewhere.jsonl"
+    monkeypatch.setenv("HARUPACK_BUSYBODY_LEDGER", str(target))
+    assert bl.ledger_path() == target
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_main_checkout_falls_back_to_the_path_rule_without_git(tmp_path):
+    """The fallback is for a source tree that is not a git checkout at all. Worktrees this
+    project creates live in <main>/.claude/worktrees/<name>, so the main checkout is the
+    parent of `.claude`."""
+    fake = tmp_path / "proj" / ".claude" / "worktrees" / "feature"
+    fake.mkdir(parents=True)
+    # no git repository anywhere above tmp_path, so git rev-parse fails and the rule applies
+    assert bl.main_checkout(fake) == tmp_path / "proj"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert bl.main_checkout(plain) == plain

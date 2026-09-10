@@ -106,6 +106,31 @@ They are registered `per_fixture=False`. They build their own artifact and say n
 the packed package, so running them once per fixture would repeat one answer 25 times and
 inflate exactly the census INV-CHAOS-04 exists to keep honest.
 
+## Where the ledger lives
+
+```
+/home/you/code/haru-pack-busybody-findings.jsonl     <- beside the MAIN checkout
+```
+
+Beside the checkout, never inside it — a file in the repo is caught by `git stash`, by
+worktree switches and by branch changes, which loses history exactly when you are hopping
+branches to investigate. That is lotek's reasoning and it holds here.
+
+"Beside the checkout" has to mean the **main** one. Resolving it relative to `__file__` put
+the ledger at `.claude/worktrees/<name>-busybody-findings.jsonl` when run from a worktree —
+inside the directory that gets deleted when the worktree is removed, which defeats the whole
+point. A week of findings would vanish with whichever branch happened to be last.
+
+`git rev-parse --git-common-dir` is the authoritative answer: it reports the main
+repository's `.git` from a linked worktree and its own from a normal checkout, so one call
+covers both. The path fallback (`<main>/.claude/worktrees/<name>` to `<main>`) exists only
+for a source tree that is not a git checkout, and it matches `.claude/worktrees` as a *pair*
+scanned right-to-left — a checkout can itself live under some other `.claude`, and taking
+the first match resolves to the wrong tree entirely.
+
+Override with `HARUPACK_BUSYBODY_LEDGER` — a fixed location is right for the default and
+wrong as the only option, not least because the tests need somewhere disposable.
+
 ## Running it wide
 
 ```sh

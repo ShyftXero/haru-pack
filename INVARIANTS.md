@@ -85,8 +85,23 @@ socket of its own. Do not read a green offline check as "this binary makes no ne
 Note: Cross-compiled thick builds take the `warm_cache_windows` path, which resolves wheels
 for the target platform without executing them. Script staging runs the target interpreter,
 so it is host-target only.
+Note: Verified 2026-09-10 by busybody's `examiner` persona, which runs a packaged library's
+OWN test suite from inside the thick binary with the network denied at the process level:
+
+    numpy     2175 passed, 3 skipped, 2 xfailed in 26.33s   (100.8 MB binary)
+    certifi      3 passed in 0.03s                          ( 63.7 MB binary)
+
+This is a stronger statement than a hello-world fixture can make. `import numpy` succeeds
+long before numpy is usable — the failure modes of a bundled native package live in the
+parts an import never touches: a lazily-loaded `.so`, an f2py-generated extension, a
+packaged data file. Checked across all 25 top-PyPI packages, only these two ship a runnable
+suite in the wheel; the other 23 would need sdists, which is a second acquisition path for
+no extra assurance.
+Note: A vacuous pass is prevented twice over. The generated script verifies the test paths
+exist and exits 2 with `PAYLOAD INCOMPLETE` if they do not, and pytest itself returns 5
+rather than 0 when it collects nothing. The success marker is printed only on rc == 0.
 Territory: src/haru_pack/build.py, src/haru_pack/bundle.py, src/haru_pack/discovery.py,
-tests/test_tiers_offline.py, tools/flex-run.py
+tests/test_tiers_offline.py, tests/test_examiner_fixtures.py, tools/flex-run.py
 
 ### INV-TIER-02
 Status: active
