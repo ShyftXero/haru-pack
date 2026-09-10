@@ -100,12 +100,21 @@ def discover(path) -> dict:
                     "entrypoint": ["python", "-m", mod], "python": py, "source": path}
         importable = next((r for r in pkg_roots if (r / "__init__.py").is_file()), None)
         if importable is not None:
+            # A refusal that does not say what to type next is a wall (docs/PRINCIPLES.md).
+            # So read the package and offer its actual callables as `mod:fn` candidates —
+            # `_report_ambiguity` turns candidates[0] into a copy-pasteable --entry-point.
+            # Suggesting is not picking: haru-pack still refuses (INV-BUILD-03).
+            from .entrypoints import suggest_object_refs
+            cands = suggest_object_refs(mod, path)
             raise AmbiguousProject(
-                f"{name} has no [project.scripts], and the package {mod!r} is importable "
-                f"but not executable: {importable.name}/__main__.py does not exist, so "
-                f"`python -m {mod}` would fail on the target rather than here. Add a "
-                f"{mod}/__main__.py, declare a [project.scripts] entry, or pass "
-                f"--entry-point.", [], kind="project", name=name, source=path, python=py)
+                f"{name} declares no [project.scripts], and the package {mod!r} is "
+                f"importable but not executable — {mod}/__main__.py does not exist, so "
+                f"`python -m {mod}` would fail on the target rather than here."
+                + (f" {mod} does define callables you may have meant, listed below."
+                   if cands else
+                   f" Add a {mod}/__main__.py, declare a [project.scripts] entry, or pass "
+                   f"--entry-point."),
+                cands, kind="project", name=name, source=path, python=py)
         raise AmbiguousProject(
             f"{name} has no [project.scripts] and no importable package named {mod!r}, so "
             f"there is nothing obvious to run.", [], kind="project", name=name,

@@ -18,7 +18,8 @@ import pytest
 from haru_pack.build import BuildError, _resolve
 from haru_pack.discovery import AmbiguousProject, discover
 from haru_pack.entrypoints import (EntryPointError, argv_for_object_ref, resolve_entrypoint,
-                                   verify_object_ref)
+                                   suggest_object_refs, verify_console_script,
+                                   verify_object_ref, verify_script_file)
 
 
 def _pyproject(d, body: str):
@@ -309,3 +310,134 @@ def test_a_cli_flag_still_beats_both(tmp_path):
                                     "other:go")
     assert manifest["entrypoint"][:2] == ["python", "-c"]
     assert "from other import go" in manifest["entrypoint"][2]
+
+
+# ------------------------------------------------------ console scripts and script files
+
+@pytest.mark.invariant("INV-BUILD-08")
+def test_a_missing_script_file_is_refused(tmp_path):
+    """The launcher resolves a `.py` token inside the payload, so a filename that is not in
+    the tree is a guaranteed runtime failure — and one we can be certain of at build time."""
+    d = _proj(tmp_path, {"real.py": "print(1)\n"})
+    problem = verify_script_file("nosuch.py", d)
+    assert "does not exist" in problem
+    assert "real.py" in problem, "the message should name the files that DO exist"
+    assert verify_script_file("real.py", d) == ""
+    with pytest.raises(EntryPointError):
+        _resolve(d, "default", "", "", [], "", "", False, False, "nosuch.py")
+
+
+@pytest.mark.invariant("INV-BUILD-08")
+def test_a_declared_console_script_is_trusted(tmp_path):
+    """Trusted without looking in an environment: a `[tool.uv] package = false` project does
+    not install its own scripts, and refusing it would be wrong."""
+    d = _proj(tmp_path, {})
+    (d / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\nversion = '0'\n\n"
+        "[project.scripts]\nserve = 'demo:main'\n", encoding="utf-8")
+    assert verify_console_script("serve", d) == ("", "")
+
+
+@pytest.mark.invariant("INV-BUILD-08")
+def test_an_unverifiable_console_script_warns_rather_than_refusing(tmp_path):
+    """`uv run <name>` resolves scripts from DEPENDENCIES too — gunicorn, flask, celery are
+    correct answers absent from [project.scripts]. Refusing them would reject working
+    builds, which docs/PRINCIPLES.md counts as an ergonomic failure of its own."""
+    d = _proj(tmp_path, {})
+    level, msg = verify_console_script("gunicorn", d)
+    assert level == "warn", "an unverifiable name must not be a hard refusal"
+    assert "--thick" in msg, "the warning should say how to get it checked properly"
+
+
+@pytest.mark.invariant("INV-BUILD-08")
+def test_a_console_script_nothing_provides_is_refused_at_thick(tmp_path):
+    """With a real environment the answer is certain, so the warning becomes a refusal."""
+    d = _proj(tmp_path, {})
+    env = tmp_path / "env"
+    (env / "bin").mkdir(parents=True)
+    level, msg = verify_console_script("serve", d, env_dir=env)
+    assert level == "error"
+    assert "command not found" in msg
+    # ...and it is silent once the environment actually has it
+    (env / "bin" / "serve").write_text("#!/bin/sh\n")
+    assert verify_console_script("serve", d, env_dir=env) == ("", "")
+
+
+@pytest.mark.invariant("INV-BUILD-08")
+def test_the_thick_check_is_wired_into_the_build():
+    """Red-path: delete the verify_console_script call from assemble_payload."""
+    import inspect
+    from haru_pack import build as build_mod
+    src = inspect.getsource(build_mod.assemble_payload)
+    assert "verify_console_script(" in src
+    assert "env_dir=tmp_env" in src, (
+        "the thick check must look in the env uv just built, or it cannot be certain"
+    )
+
+
+# ------------------------------------------------- a refusal has to say what to type next
+
+@pytest.mark.invariant("INV-BUILD-09")
+def test_a_non_executable_package_suggests_its_own_callables(tmp_path):
+    """Refusing is correct; refusing with no next step is a wall. The candidates become the
+    `--entry-point` line the CLI prints."""
+    d = _proj(tmp_path, {"demo/__init__.py": """
+        def helper():
+            pass
+        def main():
+            pass
+    """})
+    with pytest.raises(AmbiguousProject) as e:
+        discover(d)
+    assert e.value.candidates == ["demo:main", "demo:helper"], (
+        "candidates must be real callables, preferred names first, so candidates[0] is a "
+        "sensible thing for the CLI to print"
+    )
+
+
+@pytest.mark.invariant("INV-BUILD-09")
+def test_private_and_dunder_names_are_not_suggested(tmp_path):
+    d = _proj(tmp_path, {"demo/__init__.py": """
+        def _internal():
+            pass
+        def run():
+            pass
+    """})
+    with pytest.raises(AmbiguousProject) as e:
+        discover(d)
+    assert e.value.candidates == ["demo:run"]
+
+
+@pytest.mark.invariant("INV-BUILD-09")
+def test_preferred_names_are_ordered_first(tmp_path):
+    d = _proj(tmp_path, {"app.py": """
+        def zzz():
+            pass
+        def cli():
+            pass
+        def main():
+            pass
+    """})
+    assert suggest_object_refs("app", d)[:2] == ["app:main", "app:cli"]
+
+
+@pytest.mark.invariant("INV-BUILD-09")
+def test_a_typod_reference_offers_the_real_ones(tmp_path):
+    """The other half of the same courtesy: a wrong `module:callable` gets a copy-pasteable
+    list rather than only being told it is wrong."""
+    d = _proj(tmp_path, {"app.py": "def serve():\n    pass\n"})
+    problem = verify_object_ref("app:mian", d)
+    assert "--entry-point app:serve" in problem
+
+
+@pytest.mark.invariant("INV-BUILD-09")
+def test_the_cli_prints_a_copy_pasteable_command(tmp_path, capsys):
+    from haru_pack.cli import _report_ambiguity
+    d = _proj(tmp_path, {"demo/__init__.py": "def main():\n    pass\n"})
+    try:
+        discover(d)
+    except AmbiguousProject as e:
+        _report_ambiguity(d, e)
+    out = capsys.readouterr().out
+    assert "--entry-point demo:main" in out
+    assert str(d) in out, "the printed command must be runnable as-is"

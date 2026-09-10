@@ -1207,3 +1207,54 @@ Source: Written with `INV-PAYLOAD-04`, 2026-09-10 — the decoder was vendored r
 fetched precisely so it would be reviewable in a diff, which is only true if drift is
 detectable.
 Territory: src/haru_pack/launcher/xz/, tests/test_uv_compression.py
+
+### INV-BUILD-08
+Status: active
+Statement: A bare console-script entrypoint is checked as far as the tier allows: refused
+when an environment exists and neither the project nor any dependency provides it, warned
+about when there is no environment to check against, and silent when the project declares
+it. A `.py` entrypoint that is not in the project tree is always refused.
+Actors: an operator passing `--entry-point serve` for a script that was renamed, or typing
+`--entry-point app.py` for a file that lives in a subdirectory.
+Assets: `docs/PRINCIPLES.md`'s third user — the recipient of the executable, who sees only
+"it worked" or "it didn't". An unresolvable console script fails as a `command not found`
+from uv on *their* machine, after a build that exited 0.
+Red-path: Delete the `verify_console_script(...)` call from `assemble_payload` and
+`test_a_console_script_nothing_provides_is_refused_at_thick` goes red. Delete the
+`verify_script_file(...)` call in `build._resolve` and
+`test_a_missing_script_file_is_refused` goes red.
+Note: The graded response is the point, not timidity. The launcher runs `uv run <name>`,
+which resolves console scripts from the project environment — so `gunicorn`, `flask`,
+`celery` and `uvicorn` are correct answers that appear nowhere in `[project.scripts]`.
+Refusing on absence from that table would reject working builds, which is its own
+ergonomic failure. Certainty comes from an environment, and only `--thick` has one at build
+time; at thin/default the honest output is a warning that names what could not be checked
+and says `--thick` would check it.
+Note: A script declared in `[project.scripts]` is trusted without looking in the
+environment, because a `[tool.uv] package = false` project does not install its own scripts
+and would otherwise be refused wrongly.
+Source: Asked for 2026-09-10 — "fix both of those issues. user ergonomics is paramount" —
+after `-e serve` with no such script was found to build cleanly.
+Territory: src/haru_pack/entrypoints.py, src/haru_pack/build.py, tests/test_entrypoints.py
+
+### INV-BUILD-09
+Status: active
+Statement: When haru-pack refuses to choose an entrypoint, it names concrete candidates and
+prints a command the operator can copy — it never refuses without saying what to do next.
+Actors: a developer meeting the tool for the first time, on a project it cannot read a
+single obvious answer out of.
+Assets: whether "it refuses instead of guessing" is a feature or an obstacle. Refusing is
+correct (INV-BUILD-03); refusing with a wall of prose and no next step converts a good
+decision into a bad experience, and `docs/PRINCIPLES.md` ranks that as a failure.
+Red-path: Make `discovery.discover` raise `AmbiguousProject` with an empty candidate list
+for an importable-but-not-executable package — i.e. drop the `suggest_object_refs` call.
+`test_a_non_executable_package_suggests_its_own_callables` goes red, and the operator is
+back to reading a paragraph and guessing.
+Note: Suggesting is not picking. The candidates are ordered by `PREFERRED_CALLABLES` so the
+first one printed is usually right, and the build still refuses until a human chooses.
+Verified 2026-09-10 against a package defining `main` and `helper`: the refusal listed
+`demo:main` and `demo:helper` and printed
+`haru-pack build <path> --entry-point demo:main`.
+Source: Asked for 2026-09-10 with INV-BUILD-08.
+Territory: src/haru_pack/discovery.py, src/haru_pack/entrypoints.py, src/haru_pack/cli.py,
+tests/test_entrypoints.py

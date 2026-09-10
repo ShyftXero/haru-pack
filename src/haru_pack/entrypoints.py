@@ -16,7 +16,14 @@ import re
 from pathlib import Path
 
 __all__ = ["EntryPointError", "is_object_ref", "argv_for_object_ref", "resolve_entrypoint",
-           "verify_object_ref"]
+           "verify_object_ref", "verify_script_file", "top_level_callables",
+           "suggest_object_refs", "console_script_is_declared"]
+
+# When a project is importable but has nothing to execute, haru-pack refuses — but it can
+# still hand the operator the exact flag to type. These are the names a Python program's
+# entry function is actually called, most likely first, so the suggestion at the top of the
+# list is usually the right one. This orders a SUGGESTION; it never picks (INV-BUILD-03).
+PREFERRED_CALLABLES = ("main", "cli", "run", "serve", "start", "app", "create_app")
 
 # `module.path:callable` — the packaging spec's object reference. The attribute half may be
 # dotted (`pkg.mod:Cls.method`); neither half may be empty.
@@ -124,6 +131,139 @@ def _defines(tree: ast.Module, wanted: str) -> bool:
     return False
 
 
+def _parse(path: Path):
+    try:
+        return ast.parse(path.read_text(encoding="utf-8", errors="replace"),
+                         filename=str(path))
+    except (SyntaxError, ValueError, OSError):
+        return None
+
+
+def top_level_callables(path) -> list:
+    """Top-level `def`/`async def`/`class` names in a module, preferred names first.
+
+    Used to turn a refusal into something copy-pasteable. Ordering by
+    `PREFERRED_CALLABLES` means the suggestion an operator sees first is the one a program's
+    entry function is usually called.
+    """
+    tree = _parse(Path(path))
+    if tree is None:
+        return []
+    names = [n.name for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+             and not n.name.startswith("_")]
+    rank = {n: i for i, n in enumerate(PREFERRED_CALLABLES)}
+    return sorted(names, key=lambda n: (rank.get(n, len(rank)), n))
+
+
+def suggest_object_refs(module: str, project) -> list:
+    """`module:callable` specs an operator could plausibly mean, best first."""
+    path = _module_file(module, Path(project))
+    if path is None:
+        return []
+    return [f"{module}:{fn}" for fn in top_level_callables(path)]
+
+
+def has_main_guard(module: str, project) -> bool:
+    path = _module_file(module, Path(project))
+    if path is None:
+        return False
+    tree = _parse(path)
+    return tree is not None and any(isinstance(n, ast.If) and _is_main_guard(n)
+                                   for n in tree.body)
+
+
+def console_script_is_declared(name: str, project) -> bool:
+    """Is `name` a console script this project declares in its own pyproject.toml?
+
+    A False answer is NOT evidence that the entrypoint is wrong. The launcher runs
+    `uv run <name>` inside the project environment, which resolves scripts provided by
+    *dependencies* too — `gunicorn`, `flask`, `celery`, `uvicorn` are all ordinary,
+    correct answers that appear nowhere in `[project.scripts]`. So this feeds a warning,
+    never a refusal, unless something else can prove the script is absent.
+    """
+    from . import tomlio
+    pp = Path(project) / "pyproject.toml"
+    if not pp.exists():
+        return False
+    try:
+        proj = tomlio.load(pp).get("project") or {}
+    except Exception:
+        return False
+    return name in (proj.get("scripts") or {})
+
+
+def console_script_in_env(name: str, env_dir) -> bool:
+    """Is there an executable called `name` in this environment's script directory?"""
+    env_dir = Path(env_dir)
+    for d in (env_dir / "bin", env_dir / "Scripts"):
+        if (d / name).is_file() or (d / f"{name}.exe").is_file():
+            return True
+    return False
+
+
+def verify_console_script(name: str, project, env_dir=None) -> tuple:
+    """Decide what can honestly be said about a bare console-script entrypoint.
+
+    Returns `(level, message)` where level is `""`, `"warn"` or `"error"`.
+
+    The launcher runs `uv run <name>` in the project environment, so the set of valid names
+    is "console scripts of the project **plus all of its dependencies**" — `gunicorn`,
+    `flask`, `celery`, `uvicorn` are all correct and appear nowhere in `[project.scripts]`.
+    Refusing on absence from that table would reject working builds, which is its own
+    ergonomic failure (docs/PRINCIPLES.md). So:
+
+      * declared in `[project.scripts]`      -> silent, trust the declaration;
+      * present in a built environment       -> silent, we can see it;
+      * neither, and we HAVE an environment  -> error; nothing can provide it;
+      * neither, and we have no environment  -> warn, naming what we could not check.
+    """
+    if console_script_is_declared(name, project):
+        return "", ""
+    if env_dir is not None and console_script_in_env(name, env_dir):
+        return "", ""
+    from . import tomlio
+    declared = []
+    pp = Path(project) / "pyproject.toml"
+    if pp.exists():
+        try:
+            declared = sorted((tomlio.load(pp).get("project") or {}).get("scripts") or {})
+        except Exception:
+            declared = []
+    hint = ("\nThis project declares: " + ", ".join(declared)) if declared else ""
+    if env_dir is not None:
+        return "error", (
+            f"entrypoint {name!r} is not a console script this build can run: it is not in "
+            f"[project.scripts], and no `{name}` was installed into the build environment "
+            f"by the project or any of its dependencies.{hint}\n"
+            f"On the target this would fail with a 'command not found' from uv.")
+    return "warn", (
+        f"entrypoint {name!r} is not declared in [project.scripts] and is not a file in the "
+        f"project. haru-pack cannot verify it at this tier — it will work only if one of "
+        f"your dependencies provides a `{name}` console script (gunicorn and flask do, for "
+        f"example).{hint}\nBuild with --thick to have this checked against a real "
+        f"environment, or pass a module:callable instead.")
+
+
+def verify_script_file(spec: str, project) -> str:
+    """A `.py` entrypoint has to exist in the project, or the launcher runs nothing.
+
+    The launcher resolves a `.py` token to `<staged app dir>/<token>` — so a filename that
+    is not in the tree is a guaranteed runtime failure, and one we can be certain about at
+    build time. `-e nosuch.py` used to build cleanly.
+    """
+    if not spec.endswith(".py"):
+        return ""
+    p = Path(project) / spec
+    if p.is_file():
+        return ""
+    near = sorted(q.name for q in Path(project).glob("*.py"))
+    hint = ("\nPython files at the project root: " + ", ".join(near[:8])) if near else ""
+    return (f"entrypoint {spec!r} is a script filename, but {p} does not exist. The "
+            f"launcher resolves a .py entrypoint inside the payload, so this would run "
+            f"nothing on the target.{hint}")
+
+
 def verify_object_ref(spec: str, project) -> str:
     """Confirm `module:callable` actually names something, or return why it does not.
 
@@ -160,10 +300,10 @@ def verify_object_ref(spec: str, project) -> str:
     if _defines(tree, root_attr):
         return ""
     hint = ""
-    names = sorted({n.name for n in tree.body
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
-    if names:
-        hint = "\nCallables it does define: " + ", ".join(names[:8])
+    refs = suggest_object_refs(module, project)
+    if refs:
+        hint = ("\n\nDid you mean one of these? Copy one:\n"
+                + "\n".join(f"    --entry-point {r}" for r in refs[:5]))
     if any(isinstance(n, ast.If) and _is_main_guard(n) for n in tree.body):
         hint += (
             f"\n\n{path.name} has an `if __name__ == \"__main__\":` block. That is NOT the "

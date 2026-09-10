@@ -9,7 +9,8 @@ from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier, bundles_uv
 from .sources import Sources
 from .targets import Target
-from .entrypoints import resolve_entrypoint, verify_object_ref, EntryPointError
+from .entrypoints import (resolve_entrypoint, verify_object_ref, verify_script_file,
+                          verify_console_script, is_object_ref, EntryPointError)
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
                      warm_cache_for_script, install_dev_tools, compress_uv)
@@ -86,7 +87,7 @@ def _declarations(decl_dir: Path) -> dict:
 
 def _resolve(project: Path, tier: str, python_cli: str,
              expires, geo, machine, user, embed_secret, encrypt: bool = False,
-             entry_point: str = ""):
+             entry_point: str = "", log=None):
     """Discover + merge haru_pack.toml + CLI. Returns (manifest, enc, python_version)."""
     # The declaration is read FIRST. Discovery only has to succeed when nothing else says
     # what to run: refusing to guess (INV-BUILD-03) must never become refusing to obey.
@@ -115,9 +116,18 @@ def _resolve(project: Path, tier: str, python_cli: str,
     # the module rather than importing it, so nothing of the project executes on the build
     # host and the check works for cross-compiled targets too. Silent unless it is certain.
     if isinstance(ep, str):
-        problem = verify_object_ref(ep, decl_dir)
+        problem = verify_object_ref(ep, decl_dir) or verify_script_file(ep, decl_dir)
         if problem:
             raise EntryPointError(problem)
+        # A bare console-script name cannot be checked for certain without an environment —
+        # the launcher runs `uv run <name>`, which also resolves scripts provided by
+        # DEPENDENCIES. So say what could not be verified rather than refusing a build that
+        # is probably fine; `assemble_payload` upgrades this to a refusal at thick, where
+        # there is a real environment to look in.
+        if not is_object_ref(ep) and not ep.endswith(".py"):
+            level, msg = verify_console_script(ep, decl_dir)
+            if level == "warn" and log:
+                log(f"WARNING: {msg}")
     ep = resolve_entrypoint(ep, name=decl.get("name", disc["name"]),
                             kind=decl.get("kind", disc["kind"]))
     manifest = {
@@ -220,6 +230,16 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
                     # observation can still run them without the payload carrying them.
                     if steps or shake:
                         install_dev_tools(app_dir, tmp_env, sources=sources, log=log)
+                    # At thick there IS an environment, so a console-script entrypoint can
+                    # be checked for certain instead of warned about (INV-BUILD-08). This
+                    # is the strongest form of the check and the only one that can see a
+                    # script provided by a dependency rather than by the project.
+                    ep_argv = manifest.get("entrypoint") or []
+                    if len(ep_argv) == 1 and not ep_argv[0].endswith(".py"):
+                        level, msg = verify_console_script(ep_argv[0], app_dir,
+                                                           env_dir=tmp_env)
+                        if level == "error":
+                            raise BuildError(msg)
                     for step in steps:
                         run_bundle_step(step, payload, tmp_env, app_dir)
                     if shake:
@@ -311,7 +331,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         raise BuildError(f"C toolchain missing for target '{tgt}':\n{tc['advice']}")
     manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
                                                      machine, user, embed_secret, encrypt,
-                                                     entry_point)
+                                                     entry_point, log=log)
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")

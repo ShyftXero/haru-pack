@@ -58,6 +58,13 @@ haru-pack bootstrap --target linux-aarch64      # also gets the ARM cross-compil
 
 Short version of why this works the way it does.
 
+**User ergonomics is of the utmost importance — and "user" means three people.** Whoever
+works on haru-pack; the developer running `haru-pack build`; and the person who receives the
+packed executable and has never heard of uv, Python, or this tool. The third is the one who
+gets no error message — only "it worked" or "it didn't" — and they are why every decision
+below leans on refusing at build time rather than failing on their machine. When the three
+conflict, the last one wins. Full statement: [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md).
+
 **uv does the Python part.** Interpreters, dependency resolution, and virtualenvs are
 solved problems. haru-pack stages a `uv` binary and gets out of the way, rather than
 reimplementing an installer.
