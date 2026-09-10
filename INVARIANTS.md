@@ -207,6 +207,38 @@ Territory: tools/busybody.py, tests/test_busybody_ledger.py
 
 ---
 
+### INV-CHAOS-04
+Status: active
+Statement: Every question asked of a chaos run is answerable by a tool that reads the run's
+own records, and the report states how many distinct results the run produced — not only how
+many runs it performed.
+Actors: whoever reads a sweep six months from now, with no model available and no memory of
+how the numbers were computed.
+Assets: whether the harness's output means anything to a human. A sweep that reports
+"925/925 passed" and nothing else reads like 925x the assurance of a single run. It is not,
+if every case answered identically 925 times, and the difference is not visible without
+computing it.
+Red-path: Delete the divergence computation from `analyze_run`, or the FINGERPRINT CENSUS
+from `format_analysis`, and a 25-fixture sweep reports a large run count with no way to see
+that it confirmed the same handful of facts once per fixture. Two claiming tests feed
+`analyze_run` synthetic journals — one where every fixture agrees, one where they do not —
+and assert the report says which happened.
+Source: 2026-09-10. Every analysis in docs/BUSYBODY.md was first produced by hand with
+throwaway one-liners over `journal.jsonl`. That works exactly once: it does not survive the
+person who wrote it, cannot be re-run to compare, and costs whoever repeats it — a human
+scrolling 900 lines of JSONL, or a model ingesting them as tokens — for an answer the machine
+computes in a millisecond.
+Note: `--calibrate` is the same principle applied to thresholds. It measures the band and
+prints a number to paste, with the per-fixture measurements to paste beside it, so the next
+person recalibrates instead of nudging. It also states that the number is machine-specific.
+Note: This invariant is why `tools/busybody.py --calibrate` exists at all. A comment in the
+source already promised it ("re-run tools/busybody.py --calibrate rather than nudging the
+number") while no such flag existed — a dangling claim of exactly the kind INV-DOC-02 exists
+to catch, found in our own code.
+Territory: tools/busybody_analyze.py, tools/busybody.py, tests/test_busybody_ledger.py
+
+---
+
 ## FLEX — the harness that decides what haru-pack is tested against
 
 ### INV-FLEX-01

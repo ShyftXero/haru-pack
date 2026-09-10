@@ -13,7 +13,32 @@ its own), `journal.jsonl`, `results.json`, and preserved artifacts for any findi
 ```sh
 python tools/busybody.py --history     # every run; interrupted ones say so
 python tools/busybody.py --triage      # findings grouped by fingerprint, across all runs
+python tools/busybody.py --analyze     # did the last sweep buy anything? what diverged?
+python tools/busybody.py --calibrate --fixtures top25    # find a discriminating threshold
 ```
+
+## Analysis is a tool, not a reading exercise
+
+Every analysis in this document was first done by hand, with throwaway one-liners over
+`journal.jsonl`. That works exactly once. It does not survive the person who wrote the
+one-liner, it cannot be re-run later to compare, and it burns whoever repeats it — a human
+scrolling a 900-line JSONL file, or a model ingesting it as tokens — for an answer the
+machine computes in a millisecond.
+
+So the questions are the tool:
+
+**`--analyze [RUN]`** prints the fingerprint census, the divergence matrix, the outcome and
+blame distributions, and the slowest cases. The census is the one that matters: *N case runs
+produced M distinct results*. A 25-fixture sweep with a 25:1 ratio confirmed the same facts
+once per fixture — which is not 25× the assurance, and the report says so in those words.
+
+**`--calibrate`** measures the resource band between fixtures and prints a threshold to
+paste, along with the per-fixture requirements to paste beside it. It stages each fixture
+unrestricted first, so what gets measured is the *application's* requirement rather than
+staging's — the latter being identical for every package and not the question. It also says
+plainly that the number is machine-specific and does not transfer.
+
+Neither needs a model. Neither needs you to open the raw records.
 
 Exit codes are a contract: `0` clean, `1` findings, `130` interrupted. **An interrupt beats
 findings** — a run you killed did not finish, and reporting its partial findings as a

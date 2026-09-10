@@ -7,6 +7,8 @@
     python tools/busybody.py --keep               # leave the wreckage for inspection
     python tools/busybody.py --triage             # past findings, grouped by fingerprint
     python tools/busybody.py --history            # every run, including interrupted ones
+    python tools/busybody.py --analyze [RUN]      # did the sweep buy anything? what diverged?
+    python tools/busybody.py --calibrate          # find the band that separates two packages
 
 THE POINT IS NOT "DOES IT BREAK"
 
@@ -104,6 +106,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from haru_pack import overlay  # noqa: E402
 
+from busybody_analyze import analyze_run, format_analysis  # noqa: E402
 from busybody_ledger import (  # noqa: E402
     Journal, Reaper, fingerprint, ledger_append, ledger_path, ledger_rollup,
     prune_runs, reap_orphans, scan_runs)
@@ -1369,6 +1372,93 @@ def build_top25_fixtures(tier: str, reaper, log=print) -> list:
     return built
 
 
+
+# ---------------------------------------------------------------- calibration
+
+def calibrate(fixtures: list, log=print) -> int:
+    """Find the resource band that separates a light package from a heavy one.
+
+    A ceiling only discriminates between packages if it sits BETWEEN their requirements.
+    The first `tight_address_space` guessed 256 MB, which is below what a bare interpreter
+    needs — every package failed identically and the case discriminated nothing while
+    looking thorough. This measures instead of guessing, and prints a number to paste.
+
+    Staging is warmed at no limit first, so what gets measured is the APPLICATION's
+    requirement rather than the staging step's — which is the same for every package and
+    not the question.
+    """
+    import resource
+    from busybody_analyze import RESOURCE_LADDER
+
+    if len(fixtures) < 2:
+        log("calibration needs at least two fixtures to find a band between them.")
+        log("Try:  python tools/busybody.py --calibrate --fixtures top25")
+        return 2
+
+    log("=" * 78)
+    log("busybody calibration — RLIMIT_AS")
+    log("=" * 78)
+    log("")
+    log("Each fixture is staged once with no limit, then run at each ceiling. The lowest")
+    log("ceiling at which it still works is its requirement. A threshold placed between")
+    log("the smallest and largest requirement is one that tells packages apart.")
+    log("")
+    log(f"  {'fixture':24} {'requires':>10}   ladder")
+    log(f"  {'-' * 24} {'-' * 10:>10}   {'-' * 30}")
+
+    needs = {}
+    for name, exe in fixtures:
+        work = Path(tempfile.mkdtemp(prefix="bb-calibrate-"))
+        try:
+            cache, first = warm(exe, work)
+            if first["outcome"] != "RAN":
+                log(f"  {name:24} {'?':>10}   SKIPPED: would not run unrestricted")
+                continue
+            marks, need = [], None
+            for mb in RESOURCE_LADDER:
+                r = run_exe(exe, work, env=clean_env(cache), timeout=180,
+                            rlimits={resource.RLIMIT_AS: (mb * 1024 * 1024,) * 2})
+                ok = r["outcome"] == "RAN"
+                marks.append(f"{mb}={'ok' if ok else 'x'}")
+                if ok:
+                    need = mb
+                    break
+            needs[name] = need
+            log(f"  {name:24} {(str(need) + 'MB') if need else '>ladder':>10}   "
+                f"{' '.join(marks)}")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    log("")
+    measured = {k: v for k, v in needs.items() if v}
+    if len(measured) < 2:
+        log("Not enough measurements to name a band.")
+        return 1
+    lo, hi = min(measured.values()), max(measured.values())
+    if lo == hi:
+        log(f"Every fixture needs {lo}MB. No band exists at this granularity, so RLIMIT_AS")
+        log("cannot separate these packages — pick fixtures with more contrast (a config")
+        log("parser against a numeric stack), or discriminate on something else.")
+        return 1
+    candidates = [m for m in RESOURCE_LADDER if lo <= m < hi]
+    pick = candidates[len(candidates) // 2] if candidates else (lo + hi) // 2
+    log(f"Band: {lo}MB (lightest) .. {hi}MB (heaviest).")
+    log(f"Recommended threshold: {pick}MB")
+    log("")
+    log("Paste into tools/busybody.py, WITH this measurement beside it:")
+    log(f"    ADDRESS_SPACE_MB = {pick}")
+    log("")
+    for k, v in sorted(measured.items(), key=lambda kv: kv[1]):
+        log(f"    #:   {k:22} ok at {v}MB")
+    log("")
+    log("This number is machine-specific. It is not a constant of nature — re-run")
+    log("calibration on a different box rather than assuming it transfers.")
+    if pick == ADDRESS_SPACE_MB:
+        log("")
+        log(f"(Current ADDRESS_SPACE_MB is already {ADDRESS_SPACE_MB} — no change needed.)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1388,12 +1478,27 @@ def main() -> int:
                     help="group past findings by fingerprint and stop")
     ap.add_argument("--history", action="store_true",
                     help="list runs, marking any that were interrupted")
+    ap.add_argument("--analyze", nargs="?", const="latest", default=None,
+                    metavar="RUN", help="analyse a run (default: the most recent)")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="measure the resource band between fixtures and stop")
     a = ap.parse_args()
 
     if a.history:
         return print_history()
     if a.triage:
         return print_triage()
+    if a.analyze is not None:
+        runs = sorted(d for d in (RUNS.iterdir() if RUNS.is_dir() else []) if d.is_dir())
+        if not runs:
+            print("no runs to analyse", file=sys.stderr)
+            return 1
+        target = runs[-1] if a.analyze == "latest" else RUNS / a.analyze
+        if not (target / "journal.jsonl").exists():
+            print(f"no journal in {target}", file=sys.stderr)
+            return 1
+        print(format_analysis(analyze_run(target)))
+        return 0
 
     picked = CASES
     if a.persona:
@@ -1450,6 +1555,9 @@ def main() -> int:
             print(f"SETUP FAILURE: {e}", file=sys.stderr)
             print(f"no cases ran; journal at {run_dir.relative_to(REPO)}", file=sys.stderr)
             return 2
+
+        if a.calibrate:
+            return calibrate(fixtures)
 
         total = len(fixtures) * len(picked)
         jr.write("started", planned=[c["name"] for c in picked], tier=a.tier,

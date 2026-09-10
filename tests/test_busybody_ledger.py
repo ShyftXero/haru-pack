@@ -356,3 +356,100 @@ def test_there_are_app_level_personas_distinct_from_launcher_ones():
     assert app_level <= personas, f"missing app-level personas: {app_level - personas}"
     for name in app_level:
         assert any(c["persona"] == name for c in bb.CASES), f"{name} has no cases"
+
+
+# ---------------------------------------------------------------- analysis is a tool
+
+def _analyze():
+    spec = importlib.util.spec_from_file_location(
+        "busybody_analyze", REPO / "tools" / "busybody_analyze.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _journal(tmp_path, cases):
+    """Write a minimal run directory: one `started`, the cases, one `finished`."""
+    run = tmp_path / "run-synthetic"
+    run.mkdir()
+    lines = [{"kind": "started", "total": len(cases), "planned": []}]
+    lines += cases
+    lines += [{"kind": "finished"}]
+    (run / "journal.jsonl").write_text(
+        "\n".join(json.dumps(x) for x in lines) + "\n")
+    return run
+
+
+def _case(name, fixture, outcome="RAN", ok=True):
+    return {"kind": "case", "name": name, "fixture": fixture, "persona": "p",
+            "outcome": outcome, "ok": ok, "seconds": 1.0,
+            "fingerprint": f"{name}:{outcome}"}
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_a_sweep_that_confirmed_one_fact_many_times_says_so(tmp_path):
+    """The number that makes a sweep look like more assurance than it bought.
+
+    Twenty-five fixtures answering identically is one fact learned twenty-five times.
+    Reporting only the run count hides that; the census has to state it.
+    """
+    a = _analyze()
+    cases = [_case("c1", f"fixture-{i}") for i in range(25)]
+    cases += [_case("c2", f"fixture-{i}") for i in range(25)]
+    got = a.analyze_run(_journal(tmp_path, cases))
+
+    assert len(got["cases"]) == 50
+    assert got["diverged"] == {}, "no case was given a differing outcome"
+    assert len(got["fingerprints"]) == 2, "two cases, one answer each"
+
+    text = a.format_analysis(got)
+    assert "NOTHING DIVERGED" in text, (
+        "a 50-run sweep with 2 distinct results must say the sweep bought nothing"
+    )
+    assert "50 case run(s) produced 2 distinct result(s)" in text
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_a_case_whose_answer_depends_on_the_package_is_named(tmp_path):
+    """The other half: when a sweep DOES earn its cost, the report says which cases earned it
+    — by name and by fixture, so the reader can go look."""
+    a = _analyze()
+    cases = [_case("flat", f"fixture-{i}") for i in range(4)]
+    cases += [_case("varies", "fixture-light", "RAN"),
+              _case("varies", "fixture-heavy", "APP-CRASHED", ok=False)]
+    got = a.analyze_run(_journal(tmp_path, cases))
+
+    assert set(got["diverged"]) == {"varies"}, (
+        f"expected only `varies` to diverge, got {sorted(got['diverged'])}"
+    )
+    text = a.format_analysis(got)
+    assert "NOTHING DIVERGED" not in text
+    assert "varies" in text and "APP-CRASHED" in text
+    assert "heavy" in text, "the report must name the fixture that differed"
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_an_interrupted_run_is_not_reported_as_a_clean_sweep(tmp_path):
+    """Partial results read as complete ones are how a killed sweep becomes a green light."""
+    a = _analyze()
+    run = tmp_path / "run-partial"
+    run.mkdir()
+    (run / "journal.jsonl").write_text("\n".join(json.dumps(x) for x in [
+        {"kind": "started", "total": 100, "planned": []},
+        _case("c1", "fixture-a"),
+        {"kind": "interrupted", "detail": "SIGINT"},
+    ]) + "\n")
+    got = a.analyze_run(run)
+    assert got["state"] == "INTERRUPTED"
+    text = a.format_analysis(got)
+    assert "INTERRUPTED" in text
+    assert "1 of 100 planned" in text
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_the_analysis_questions_are_reachable_from_the_command_line():
+    """A tool nobody can invoke is a private one-liner with extra steps."""
+    src = (REPO / "tools" / "busybody.py").read_text()
+    for flag in ("--analyze", "--calibrate"):
+        assert f'"{flag}"' in src, f"{flag} is not wired into the CLI"
+    assert "format_analysis" in src, "--analyze must use the shared formatter"
