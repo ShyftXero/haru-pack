@@ -483,6 +483,34 @@ perform it at all — see `INV-LAUNCH-01`, which is `proposed` for exactly that 
 read this entry as evidence that shipped binaries self-verify. They do not.
 Territory: src/haru_pack/overlay.py
 
+### INV-PAYLOAD-03
+Status: active
+Statement: A payload's bundled dependency cache contains only the project's **runtime**
+resolution. The dev dependency group — its test runner, linters and build backend — is
+never downloaded into the payload, on either the host or the cross path.
+Actors: not an attacker; the operator, who pays for it in bytes, and the auditor of a
+signed artifact, who has to explain why a customer-facing binary contains a test framework.
+Assets: the size of every thick binary, and the accuracy of the claim that a payload
+contains what the program needs. `uv sync` installs the *default* dependency groups and
+`dev` is one of them, so `warm_cache_and_lock` warmed the bundled cache with the project's
+own tooling and shipped it. Measured on `examples/shake-demo` (2026-09-10): 11 dists and
+6.5 MB of unpacked wheel trees — pytest, pluggy, iniconfig, pygments, hatchling, editables,
+pathspec, tomlkit, trove-classifiers, packaging — none of which a launcher can reach,
+because it runs the project's entrypoint and never its suite.
+Note: the tools themselves are still needed at *build* time — a `[[bundle]]` step or a
+`--shake` observation run executes them — so `install_dev_tools` puts them in the throwaway
+build env from the BUILD HOST's cache. The build environment is unchanged; only the payload
+got smaller. That split is the invariant: `UV_CACHE_DIR` points into the payload for the
+runtime sync and nowhere near it for the dev install.
+Red-path: Drop `--no-dev` from the `uv sync` in `bundle.warm_cache_and_lock`, or let
+`warm_cache_windows` call `_export_reqs(app_dir)` with the default `dev=True`. The claiming
+test asserts on the argv of both and goes red.
+Source: Found 2026-09-10 while building `--shake` — the tree-shaker's "dists outside the
+`--no-dev` resolution" rule was dropping eleven trees that had no business being in the
+payload in the first place. Fixed on its own rather than left as a `--shake` side effect,
+since a plain `--thick` build should not ship a test framework either.
+Territory: src/haru_pack/bundle.py, src/haru_pack/build.py
+
 ---
 
 ## LAUNCH — what the shipped binary does on a machine you do not control

@@ -25,8 +25,15 @@ def _run(cmd, **kw):
         raise RuntimeError(f"command failed ({r.returncode}): {' '.join(map(str, cmd))}\n" + (r.stderr or r.stdout)[-1500:])
     return r
 
-def _export_reqs(app_dir: Path) -> list:
-    """Locked requirements for a project, minus uv export's ANSI-colored comment lines."""
+def _export_reqs(app_dir: Path, dev: bool = True) -> list:
+    """Locked requirements for a project, minus uv export's ANSI-colored comment lines.
+
+    `dev` says whether the project's dev group is included, and the caller chooses by ONE
+    question: do these requirements end up in the payload? `warm_cache_windows` downloads
+    them into the bundled cache, so it passes `dev=False` (INV-PAYLOAD-03) — the shipped
+    binary runs the entrypoint, never the suite. The wine build env is a build-time
+    throwaway, so it keeps the default and a `[[bundle]]` step can reach a dev tool.
+    """
     env = dict(os.environ, NO_COLOR="1")
     # Hashes are KEPT (INV-SUPPLY-08). uv emits them by default; this used to pass
     # --no-hashes and then fed the hashless result to `uv pip install`, discarding
@@ -34,6 +41,7 @@ def _export_reqs(app_dir: Path) -> list:
     # requirement (`    --hash=sha256:...`) must survive, so only comments and
     # -e/-r/-c directives are dropped and indentation is preserved.
     exp = _run(["uv", "export", "--project", str(app_dir), "--no-header",
+                *([] if dev else ["--no-dev"]),
                 "--format", "requirements-txt"], env=env).stdout
     out = []
     for line in exp.splitlines():
@@ -166,15 +174,85 @@ def bundle_python(target: str, vendor_dir: Path, version: str = "3.12",
 
 def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path,
                         sources: Sources | None = None) -> None:
-    """Populate a bundled uv cache with the project's deps (+ write uv.lock) using a
-    THROWAWAY env outside the payload, so the runtime can build its venv offline."""
+    """Populate a bundled uv cache with the project's RUNTIME deps (+ write uv.lock) using
+    a THROWAWAY env outside the payload, so the runtime can build its venv offline.
+
+    `--no-dev` is load-bearing, not tidiness (INV-PAYLOAD-03). `uv sync` installs the
+    *default* dependency groups, and `dev` is one of them, so this call used to warm the
+    bundled cache with the project's test and build tooling — pytest, hatchling, pygments,
+    trove-classifiers — and every byte of it shipped inside the signed binary. Measured on
+    `examples/shake-demo` (2026-09-10): 11 dists and 6.5 MB of wheel trees that no shipped
+    binary can reach, because the launcher runs the project's entrypoint, never its suite.
+
+    The environment those tools were incidentally providing is a separate concern: bundle
+    steps and `--shake`'s observation run do need them, so `install_dev_tools` puts them
+    into `tmp_env` from the BUILD HOST's cache afterwards. Same env contents as before,
+    without the payload paying for it.
+    """
     env = dict(os.environ, UV_CACHE_DIR=str(cache_dir), UV_PYTHON=str(py),
                UV_PYTHON_DOWNLOADS="never", UV_PROJECT_ENVIRONMENT=str(tmp_env))
     # `uv sync` resolves from uv.lock, which carries per-wheel hashes that uv verifies,
     # so this path is hash-checked by uv itself (INV-SUPPLY-08).
-    subprocess.run(["uv", "sync", "--project", str(app_dir),
+    subprocess.run(["uv", "sync", "--project", str(app_dir), "--no-dev",
                     *(sources or Sources()).uv_index_args()],
                    env=env, check=True, capture_output=True, text=True)
+
+
+def install_dev_tools(app_dir: Path, tmp_env: Path,
+                      sources: Sources | None = None, log=None) -> list:
+    """Add the project's dev-group tools to the throwaway build env, NOT to the payload.
+
+    `UV_CACHE_DIR` is deliberately left at the build host's default here. That is the whole
+    trick: the tools land in `tmp_env` — where a `[[bundle]]` step or `--shake`'s
+    observation run can execute them — while the bundled cache under `vendor/` keeps only
+    what the shipped binary can actually import.
+
+    Failure is a warning, not an error. A project with no dev group is the common case, and
+    a dev group that will not resolve is a problem for the operator's own tooling, not a
+    reason to refuse to build a binary whose runtime dependencies resolved fine. A
+    `[[bundle]]` step that needed a missing tool fails loudly on its own.
+    """
+    say = log or (lambda _m: None)
+    base = dict(os.environ, NO_COLOR="1", UV_PYTHON_DOWNLOADS="never")
+    exp = subprocess.run(["uv", "export", "--project", str(app_dir), "--only-dev",
+                          "--no-hashes", "--no-header", "--no-emit-project",
+                          "--format", "requirements-txt"],
+                         env=base, capture_output=True, text=True)
+    reqs = [ln.strip() for ln in exp.stdout.splitlines()
+            if ln.strip() and not ln.strip().startswith(("#", "-"))]
+    # No dev group at all is the common case and says nothing worth printing. A dev group
+    # that will not even *export* is a different thing and is worth a line, since the next
+    # bundle step or shake observation is about to fail for a reason that started here.
+    if exp.returncode != 0:
+        say("WARNING: could not resolve the project's dev dependency group "
+            f"(`uv export --only-dev` exited {exp.returncode}). Build steps and --shake "
+            "observation runs will not have its tools:\n" + (exp.stderr or "")[-500:])
+        return []
+    if not reqs:
+        return []
+    with tempfile.TemporaryDirectory() as td:
+        rf = Path(td) / "dev.txt"
+        rf.write_text("\n".join(reqs) + "\n")
+        r = subprocess.run(["uv", "pip", "install", "--python", str(py_of(tmp_env)),
+                            *(sources or Sources()).uv_index_args(), "-r", str(rf)],
+                           env=base, capture_output=True, text=True)
+    if r.returncode != 0:
+        say(f"WARNING: the dev dependency group did not install into the build env "
+            f"({len(reqs)} requirement(s)). A [[bundle]] step or --shake observation that "
+            f"needs one of those tools will fail next:\n" + (r.stderr or r.stdout)[-500:])
+        return []
+    say(f"build env: {len(reqs)} dev tool(s) installed OUTSIDE the payload "
+        f"(bundle steps / --shake need them; the shipped binary does not)")
+    return reqs
+
+
+def py_of(env_dir: Path) -> Path:
+    """The interpreter inside a venv, whichever layout this platform uses."""
+    for c in (env_dir / "bin" / "python", env_dir / "bin" / "python3",
+              env_dir / "Scripts" / "python.exe"):
+        if c.exists():
+            return c
+    return env_dir / "bin" / "python"
 
 
 def warm_cache_for_script(script: Path, py: Path, cache_dir: Path,
@@ -213,7 +291,7 @@ def warm_cache_windows(app_dir: Path, cache_dir: Path, version: str,
     """Cross: lock (host) then download WINDOWS wheels into the bundled uv cache so the
     venv builds offline at first run on Windows. Wheel-only (no target execution)."""
     _run(["uv", "lock", "--project", str(app_dir)])
-    reqs = _export_reqs(app_dir)
+    reqs = _export_reqs(app_dir, dev=False)          # INV-PAYLOAD-03
     if not reqs:
         return
     with tempfile.TemporaryDirectory() as td:

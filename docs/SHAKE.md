@@ -63,7 +63,7 @@ Dropped:
 | Dropped | Why |
 |---|---|
 | files in a runtime dist that nothing opened | the feature |
-| dists outside the `--no-dev` resolution, whole | pytest and friends are the *measuring device*, not a dependency |
+| dists outside the `--no-dev` resolution, whole | pytest and friends are the *measuring device*, not a dependency. Since `INV-PAYLOAD-03` this is mostly defence in depth — a plain `--thick` build no longer warms the cache with dev groups — but the rule stays, because the observation run *does* touch those files and a keep set built from it would otherwise vote to keep them |
 | `simple-*`, `builds-*`, `interpreter-*` uv cache buckets | only a *resolve* reads them, and thick resolves at build time |
 | CPython's `test/`, `idlelib/`, `turtledemo/`, `pydoc_data/`, `ensurepip/_bundled/`, `config-*/`, `include/` | cannot be imported at all, or exist to *compile against* the interpreter |
 | the Tk/Tcl family, if the run never touched `tkinter` | 10–20 MB spread across four directories |
@@ -156,6 +156,14 @@ Measured on `examples/shake-demo` (pandas + requests, a suite exercising one red
 
 6 395 files removed, 53.9 MB uncompressed: 34.2 MB of dependencies (pandas 1 193 files,
 numpy 753), 13.3 MB of interpreter, 6.3 MB of uv cache buckets.
+
+> **These figures predate `INV-PAYLOAD-03`** and are left as measured rather than adjusted
+> by arithmetic. A plain `--thick` build no longer warms the bundled cache with the dev
+> group, so the 285.4 MB baseline is now smaller and `--shake`'s *marginal* saving is
+> correspondingly less than the table shows — roughly 6.5 MB of it (11 dists: pytest,
+> pluggy, iniconfig, pygments, hatchling, editables, pathspec, tomlkit, trove-classifiers,
+> packaging) is now never downloaded instead of being pruned afterwards. Re-measure before
+> quoting this table.
 
 **Set your expectations from the floor, not the percentage.** A thick payload contains a
 `uv` binary (~55 MB unpacked, a single executable — unprunable) and a CPython. That is the

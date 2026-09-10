@@ -28,6 +28,15 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
   at runtime (`UV_OFFLINE=1`). The launcher **discovers the bundled interpreter at runtime**
   (robust to uv's version-alias symlink dir, which the zip doesn't preserve).
 
+## What thick does NOT carry
+The bundled dependency cache holds the project's **runtime** resolution only. `uv sync`
+installs the default dependency groups — `dev` among them — so this used to warm the cache
+with the project's own test runner and build backend and ship them inside the signed binary
+(11 dists / 6.5 MB on `examples/shake-demo`). A launcher runs the entrypoint, never the
+suite. Those tools are still installed at build time, into the throwaway build env, so a
+`[[bundle]]` step or a `--shake` observation run can execute them — just not from the
+payload. `INV-PAYLOAD-03`.
+
 ## Making thick smaller: `--shake`
 `--thick` bundles the resolved dependency closure, which is always larger than the set of
 files the program opens. `haru-pack build ./proj --thick --shake` runs the project's

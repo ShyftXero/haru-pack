@@ -12,7 +12,7 @@ from .targets import Target
 from .entrypoints import resolve_entrypoint
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
-                     warm_cache_for_script)
+                     warm_cache_for_script, install_dev_tools)
 from . import shake as shake_mod
 
 class BuildError(RuntimeError): ...
@@ -165,6 +165,11 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
                 tmp_env = Path(tempfile.mkdtemp(prefix="haru-warm-"))
                 try:
                     warm_cache_and_lock(app_dir, py, cache, tmp_env, sources=sources)
+                    # The bundled cache above is runtime-only (INV-PAYLOAD-03). Dev tools
+                    # go into the throwaway env only, so a [[bundle]] step or a --shake
+                    # observation can still run them without the payload carrying them.
+                    if steps or shake:
+                        install_dev_tools(app_dir, tmp_env, sources=sources, log=log)
                     for step in steps:
                         run_bundle_step(step, payload, tmp_env, app_dir)
                     if shake:
