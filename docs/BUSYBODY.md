@@ -106,6 +106,79 @@ They are registered `per_fixture=False`. They build their own artifact and say n
 the packed package, so running them once per fixture would repeat one answer 25 times and
 inflate exactly the census INV-CHAOS-04 exists to keep honest.
 
+## reverse_engineer — the honest limit of packing a secret
+
+A developer has to embed an API key and ship a binary. haru-pack can encrypt the payload, so
+the key is not sitting in the distributed exe as a string. But the launcher **stages the
+payload to disk in plaintext** so the interpreter can run it — that is not a bug, it is how
+running Python works — and it stages to the regenerable cache (`~/.cache/haru-pack/...`), not
+a temp dir, so the plaintext persists. Any user who can *run* the binary can read its source
+out of their own cache.
+
+The `reverse_engineer` persona plants a known secret and **proves each edge of that
+boundary** rather than asserting it (INV-SECRET-02):
+
+| what it checks | outcome |
+|---|---|
+| encrypted binary, at rest | secret must be **absent** from the exe bytes — `RAN`, else `LEAKED` |
+| plain build, after running | secret **is** recoverable from the stage — `EXPOSED` (documented reality, kept visible) |
+| `--obfuscate` vs plain | literal present in the plain stage, **gone** from the obfuscated stage — `RAN`, else `LEAKED` |
+| staged tree permissions | must be owner-only, not group/other-readable — `RAN`, else `LEAKED` |
+
+Two new outcomes, both closed-vocabulary:
+
+- **`EXPOSED`** — a secret recovered from a surface haru-pack *documents* as recoverable
+  (the staged plaintext on the running user's disk). **Not a defect.** The persona keeps it
+  visible so that if it ever stops being true, the staging model changed and the docs must
+  too.
+- **`LEAKED`** — a secret recovered from a surface that is *supposed* to protect it: the
+  encrypted binary at rest, or a tree readable by other users. **A defect** (`critical`).
+
+The obfuscation case proves the value **both ways**: the plain control stage must contain the
+literal, or the case is vacuous — a no-op obfuscator cannot pass by making both sides clean.
+
+**The honest bottom line, stated everywhere it matters:** a secret that must never be
+recovered must never be shipped in an artifact the client holds. The right architecture for a
+must-not-leak key is a server the client authenticates to. Packing is not that, and haru-pack
+does not pretend it is.
+
+## --obfuscate — raise the cost, honestly
+
+```sh
+haru-pack build app.py --thick --obfuscate pyarmor
+haru-pack build app.py --thick --obfuscate pyarmor --obfuscate-args "--mix-str"
+```
+
+Obfuscation is a modular engine (`ObfuscationEngine` + a registry) with **pyarmor** as the
+default. It runs as `uv run --python <target-version> --with pyarmor -- pyarmor gen`, which
+means two things:
+
+- haru-pack needs **no pyarmor dependency of its own** — uv provisions it on demand, and uv
+  is already the whole staging mechanism.
+- pyarmor runs under the **exact interpreter version the binary will stage**, which it must:
+  pyarmor's runtime `.so` references version-private CPython symbols, so a payload obfuscated
+  for 3.12 fails to import under 3.11 (`_PyThreadState_GetCurrent`) or 3.13/3.14
+  (`_PyErr_GetTopmostException`). Measured 2026-09-10.
+
+Because of that binding, **obfuscation wants `--thick`**: only thick bundles the exact
+interpreter and guarantees the match. A non-thick obfuscated build warns loudly that the
+target must have exactly that Python or the binary will fail to start.
+
+Three hard rules (INV-OBF-01):
+
+1. **Apply or fail.** `--obfuscate pyarmor` with no uv, or a pyarmor that errors, **fails the
+   build**. It never silently ships plaintext when you asked for obfuscation — that false
+   confidence is the exact thing being guarded against.
+2. **`none` is the honest default.** Not obfuscated is a named engine, recorded in the
+   manifest, never implied by omission.
+3. **Independent of encryption.** Obfuscate a plaintext-payload binary, encrypt an
+   unobfuscated one, do both, or neither. They protect different things and are wired on
+   separate axes.
+
+pyarmor's unlicensed/trial runtime is size-limited and not for redistribution; haru-pack
+detects the trial banner and says so in the build log. It will not decide licensing for you,
+but it will not let you ship a trial artifact believing it is licensed.
+
 ## Composition — why the personas stack
 
 A persona that runs alone asks a closed question. *Does staging cope with umask 077?* has the

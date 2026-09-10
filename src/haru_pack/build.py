@@ -12,6 +12,7 @@ from .tiers import apply_tier, bundles_uv
 from .sources import Sources
 from .targets import Target
 from .entrypoints import resolve_entrypoint
+from .obfuscate import ObfuscationError, get_engine
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
                      warm_cache_for_script)
@@ -185,6 +186,21 @@ def _resolve(project: Path, tier: str, python_cli: str,
         validate_encryption(enc)
     return manifest, enc, pyver, disc["source"], Sources.resolve(decl)
 
+def _entry_relpath(manifest: dict) -> str:
+    """The .py file the obfuscator should treat as the entry, relative to the app dir.
+
+    entrypoint is argv resolved for the launcher; for obfuscation we only need a real .py
+    to hand pyarmor. A module:callable or console-script entry has no single file, so fall
+    back to the app package's __init__ or the first .py — pyarmor obfuscates the whole tree
+    regardless, and this only decides which file the "did the entry survive" check watches.
+    """
+    ep = manifest.get("entrypoint") or []
+    for tok in ep:
+        if isinstance(tok, str) and tok.endswith(".py"):
+            return tok
+    return "app.py"
+
+
 def assemble_payload(source: Path, manifest: dict, tier: str, target,
                      python: str, workdir: Path, wine: bool = False,
                      sources: Sources | None = None, eager_deps: bool = False,
@@ -198,6 +214,32 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
         shutil.copy2(source, app / source.name)
     else:
         shutil.copytree(source, app, ignore=_IGNORE)
+
+    # Obfuscation is a source transform, applied to the copied app before anything else reads
+    # it — cache warming, dependency staging and the zip all see the obfuscated tree. It is
+    # INDEPENDENT of encryption: you can obfuscate a plaintext-payload binary, encrypt an
+    # unobfuscated one, do both, or neither. They protect different things (see
+    # INV-SECRET-02) and are wired on separate axes so neither implies the other.
+    obf = manifest.get("_obfuscation")
+    if obf and obf.get("engine", "none") != "none":
+        engine = get_engine(obf["engine"], obf.get("args") or ())
+        entry_rel = _entry_relpath(manifest)
+        try:
+            res = engine.obfuscate(app, entry_rel, python=python, log=log)
+        except ObfuscationError as e:
+            # A failed obfuscation must fail the build. Shipping the plaintext the user asked
+            # to hide, silently, is the exact anti-pattern INV-SECRET-02 and INV-DOC-02 guard.
+            raise BuildError(f"obfuscation failed: {e}") from e
+        manifest["obfuscation"] = {"engine": res.engine, "applied": res.applied,
+                                   "files": res.files}
+        say = log or (lambda _m: None)
+        say(f"obfuscation: {res.note}")
+        say("obfuscation raises the cost of reading the staged source; it is NOT a "
+            "confidentiality boundary. A secret that must never be recovered must never be "
+            "shipped (INV-SECRET-02).")
+    else:
+        manifest.setdefault("obfuscation", {"engine": "none", "applied": False})
+
     manifest = apply_tier(dict(manifest), tier)
     vendor = payload / "vendor"
     # tiers.bundles_uv is the single statement of which tiers ship a uv (main's
@@ -280,6 +322,7 @@ def target_is_host(tgt) -> bool:
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           machine: str = "", user: str = "", embed_secret: bool = False,
+          obfuscate: str = "none", obfuscate_args=(),
           python: str = "", wine: bool = False, encrypt: bool = False,
           entry_point: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
@@ -293,6 +336,31 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
                                                      machine, user, embed_secret, encrypt,
                                                      entry_point)
+    # Record the requested engine on the manifest so assemble_payload can apply it. Validated
+    # here, at the front of the build, so an unknown engine or a missing pyarmor fails before
+    # any work — never after producing a binary the user believes is obfuscated.
+    if obfuscate and obfuscate != "none":
+        eng = get_engine(obfuscate)          # raises ObfuscationError on an unknown name
+        if reason := eng.available():
+            raise BuildError(reason)
+    manifest["_obfuscation"] = {"engine": obfuscate or "none",
+                                "args": list(obfuscate_args)}
+    if obfuscate_args and obfuscate in (None, "", "none"):
+        raise BuildError("obfuscation arguments were given but no engine was selected; "
+                         "pass --obfuscate <engine>")
+    # Obfuscation binds the payload to an EXACT Python minor version: pyarmor's runtime .so
+    # references version-private symbols, so a payload obfuscated for 3.12 fails to import
+    # under 3.11 or 3.13 (measured 2026-09-10). Only the thick tier guarantees the staged
+    # interpreter is the one obfuscation targeted; thin/default resolve a Python on the
+    # target and may not land on the same minor. haru-pack CAN see this, so it says so
+    # (INV-OBF-01).
+    if obfuscate and obfuscate != "none" and tier != "thick":
+        say = log or (lambda _m: None)
+        say(f"WARNING: --obfuscate with tier={tier}. Obfuscation is bound to Python "
+            f"{python or '3.12'} EXACTLY, and only --thick bundles that interpreter. On "
+            f"thin/default the target may resolve a different Python minor and the binary "
+            f"will fail to start with an 'undefined symbol' import error. Use --thick, or "
+            f"ensure the target has exactly Python {python or '3.12'}.")
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
@@ -324,5 +392,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # auditing a signed artifact should not have to guess whether a mirror was in play.
     info.update(sources=sources.describe(),
                 tier=tier, target=str(tgt), nim=nim, compiler=tc["compiler"], out=str(out),
-                encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver)
+                encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver,
+                obfuscation=manifest.get("obfuscation", {"engine": "none",
+                                                         "applied": False}))
     return info

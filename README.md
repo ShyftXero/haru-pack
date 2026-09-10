@@ -71,6 +71,15 @@ fetches on first run. Default bundles `uv` and fetches Python + deps once. `--th
 bundles everything and touches no network at all. Pick by what your target is allowed to
 reach, not by what is smallest.
 
+**Encryption protects the binary at rest; it cannot protect a secret from someone who runs
+it.** The launcher stages the payload to disk in plaintext so the interpreter can run it, and
+any user who can run the binary can read that staged source from their own cache. `--obfuscate`
+(pyarmor by default, modular) raises the *cost* of reading it — it is not a confidentiality
+boundary. A secret that must never leak must never be shipped in an artifact the client holds;
+put it behind a server the client authenticates to. haru-pack states this plainly rather than
+implying that "encrypted binary" means the embedded key is safe. See INV-SECRET-02 / INV-OBF-01
+and the busybody `reverse_engineer` persona, which proves each edge rather than asserting it.
+
 **One code path, not two.** Host and cross builds download the same artifacts the same way.
 Where there used to be a fork — a "fast path" for the host — the fast path was the
 unverified one, and it was the path almost everyone took. Nim is installed exactly one way
@@ -128,6 +137,8 @@ in this repo that were never implemented.
 | `--secret-env VAR` | | read the secret from env var `VAR` at build |
 | `--secret-prompt` | | prompt for the secret at build |
 | `--embed-secret` | off | embed the secret in the exe (weakest; no runtime secret needed) |
+| `--obfuscate ENGINE` | `none` | obfuscate the source before packing: `none` \| `pyarmor`. Independent of `--encrypt`; wants `--thick` |
+| `--obfuscate-args "…"` | | extra args passed through to the obfuscation engine |
 | `--expires YYYY-MM-DD` | | license expiry |
 | `--machine ID` | | bind cryptographically to a machine id (`haru-pack machine-id`) |
 | `--user NAME` | | bind cryptographically to an OS username |

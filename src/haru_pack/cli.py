@@ -42,7 +42,7 @@ app = typer.Typer(add_completion=False, cls=_DefaultToBuild,
 def _run_build(*, project, out=None, target="host", tier="default", thin=False, thick=False,
                chonky=False, encrypt=False, secret=None, secret_env=None, secret_prompt=False,
                embed_secret=False, expires="", machine="", user="", geo="", python="",
-               entry_point="", wine=False) -> None:
+               entry_point="", wine=False, obfuscate="none", obfuscate_args="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -78,6 +78,8 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          expires=expires, geo=[g for g in geo.split(",") if g],
                          machine=machine, user=user, embed_secret=embed_secret, python=python,
                          wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
+                         obfuscate=obfuscate,
+                         obfuscate_args=[a for a in obfuscate_args.split() if a],
                          entry_point=entry_point,
                          log=lambda m: typer.secho(f"haru-pack: {m}",
                                                    fg="yellow" if "WARNING" in m else "cyan"))
@@ -91,6 +93,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     except BuildError as e:
         typer.secho(str(e), fg="red"); raise typer.Exit(2)
     tag = " 🔒encrypted" if info.get("encrypted") else ""
+    ob = (info.get("obfuscation") or {})
+    if ob.get("applied"):
+        tag += f" 🌀{ob.get('engine')}"
     typer.secho(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
                 f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", fg="green")
 
@@ -252,7 +257,9 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           entry_point: str = typer.Option("", "--entry-point", "-e",
               help="what to run: a script (app.py), a console script (lotek), or "
                    "module:callable (app.cli:main) — same spelling as [project.scripts]"),
-          wine: bool = typer.Option(False, "--wine", help="run execute-required bundle steps under wine (thick cross)")):
+          wine: bool = typer.Option(False, "--wine", help="run execute-required bundle steps under wine (thick cross)"),
+          obfuscate: str = typer.Option("none", "--obfuscate", help="obfuscate the source before packing: none | pyarmor (default engine when a value is omitted). Independent of --encrypt."),
+          obfuscate_args: str = typer.Option("", "--obfuscate-args", help="extra args passed through to the obfuscation engine, quoted")):
     """Build a single-file launcher from a project payload dir.
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
@@ -261,7 +268,7 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                chonky=chonky, encrypt=encrypt, secret=secret, secret_env=secret_env,
                secret_prompt=secret_prompt, embed_secret=embed_secret, expires=expires,
                machine=machine, user=user, geo=geo, python=python, entry_point=entry_point,
-               wine=wine)
+               wine=wine, obfuscate=obfuscate, obfuscate_args=obfuscate_args)
 
 @app.command()
 def verify(exe: Path):

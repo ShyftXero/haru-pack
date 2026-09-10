@@ -1206,6 +1206,95 @@ Source: Adversarial review 2026-09-09, finding W11. `cryptbox.resolveSecret` use
 `stdin.readLine()`; `std/terminal` is already imported but `readPasswordFromStdin` is not used.
 Territory: src/haru_pack/launcher/cryptbox.nim
 
+
+### INV-SECRET-02
+Status: active
+Statement: A secret embedded in an encrypted build is not present in plaintext in the
+distributed binary at rest. But the launcher stages the payload to disk in plaintext to run
+it, so any user who can EXECUTE the binary can recover the staged source from their own
+cache. haru-pack never claims otherwise, and obfuscation raises the cost of reading that
+staged source without making it a confidentiality boundary.
+Actors: the developer who has to embed an API key and ship it, and the reverse engineer who
+receives the binary and rummages.
+Assets: the developer's correct understanding of what they are protecting. The dangerous
+failure is not a weak cipher; it is a developer who believes "encrypted binary" means the
+embedded key is safe from someone running it, ships a key that must never leak, and is wrong.
+Red-path: busybody's `reverse_engineer` persona plants a known secret and proves each edge:
+  * ENCRYPTED build, no embed — the secret literal is ABSENT from the binary's payload
+    (decompressed), because the payload is ciphertext. This is what encryption buys.
+  * PLAIN build — the secret is PRESENT in the staged tree under the run's cache after the
+    binary runs. This is the soft spot, and it is inherent: a plaintext interpreter must be
+    handed plaintext to run.
+  * OBFUSCATED build — the plaintext literal is GONE from the staged source, replaced by a
+    pyarmor bootstrap. Measurable, and the whole value of `--obfuscate`; not a guarantee.
+  * `--embed-secret` — the decryption key is in the binary, so the payload is recoverable
+    from the binary ALONE. This is the documented weakest mode: encryption reduced to
+    obfuscation.
+Each is a claiming case, and the persona reports what it actually recovered rather than
+asserting a boundary.
+Source: 2026-09-10, from the reverse_engineer/obfuscation work. The staging path
+(`stage.nim`) writes the decrypted payload to `XDG_CACHE_HOME/haru-pack/<key>-<digest>/root/`
+in plaintext and leaves it there — it is the regenerable cache, not a temp dir — so the
+window is not "while running" but "until the cache is cleared".
+Note: The staged tree is hardened to owner-only, and the protection is REACHABILITY, not
+per-file bits. `hardenDir` sets the cache base (`<cache>/haru-pack`) and the staged root to
+0700; the inner files stay 0644, but the 0700 gate means another user cannot traverse in to
+reach them. Measured 2026-09-10. The persona's first version checked raw inner bits and
+reported a FALSE LEAKED on every 0644 file — corrected to walk the ancestor chain and flag a
+file only if it is other-readable AND every directory up to the cache base is
+other-traversable. A finding that cannot survive that check is not a finding; verifying it
+before believing it is the discipline, and it applied to the harness's own output here.
+That protection does nothing against the user who RUNS the binary, because that user is the
+owner — which is INV-SECRET-02's whole point.
+Note: A secret that must never be recovered must never be shipped to the client. The correct
+architecture for a must-not-leak key is a server the client authenticates to, not a key in an
+artifact the client holds. haru-pack's job is to be honest that packing is not that.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, tools/busybody.py,
+tests/test_reverse_engineer.py
+
+---
+
+## OBF — source obfuscation, and the honesty around it
+
+### INV-OBF-01
+Status: active
+Statement: `--obfuscate` either applies the requested engine or fails the build. It never
+silently ships unobfuscated source when obfuscation was asked for. The result is recorded in
+the manifest, so the artifact states truthfully what was done to it.
+Actors: the developer who runs `--obfuscate pyarmor` in CI and does not watch the log, and
+the person who later has to trust that a shipped binary is what its build command claimed.
+Assets: the truthfulness of the build. "I asked for obfuscation and got a plain binary and
+was not told" is the worst outcome, because it produces false confidence in a shipped
+artifact — the exact class INV-DOC-02 exists to prevent, here at build time.
+Red-path: request `--obfuscate pyarmor` with uv absent, or with a pyarmor that errors, and
+the build must exit non-zero rather than produce an unobfuscated binary. A claiming test
+drives `get_engine` with an unavailable engine and asserts the build refuses. The `none`
+engine is the explicit default and the honest name for "not obfuscated" — never implied by
+omission.
+Source: 2026-09-10. pyarmor is run as `uv run --python <ver> --with pyarmor -- pyarmor gen`,
+so haru-pack needs no pyarmor dependency and — crucially — obfuscates under the SAME
+interpreter version the binary will stage.
+Note: Obfuscation binds the payload to an EXACT Python minor version. Measured 2026-09-10: a
+payload obfuscated for 3.12 imports only under 3.12 — 3.11 fails on `_PyThreadState_GetCurrent`,
+3.13/3.14 on `_PyErr_GetTopmostException`, because pyarmor's runtime .so references
+version-private symbols. Only `--thick` bundles the exact interpreter and guarantees the
+match; thin/default resolve a Python on the target and may not land on the same minor, so a
+non-thick obfuscated build warns loudly that the binary will fail to start unless the target
+has exactly that version.
+Note: The engine is modular (an `ObfuscationEngine` interface with a registry) because
+pyarmor is commercial, versioned, and may be unavailable — offline, a lapsed licence, or a
+future where it is abandoned. This project exists to outlive its tools, so pyarmor is one
+implementation, not a hard dependency.
+Note: pyarmor's unlicensed/trial runtime is size-limited and not for redistribution. haru-pack
+detects the trial banner and says so in the build log; it does not decide licensing for the
+user, but it will not let them ship a trial artifact believing it is licensed.
+Note: Obfuscation and encryption are INDEPENDENT axes. Neither implies the other: you can
+obfuscate a plaintext-payload binary, encrypt an unobfuscated one, do both, or neither. They
+protect different things (INV-SECRET-02), and the code wires them separately so a change to
+one cannot silently alter the other.
+Territory: src/haru_pack/obfuscate.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+tests/test_obfuscate.py
+
 ### INV-SECRET-02
 Status: active
 Statement: A build secret is never written into a manifest, a build receipt, or any other

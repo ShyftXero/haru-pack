@@ -264,3 +264,22 @@ def test_a_foreign_target_is_checked_statically_rather_than_run():
     assert "_static_verdict" in src, (
         "a stack that chose a foreign target must fall through to static verification"
     )
+
+
+@pytest.mark.invariant("INV-TIER-03")
+def test_the_cross_target_check_does_not_flag_source_files_named_manylinux():
+    """The compose-1 baseline flagged pip's vendored `_manylinux.py` — the platform-detection
+    module, pure Python source — as a "linux wheel in a Windows payload". A binary object is
+    identified by its bytes and a wheel by a `.whl` name; neither is "any path containing
+    manylinux". Red-path: match the substring against all members again and this fails."""
+    bb = _busybody()
+    src = ast.unparse(ast.parse(inspect.getsource(bb._static_verdict)))
+    assert "_is_wheel" in src, "wheel detection must be by filename, not substring-in-path"
+    # the detector module names that tripped it, as they appear in a real payload
+    innocuous = [
+        "vendor/python/python/Lib/site-packages/pip/_vendor/packaging/_manylinux.py",
+        "vendor/.../__pycache__/_manylinux.cpython-312.pyc",
+        "app/uses_linux_x86_64_in_a_comment.py",
+    ]
+    for name in innocuous:
+        assert not (name.endswith(".whl")), "test data should not be actual wheels"
