@@ -16,7 +16,8 @@ from pathlib import Path
 
 from . import tomlio
 
-__all__ = ["PinsError", "pins_path", "load", "uv_digests", "python_digests", "provenance"]
+__all__ = ["PinsError", "pins_path", "load", "uv_digests", "python_digests",
+           "nim_digests", "choosenim_digests", "provenance"]
 
 SCHEMA_VERSION = 1
 _HEX = frozenset("0123456789abcdef")
@@ -63,6 +64,8 @@ def load(path: str | None = None) -> dict:
 
     uv: dict = {}
     python: dict = {}
+    nim: dict = {}
+    choosenim: dict = {}
     prov: dict = {}
     for i, a in enumerate(data.get("artifact") or []):
         kind = a.get("kind")
@@ -79,12 +82,25 @@ def load(path: str | None = None) -> dict:
                 raise PinsError(f"{where}: a python entry needs `url`")
             python[url] = _check_digest(a.get("sha256"), where)
             prov[f"python:{url}"] = a.get("provenance", "")
+        elif kind in ("nim", "choosenim"):
+            v, asset = a.get("version"), a.get("asset")
+            if not v or not asset:
+                raise PinsError(f"{where}: a {kind} entry needs both `version` and `asset`")
+            bucket = nim if kind == "nim" else choosenim
+            bucket.setdefault(v, {})[asset] = {
+                "sha256": _check_digest(a.get("sha256"), where),
+                "url": a.get("url", ""),
+            }
+            prov[f"{kind}:{v}:{asset}"] = a.get("provenance", "")
         else:
-            raise PinsError(f"{where}: unknown kind {kind!r} (expected 'uv' or 'python')")
+            raise PinsError(
+                f"{where}: unknown kind {kind!r} "
+                "(expected 'uv', 'python', 'nim' or 'choosenim')")
 
     if not uv and not python:
         raise PinsError(f"{p} contains no artifacts")
-    return {"uv": uv, "python": python, "provenance": prov}
+    return {"uv": uv, "python": python, "nim": nim, "choosenim": choosenim,
+            "provenance": prov}
 
 
 def uv_digests() -> dict:
@@ -93,6 +109,16 @@ def uv_digests() -> dict:
 
 def python_digests() -> dict:
     return load()["python"]
+
+
+def nim_digests() -> dict:
+    """{version: {asset: {"sha256", "url"}}} for Nim's own archives."""
+    return load()["nim"]
+
+
+def choosenim_digests() -> dict:
+    """{version: {asset: {"sha256", "url"}}} for choosenim binaries."""
+    return load()["choosenim"]
 
 
 def provenance() -> dict:

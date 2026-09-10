@@ -31,7 +31,6 @@ SRC = Path(bootstrap.__file__).resolve().parent
 LAUNCHER = SRC / "launcher"
 
 PIN_TABLES = {
-    "bootstrap.NIM_SHA256": bootstrap.NIM_SHA256,
     "bundle.PBS_SHA256": bundle.PBS_SHA256,
     **{f"bundle.UV_SHA256[{v!r}]": t for v, t in bundle.UV_SHA256.items()},
 }
@@ -150,50 +149,103 @@ def test_verify_sha256_is_case_and_whitespace_tolerant_but_not_value_tolerant(tm
     assert sha256_file(f) == _sha(data)
 
 
-# ---------- site 1: the Nim toolchain ----------
-def _nim_install_env(monkeypatch, tmp_path, tarball):
-    """Point install_nim at a file:// 'release' and a throwaway toolchain dir."""
-    monkeypatch.setattr(bootstrap, "nim_dir", lambda: tmp_path / "toolchain" / "nim")
-    monkeypatch.setattr(bootstrap, "_nim_archive_url", lambda: (_file_url(tarball), "tar.xz"))
-    return tarball.name
-
+# ---------- site 1: the Nim toolchain (choosenim) ----------
+#
+# haru-pack installs Nim exactly one way: the pinned choosenim binary. The archive-download
+# and build-from-source paths were removed deliberately — three ways to acquire a compiler
+# is three ways for a build host to differ from another one.
 
 @pytest.mark.invariant("INV-SUPPLY-01")
-def test_install_nim_refuses_a_tampered_toolchain(monkeypatch, tmp_path, nim_tarball):
-    name = _nim_install_env(monkeypatch, tmp_path, nim_tarball)
-    monkeypatch.setattr(bootstrap, "NIM_SHA256", {name: _sha(b"what the publisher shipped")})
+def test_choosenim_download_is_digest_verified(monkeypatch, tmp_path):
+    """Red-path: swap fetch_verified for a bare urlretrieve in toolchain.install_nim."""
+    from haru_pack import pins, toolchain
+
+    fake = tmp_path / "choosenim-fake"
+    fake.write_bytes(b"not the installer you pinned")
+    asset = toolchain.choosenim_asset("linux", "x86_64")
+
+    monkeypatch.setattr(toolchain, "host_os", lambda: "linux")
+    monkeypatch.setattr(toolchain, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(toolchain, "toolchain_dir", lambda: tmp_path / "tc")
+    monkeypatch.setattr(pins, "choosenim_digests", lambda: {
+        toolchain.CHOOSENIM_VERSION: {
+            asset: {"sha256": _sha(b"what the publisher actually published"),
+                    "url": _file_url(fake)}}})
 
     with pytest.raises(DigestMismatch):
-        bootstrap.install_nim(force=True)
+        toolchain.install_nim(force=True, log=lambda *_: None)
 
-    assert not (tmp_path / "toolchain" / "nim" / "bin" / "nim").exists(), \
-        "a Nim binary that failed verification was installed anyway"
-
-
-@pytest.mark.invariant("INV-SUPPLY-01")
-def test_install_nim_accepts_the_pinned_toolchain(monkeypatch, tmp_path, nim_tarball):
-    name = _nim_install_env(monkeypatch, tmp_path, nim_tarball)
-    monkeypatch.setattr(bootstrap, "NIM_SHA256", {name: sha256_file(nim_tarball)})
-
-    nim = bootstrap.install_nim(force=True)
-    assert Path(nim).exists()
-    assert Path(nim).read_bytes().startswith(b"#!/bin/sh")
+    installed = tmp_path / "tc" / "choosenim" / "choosenim"
+    assert not installed.exists(), "an unverified toolchain installer was kept on disk"
 
 
 @pytest.mark.invariant("INV-SUPPLY-01")
-def test_install_nim_refuses_a_platform_with_no_pinned_digest(monkeypatch, tmp_path,
-                                                              nim_tarball, no_network):
-    """The linux_arm64 case: Nim publishes no aarch64 build, so there is no digest."""
-    _nim_install_env(monkeypatch, tmp_path, nim_tarball)
-    monkeypatch.setattr(bootstrap, "NIM_SHA256", {})
-    existing = tmp_path / "toolchain" / "nim" / "bin"
-    existing.mkdir(parents=True)
-    (existing / "nim").write_text("previously installed\n")
+def test_unpinned_choosenim_is_refused_not_downloaded(monkeypatch, tmp_path, no_network):
+    from haru_pack import pins, toolchain
+    monkeypatch.setattr(toolchain, "host_os", lambda: "linux")
+    monkeypatch.setattr(toolchain, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(toolchain, "toolchain_dir", lambda: tmp_path / "tc")
+    monkeypatch.setattr(pins, "choosenim_digests", lambda: {})
 
-    with pytest.raises(UnpinnedArtifact):
-        bootstrap.install_nim(force=True)
+    with pytest.raises(toolchain.ToolchainError, match="pinned"):
+        toolchain.install_nim(force=True, log=lambda *_: None)
 
-    assert (existing / "nim").exists(), "refusing to install should not delete the existing toolchain"
+
+@pytest.mark.invariant("INV-SUPPLY-01")
+def test_every_supported_build_host_has_a_pinned_choosenim():
+    """A build host we advertise but cannot verify an installer for is a broken promise."""
+    from haru_pack import toolchain
+    table = toolchain.pins.choosenim_digests().get(toolchain.CHOOSENIM_VERSION, {})
+    for spec in toolchain.SUPPORTED_BUILD_HOSTS:
+        os_, arch = spec.split("-", 1)
+        asset = toolchain.choosenim_asset(os_, arch)
+        assert asset, f"{spec} is advertised but maps to no choosenim asset"
+        assert asset in table, f"{spec} -> {asset} has no pinned digest"
+        assert len(table[asset]["sha256"]) == 64
+
+
+@pytest.mark.invariant("INV-BUILD-05")
+def test_an_unsupported_build_host_explains_the_cross_compile_route(monkeypatch, tmp_path):
+    """ARM Linux is a TARGET, not a build host. The error has to say so, and say what to
+    do instead — otherwise it reads as 'haru-pack does not support your Pi'."""
+    from haru_pack import toolchain
+    monkeypatch.setattr(toolchain, "host_os", lambda: "linux")
+    monkeypatch.setattr(toolchain, "host_arch", lambda: "aarch64")
+    monkeypatch.setattr(toolchain, "toolchain_dir", lambda: tmp_path / "tc")
+
+    with pytest.raises(toolchain.ToolchainError) as ei:
+        toolchain.install_nim(force=True, log=lambda *_: None)
+    msg = str(ei.value)
+    assert "--target linux-aarch64" in msg, "the error does not name the cross-compile route"
+    assert "linux-x86_64" in msg, "the error does not say which hosts work"
+
+
+@pytest.mark.invariant("INV-SUPPLY-01")
+def test_nim_is_installed_into_haru_packs_own_directory(monkeypatch, tmp_path):
+    """Never into ~/.nimble or a system path. A packaging tool must not take over a
+    user's global toolchain, and must not depend on whatever the host already had."""
+    import inspect
+    from haru_pack import toolchain
+    src = inspect.getsource(toolchain.install_nim)
+    assert "CHOOSENIM_DIR" in src and "NIMBLE_DIR" in src, (
+        "choosenim is not confined to haru-pack's toolchain dir; it would write to "
+        "~/.choosenim and ~/.nimble"
+    )
+
+
+@pytest.mark.invariant("INV-SUPPLY-01")
+def test_there_is_exactly_one_way_to_install_nim():
+    """Red-path: add an archive or source fallback back into toolchain.py.
+
+    Not a style rule. Every additional acquisition path is another way for one build host
+    to end up with a different compiler than another, which is precisely the class of
+    difference this project keeps discovering the hard way.
+    """
+    import inspect
+    from haru_pack import toolchain
+    src = inspect.getsource(toolchain)
+    for banned in ("koch boot", "build.sh", "_install_from_source", "_install_via_archive"):
+        assert banned not in src, f"a second Nim install path is back: {banned}"
 
 
 # ---------- site 2: uv ----------
@@ -302,11 +354,13 @@ def test_the_pinned_versions_are_the_ones_with_pins():
         asset = Target.parse(spec).uv_asset()
         assert asset in bundle.UV_SHA256[bundle.UV_VERSION], \
             f"no pinned digest for the {spec} uv asset {asset}"
-    for name in bootstrap.NIM_SHA256:
-        assert bootstrap.NIM_VERSION in name, \
-            f"stale Nim pin {name!r} does not belong to NIM_VERSION {bootstrap.NIM_VERSION}"
-    assert f"nim-{bootstrap.NIM_VERSION}-linux_x64.tar.xz" in bootstrap.NIM_SHA256
-    assert f"nim-{bootstrap.NIM_VERSION}_x64.zip" in bootstrap.NIM_SHA256
+    from haru_pack import toolchain
+    cn = toolchain.pins.choosenim_digests()
+    assert toolchain.CHOOSENIM_VERSION in cn, \
+        f"CHOOSENIM_VERSION {toolchain.CHOOSENIM_VERSION} has no pinned assets"
+    for asset in cn[toolchain.CHOOSENIM_VERSION]:
+        assert toolchain.CHOOSENIM_VERSION in asset, \
+            f"stale choosenim pin {asset!r} does not belong to {toolchain.CHOOSENIM_VERSION}"
 
 
 @pytest.mark.invariant("INV-SUPPLY-01")

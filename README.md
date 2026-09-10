@@ -8,31 +8,98 @@ launched from**. Windows-first, cross-compiled from Linux. Built on `uv`; launch
 > Think PyInstaller's UX, but the interpreter + deps are delegated to `uv`, the launcher is
 > a thin signable native stub, and you choose how much is bundled vs fetched on the target.
 
+## TL;DR
+
+```sh
+pip install haru-pack
+haru-pack bootstrap          # installs Nim via choosenim; at most one sudo prompt
+haru-pack yourscript.py      # -> ./yourscript, a single native binary
+./yourscript
+```
+
+That is the whole thing. Point it at a script or a project directory and a binary appears.
+
+What you get: one file, no Python required on the target, runs from whatever folder it is
+in. Ship it like a compiled program.
+
+```sh
+haru-pack ./myproject                              # project dir with a pyproject.toml
+haru-pack ./myproject --thick                      # bundle everything, zero network at runtime
+haru-pack ./myproject --target windows -o app.exe  # cross-compile from Linux
+haru-pack ./myproject --target linux-aarch64       # Raspberry Pi
+```
+
+If a project declares more than one console script, haru-pack stops and asks rather than
+guessing:
+
+```sh
+haru-pack ./lotek --out lotek --entry-point "app.cli:main"
+```
+
 ## Install
+
 ```sh
 pip install haru-pack            # or:  uvx haru-pack ...
-haru-pack bootstrap              # installs Nim (+zippy, puppy, parsetoml, nimcrypto) & checks the C toolchain
-haru-pack init ./myproject       # optional: scaffold haru_pack.toml (learns from pyproject + venv)
+haru-pack bootstrap              # Nim via choosenim + verify the C toolchain
+haru-pack init ./myproject       # optional: write a haru_pack.toml you can edit
 ```
 
-## Quickstart
+`bootstrap` installs Nim into haru-pack's own directory. Your system Nim and your
+`~/.nimble` are left alone. The only thing it asks sudo for is a C compiler, and it asks
+once, showing you the exact command first.
+
+Building for another machine? Ask for it up front and the same single prompt covers it:
+
 ```sh
-# point at a PEP 723 script or a project dir (with pyproject.toml). haru-pack auto-discovers
-# the kind, Python version (requires-python / .python-version / PEP 723), and entrypoint.
-haru-pack ./myproject                       # no subcommand needed for the simple case
-haru-pack build ./myproject                 # default tier: uv bundled, deps fetched 1st run
-./myproject                                 # run it — behaves like a native binary
-
-haru-pack build ./myproject --thin          # smallest; fetch uv+python+deps on target
-haru-pack build ./myproject --thick         # bundle everything, fully offline (chonky 🦣)
-haru-pack build ./myproject --target windows -o app.exe   # cross-compile Linux -> Windows
-haru-pack build ./myproject --target linux-aarch64        # Raspberry Pi
-
-# projects that declare more than one console script are AMBIGUOUS: haru-pack refuses and
-# lists them rather than guessing, because a wrong guess builds cleanly and runs the wrong
-# program. Say which one you meant, in the same spelling [project.scripts] uses:
-haru-pack build ./lotek --out lotek --entry-point "app.cli:main"
+haru-pack bootstrap --target linux-aarch64      # also gets the ARM cross-compiler
 ```
+
+## Decisions
+
+Short version of why this works the way it does.
+
+**uv does the Python part.** Interpreters, dependency resolution, and virtualenvs are
+solved problems. haru-pack stages a `uv` binary and gets out of the way, rather than
+reimplementing an installer.
+
+**The launcher is Nim.** It has to be a real native executable that Windows will let you
+Authenticode-sign, and it has to cross-compile from Linux without a Windows machine. Nim
+compiles to C and does both. It is a ~500-line stub, not an application.
+
+**Three tiers, because "one binary" means different things.** `--thin` bundles nothing and
+fetches on first run. Default bundles `uv` and fetches Python + deps once. `--thick`
+bundles everything and touches no network at all. Pick by what your target is allowed to
+reach, not by what is smallest.
+
+**One code path, not two.** Host and cross builds download the same artifacts the same way.
+Where there used to be a fork — a "fast path" for the host — the fast path was the
+unverified one, and it was the path almost everyone took. Nim is installed exactly one way
+(choosenim); there is no archive fallback and no build-from-source fallback.
+
+**Everything downloaded is pinned.** `uv`, the Python interpreter, and choosenim are all
+checked against a SHA-256 in [`src/haru_pack/pins.toml`](src/haru_pack/pins.toml) before
+they are unpacked. No pin means the build refuses — it does not fall back to trusting TLS.
+Digests come from the publisher's own sidecar or release API, never from hashing whatever a
+server happened to send. `tools/add-pin.py` does this for you.
+
+**Mirrors change where, never whether.** If you cannot reach github.com, point `[sources]`
+at a mirror. The pin is chosen by the artifact's upstream identity *before* the URL is
+rewritten, so a hostile mirror gets you a failed build, not a compromised one.
+
+**ARM Linux is a target, not a build host.** choosenim publishes no ARM Linux binary, so
+you build Pi binaries on an x86_64 machine with `--target linux-aarch64`. You never need a
+toolchain on the Pi.
+
+**It refuses instead of guessing.** Ambiguous entrypoint, missing digest, unknown target,
+malformed `--entry-point`: all of these stop the build. A wrong guess here compiles
+cleanly, exits 0, and fails on the customer's machine — which is the worst place to find
+out.
+
+**Claims are tested, not asserted.** [`INVARIANTS.md`](INVARIANTS.md) lists what must not
+regress, each with a *red-path*: the exact edit that makes its test fail. `pytest -m
+invariant` enforces that every `active` entry has a test and every `proposed` entry does
+not. This exists because an audit found five documented, dated "Verified" security claims
+in this repo that were never implemented.
 
 ## Commands
 | Command | What |
@@ -66,7 +133,7 @@ haru-pack build ./lotek --out lotek --entry-point "app.cli:main"
 | `--user NAME` | | bind cryptographically to an OS username |
 | `--geo CC,CC` | | allowed country codes |
 
-`bootstrap` / `doctor` take `--target host|windows`; `bootstrap` also `--force`.
+`bootstrap` takes repeatable `--target`, plus `--yes` and `--force`. `doctor` takes `--target`.
 
 ## Tiers
 | Tier | Bundled | Fetched on target | Offline | Cross-compile |

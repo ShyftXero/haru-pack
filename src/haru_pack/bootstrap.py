@@ -1,35 +1,26 @@
+"""Toolchain discovery and the Nim library pins.
+
+Installing Nim lives in `toolchain.py` — one path, choosenim. This module finds what is
+already there and pins the Nim libraries the launcher links against.
+"""
 from __future__ import annotations
-import platform, shutil, subprocess, sys, tempfile
+import shutil, subprocess, sys
 from pathlib import Path
-from .paths import nim_dir
-from .archives import safe_extract_tar, fetch_verified, UnpinnedArtifact
 
-NIM_VERSION = "2.2.6"  # pinned; bump deliberately
+from .toolchain import (CHOOSENIM_VERSION, NIM_VERSION, ToolchainError,  # noqa: F401
+                        find_managed_nim, install_nim, sudo_command, system_packages)
 
-# INV-SUPPLY-01. sha256 of each published Nim archive for NIM_VERSION, keyed by the
-# archive filename. Captured 2026-09-09 from nim-lang.org's own `<archive>.sha256`
-# sidecars. Bump these in the same commit as NIM_VERSION: the keys embed the version,
-# so a stale table means "no pin", and no pin means install_nim refuses rather than
-# trusting TLS alone.
-#
-# linux_arm64 is deliberately absent. nim-lang.org publishes no aarch64 build for
-# 2.2.6 -- both nim-2.2.6-linux_arm64.tar.xz and its .sha256 return 404 -- so there is
-# no real digest to record. A fabricated one would be worse than the gap: install_nim
-# raises UnpinnedArtifact on that platform and the operator installs Nim via choosenim.
-NIM_SHA256 = {
-    f"nim-{NIM_VERSION}-linux_x64.tar.xz":
-        "38b8407f87d78bd207390051e4c76f38a45d0a26983cb262017c899b56ad8d06",
-    f"nim-{NIM_VERSION}_x64.zip":
-        "557eed9a9193a3bc812245a997d678fd6dc2c2dec6cfa9ba664a16b310115584",
-}
-
-# ---------- Nim ----------
 def find_nim() -> str | None:
-    """Prefer a managed Nim, then one on PATH."""
-    managed = nim_dir() / "bin" / ("nim.exe" if sys.platform == "win32" else "nim")
-    if managed.exists():
+    """haru-pack's own Nim first, then one on PATH.
+
+    A system Nim is accepted as a courtesy for people who already have one, but haru-pack
+    never installs there and never upgrades it.
+    """
+    managed = find_managed_nim()
+    if managed:
         return str(managed)
     return shutil.which("nim")
+
 
 def nim_version(nim: str) -> str | None:
     try:
@@ -38,56 +29,6 @@ def nim_version(nim: str) -> str | None:
     except Exception:
         return None
 
-def _nim_archive_url() -> tuple[str, str]:
-    m = platform.machine().lower()
-    if sys.platform.startswith("linux"):
-        arch = {"x86_64": "linux_x64", "aarch64": "linux_arm64"}.get(m)
-        if not arch:
-            raise RuntimeError(f"no prebuilt Nim for linux/{m}; install Nim manually or via choosenim")
-        return f"https://nim-lang.org/download/nim-{NIM_VERSION}-{arch}.tar.xz", "tar.xz"
-    if sys.platform == "win32":
-        return f"https://nim-lang.org/download/nim-{NIM_VERSION}_x64.zip", "zip"
-    raise RuntimeError("macOS: install Nim via `brew install nim` or choosenim (https://nim-lang.org/install.html)")
-
-def install_nim(force: bool = False) -> str:
-    """Download + extract a pinned Nim into the managed toolchain dir."""
-    existing = find_nim()
-    if existing and not force:
-        return existing
-    url, kind = _nim_archive_url()
-    name = url.rsplit("/", 1)[-1]
-    digest = NIM_SHA256.get(name)
-    if not digest:                                                  # INV-SUPPLY-01
-        raise UnpinnedArtifact(       # refuse before removing the toolchain we already have
-            f"no pinned sha256 for {name}; haru-pack will not install an unverified Nim "
-            f"toolchain. Record the publisher's digest in bootstrap.NIM_SHA256 "
-            f"(nim-lang.org serves {name}.sha256), or install Nim yourself via choosenim.")
-    dest = nim_dir()
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as td:
-        arc = Path(td) / f"nim.{kind}"
-        fetch_verified(url, arc, digest, what=f"Nim {NIM_VERSION} ({name})")   # INV-SUPPLY-01
-        extract_to = Path(td) / "x"
-        if kind == "tar.xz":
-            safe_extract_tar(arc, extract_to)       # INV-SUPPLY-03
-        else:
-            import zipfile
-            with zipfile.ZipFile(arc) as z:
-                z.extractall(extract_to)
-        inner = next(p for p in extract_to.iterdir() if p.is_dir())
-        shutil.move(str(inner), str(dest))
-    nim = find_nim()
-    if not nim:
-        raise RuntimeError("Nim install failed (binary not found after extract)")
-    return nim
-
-# INV-SUPPLY-02. The launcher imports these (puppy pulls webby in turn). Pinned to
-# exact versions, because `nimble install zippy` resolves to whatever was newest that
-# day: nimcrypto is the AES-256-GCM implementation linked into every shipped launcher,
-# and unpinned deps mean two builds of the same commit are two different binaries.
-# These are the versions this repo builds and tests against; bump deliberately.
 NIM_DEPS = {
     "zippy": "0.10.12",
     "puppy": "2.1.2",

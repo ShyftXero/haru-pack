@@ -1,11 +1,14 @@
 from __future__ import annotations
 import os
+import subprocess
 from pathlib import Path
 import typer
 from typer.core import TyperGroup
 from . import __version__
-from .bootstrap import (find_nim, nim_version, install_nim, ensure_nim_deps,
+from .bootstrap import (find_nim, nim_version, ensure_nim_deps, nim_dep_specs,
                         detect_c_toolchain)
+from . import toolchain
+from .toolchain import ToolchainError
 from .build import build as build_exe, BuildError
 from .discovery import AmbiguousProject
 from .entrypoints import EntryPointError
@@ -163,23 +166,66 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
         raise typer.Exit(1)
 
 @app.command()
-def bootstrap(target: str = typer.Option("host",
-                  help="also verify the toolchain for this target (<os>-<arch>)"),
-              force: bool = typer.Option(False, help="reinstall Nim even if present")):
-    """Install Nim (+zippy) into a managed dir and verify the C toolchain."""
-    typer.echo("installing/locating Nim ...")
-    nim = install_nim(force=force)
-    typer.secho(f"nim: {nim_version(nim)}  ({nim})", fg="green")
-    typer.echo("ensuring nim deps (zippy, puppy) ...")
-    ok = ensure_nim_deps(nim)
-    typer.secho("nim deps: ok" if ok else "nim deps: FAILED (nimble install zippy puppy)",
-                fg=("green" if ok else "red"))
-    tc = detect_c_toolchain(target)
-    if tc["ok"]:
-        typer.secho(f"C toolchain ({target}): {tc['compiler']}", fg="green")
+def bootstrap(target: list[str] = typer.Option(None, "--target",
+                  help="also prepare cross-compiling to this target; repeatable"),
+              yes: bool = typer.Option(False, "--yes", "-y",
+                  help="run the system package command without asking"),
+              force: bool = typer.Option(False, "--force", help="reinstall Nim even if present")):
+    """Install the toolchain. One command, at most one sudo prompt.
+
+    Nim comes from choosenim, into haru-pack's own directory — your system Nim and your
+    ~/.nimble are left alone. The only thing that has to come from the system is a C
+    compiler, so that is the only thing this asks to install.
+    """
+    targets = list(target or [])
+
+    # 1. system packages: work out everything needed, ask ONCE.
+    missing = toolchain.system_packages(targets)
+    if missing:
+        cmd = toolchain.sudo_command(missing)
+        typer.secho(f"needs {len(missing)} system package(s): {', '.join(missing)}", fg="yellow")
+        if not cmd:
+            typer.secho("install them with your package manager, then re-run "
+                        "`haru-pack bootstrap`.", fg="yellow")
+            raise typer.Exit(1)
+        typer.echo("\n    " + " ".join(cmd) + "\n")
+        run_it = yes or typer.confirm("run it now?", default=True)
+        if not run_it:
+            typer.secho("skipped. Run that command, then `haru-pack bootstrap` again.",
+                        fg="yellow")
+            raise typer.Exit(1)
+        rc = subprocess.call(cmd)
+        if rc != 0:
+            typer.secho(f"package install failed (exit {rc}). Run the command above by hand.",
+                        fg="red")
+            raise typer.Exit(rc)
     else:
-        typer.secho(f"C toolchain ({target}) MISSING:", fg="red")
-        typer.secho(tc["advice"], fg="yellow")
+        typer.secho("system packages: nothing needed ✓", fg="green")
+
+    # 2. Nim, via choosenim, with no sudo at all.
+    try:
+        nim = toolchain.install_nim(force=force, log=lambda m: typer.echo(f"  {m}"))
+    except ToolchainError as e:
+        typer.secho(str(e), fg="red"); raise typer.Exit(1)
+    typer.secho(f"nim: {nim_version(nim)}  ({nim})", fg="green")
+
+    # 3. the launcher's Nim libraries, pinned.
+    typer.echo("ensuring nim deps (" + ", ".join(nim_dep_specs()) + ") ...")
+    ok = ensure_nim_deps(nim)
+    typer.secho("nim deps: ok" if ok else "nim deps: FAILED", fg=("green" if ok else "red"))
+    if not ok:
+        raise typer.Exit(1)
+
+    # 4. report the toolchain per requested target.
+    for t in ["host", *targets]:
+        tc = detect_c_toolchain(t)
+        typer.secho(f"C ({t}) : {tc['compiler'] if tc['ok'] else 'MISSING'}",
+                    fg=("green" if tc["ok"] else "red"))
+        if not tc["ok"]:
+            typer.secho(tc["advice"], fg="yellow")
+
+    typer.secho("\nready — try `haru-pack yourscript.py`", fg="green")
+
 
 @app.command()
 def build(project: Path = typer.Argument(..., help="payload dir (contains manifest.json + app/)"),

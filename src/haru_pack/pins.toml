@@ -175,3 +175,39 @@ url = "https://github.com/astral-sh/python-build-standalone/releases/download/20
 sha256 = "bab0e2aeec8a32a7f5cb62240d088d50ea468ef6d7522681bc171d527a5ba6f8"
 provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
 retrieved = "2026-09-09"
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_linux_amd64"
+sha256 = "1034e03564b3e5b5321646f9ce290cc4d3cdff0cf0e9b523d43f0db8b9a45c74"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_linux_amd64"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_macosx_amd64"
+sha256 = "6ecda2fe114ed9a32a9068047672fb8d37ef0b99dae3ddfe7107c33f1d22b2fa"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_macosx_amd64"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_macosx_arm"
+sha256 = "e7d50eafdbe8b1ce820b23ac1e818398d792a7ddf49c35504c09e3c79a26b953"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_macosx_arm"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_windows_amd64.exe"
+sha256 = "1a6411b4bfe6401a244a8262e705c469ed2fac760ee84229fa176cce3e4bfe55"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_windows_amd64.exe"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
