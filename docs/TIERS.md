@@ -19,6 +19,12 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 > for that with a first-run download. Enforced in code by `tiers.bundles_uv()`, which is the
 > single source of truth for both the bundler and the manifest's `fetch_uv` flag.
 > Background: `research/05` §4.9.
+>
+> A thick tier needing no uv *at all* — shipping an installed dependency tree instead of a
+> cache for uv to install from — was designed and costed on 2026-09-10 and **is not being
+> pursued**. The reasoning, the measurements, and the finding that a prebuilt *venv* cannot
+> be made to work cross-platform are in [`UV_FREE_THICK.md`](UV_FREE_THICK.md). Read that
+> before reopening the question.
 
 - **thin** — smallest artifact. On first run the launcher fetches the pinned uv release,
   then uv provisions Python + deps. The download is **one code path**: `puppy` (uses the

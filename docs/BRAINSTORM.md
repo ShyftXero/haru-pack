@@ -134,3 +134,22 @@ Linux**, and the **build-fuzzer** as a correctness story pyapp doesn't have.
 > tool in the Python-uv space has either — pyapp verifies nothing and accepts `http://`),
 > **Linux→Windows cross-compile including thick**, the **explicit tier ladder**, **PEP 723
 > ingestion**, and **licensing/expiry/machine binding**.
+
+## 5. Ideas that were costed and declined (so they stop resurfacing)
+
+Unlike the rest of this file, these were worked out far enough to decide against. Each has
+its reasoning written down somewhere durable; the point of listing them here is that this
+is the file people reach for when an idea feels new.
+
+- **UPX-packing the bundled `uv` binary.** Declined 2026-09-10. The size win is real but it
+  belongs to LZMA, not to packing, and it is obtainable without modifying a signed
+  third-party executable — packing destroys uv's Authenticode signature, matches no
+  publisher digest, trips AV packer heuristics, needs `paxctl -m` under hardened kernels,
+  breaks macOS arm64 codesigning, and pays decompression on *every* launch. Shipping the
+  payload *member* XZ-compressed got 55.59 MB → 14.17 MB (vs 22.25 MB deflated) with the
+  staged binary byte-identical to the release. Implemented instead: `INV-PAYLOAD-04`.
+- **A thick tier that ships no `uv` at all.** Declined 2026-09-10, with the design and
+  measurements kept in [`UV_FREE_THICK.md`](UV_FREE_THICK.md). The prize fell to ~14 MB of
+  exe once uv shipped compressed, and the obvious implementation — a prebuilt virtualenv —
+  cannot work cross-platform at all. The version that *can* work (a flat `uv pip install
+  --target` tree on `PYTHONPATH`) was validated, so read the doc rather than re-deriving it.
