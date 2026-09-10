@@ -177,6 +177,22 @@ def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path,
                    env=env, check=True, capture_output=True, text=True)
 
 
+def warm_cache_for_script(script: Path, py: Path, cache_dir: Path,
+                          sources: Sources | None = None) -> None:
+    """Stage a PEP 723 script's declared dependencies into the bundled uv cache.
+
+    `uv sync --script` resolves the inline metadata and downloads into UV_CACHE_DIR, which
+    ships inside the payload. Without this a `--thick` build of a script with dependencies
+    still reaches the network on first run — the tier's whole promise is that it does not.
+
+    The project path has always done this (`warm_cache_and_lock`); scripts were the gap.
+    """
+    env = dict(os.environ, UV_CACHE_DIR=str(cache_dir), UV_PYTHON=str(py),
+               UV_PYTHON_DOWNLOADS="never")
+    _run(["uv", "sync", "--script", str(script),
+          *(sources or Sources()).uv_index_args()], env=env)
+
+
 def run_bundle_step(step: dict, payload: Path, tmp_env: Path, app_dir: Path) -> None:
     """Run a declared build-time bundle step in the project's throwaway env. {into} in the
     step env expands to the absolute bundle dir; whatever the command writes there ships."""

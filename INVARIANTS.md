@@ -50,6 +50,46 @@ Those narrowings are recorded in the entries themselves rather than quietly appl
 
 ---
 
+## TIER — a tier's description is a promise about run time
+
+### INV-TIER-01
+Status: active
+Statement: A `--thick` build carries everything it needs to run, including a PEP 723
+script's inline dependencies; the resulting binary runs with no network access on a machine
+that has never seen it before.
+Actors: not an attacker — an operator shipping to an air-gapped machine, a locked-down
+enterprise host, or anywhere the first run happens without a network.
+Assets: the tier's meaning. `docs/TIERS.md` describes thick as "download NOTHING, fully
+offline"; a build that quietly needs the network makes every other statement about the tiers
+suspect.
+Red-path: Replace the `warm_cache_for_script(...)` call in `assemble_payload` with `pass`,
+build a thick binary from a PEP 723 script with a dependency, and run it with a pristine
+`XDG_CACHE_HOME` and `UV_OFFLINE=1`. Walked 2026-09-09: it failed with uv's *"Packages were
+unavailable because the network was disabled"*, and the payload was 1.7 MB smaller — the
+missing wheel.
+Source: Found 2026-09-09 while building the flex harness's offline check.
+`assemble_payload` warmed the dependency cache only under `if manifest.get("kind") ==
+"project" or steps`, so scripts got uv and an interpreter but not their dependencies. The
+build reported success; the tier's own description said the opposite.
+Note: **The pristine cache is the load-bearing part of any test of this.** With a warm
+`~/.cache/haru-pack` the staged tree is reused and an offline run succeeds regardless of what
+the payload contains — a vacuous green. `tools/flex-run.py --tier thick --offline-check`
+creates a fresh cache directory per package for exactly this reason.
+Note: Staging is automatic at thick rather than opt-in, because thick's contract already
+promises it; leaving it opt-in would mean the documented behaviour is wrong by default. It is
+announced on stdout, since it changes both what ships and how large the binary is.
+Note: What the offline check proves is bounded. It forces uv offline and points the proxy
+variables at a dead port, which blocks the dependency-fetch path. It is not a network
+namespace — this build host cannot create one — so it does not stop a package from opening a
+socket of its own. Do not read a green offline check as "this binary makes no network calls".
+Note: Cross-compiled thick builds take the `warm_cache_windows` path, which resolves wheels
+for the target platform without executing them. Script staging runs the target interpreter,
+so it is host-target only.
+Territory: src/haru_pack/build.py, src/haru_pack/bundle.py, src/haru_pack/discovery.py,
+tests/test_tiers_offline.py, tools/flex-run.py
+
+---
+
 ## FLEX — the harness that decides what haru-pack is tested against
 
 ### INV-FLEX-01

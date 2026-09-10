@@ -12,12 +12,40 @@ non-zero if anything came out other than expected.
 
 ## What it does
 
-For each package: write a PEP 723 script that imports it and does one small real thing,
-build that script with `haru-pack`, then **run the resulting binary** and require it to
-print `FLEX_OK`.
+For each package: build a tiny project that depends on it, whose `flexapp/__main__.py`
+imports it and does one small real thing, then **run the resulting binary** and require it
+to print `FLEX_OK`. The entrypoint is `python -m flexapp`, so stdout comes from a module
+that had to be importable inside the packaged environment.
 
 Running it is the point. A binary that builds and then dies on startup is a failure, and
 only executing it catches that.
+
+## Proving the payload carries its dependencies
+
+```sh
+python tools/flex-run.py --tier thick --offline-check
+```
+
+At the **default** tier the dependency is fetched on first run, so a green result proves the
+packaging path and nothing about what the binary contains. At `--thick` the payload is
+supposed to carry uv, the interpreter and every dependency.
+
+`--offline-check` runs the thick binary a second time with a **pristine cache directory**
+and uv forced offline. The pristine part is load-bearing: with a warm `~/.cache/haru-pack`
+the staged tree is reused and the run succeeds no matter what the payload holds. The summary
+column reads `carried` or `FETCHED`.
+
+What this does *not* prove: it forces uv offline and points the proxy variables at a dead
+port, which blocks the dependency-fetch path. It is not a network namespace, so it does not
+stop a package from opening a socket of its own. A green offline check means "the
+dependencies came from the payload", not "this binary makes no network calls".
+
+Measured here, `certifi` at each tier:
+
+| tier | size | offline |
+|---|---|---|
+| default | 23.2 MB | fetches deps on first run, by design |
+| thick | 59.7 MB | `carried` |
 
 ## Two lists, different questions
 

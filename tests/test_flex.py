@@ -193,20 +193,66 @@ def test_every_smoke_script_is_valid_python_and_signals_success(manifest):
 
 
 @pytest.mark.invariant("INV-FLEX-01")
-def test_generated_scripts_declare_their_dependency():
-    """The runner writes PEP 723 scripts; the dependency block is what makes uv install
-    the package under test at all."""
-    sys.path.insert(0, str(REPO / "tools"))
+def test_the_runner_builds_a_project_not_a_bare_script(tmp_path):
+    """A project, deliberately: only `kind == "project"` had its dependency cache warmed
+    into the payload at the thick tier, so a PEP 723 script would not have proved the
+    offline claim. (Scripts stage their deps too now — INV-TIER-01 — but the harness still
+    builds projects, because `python -m flexapp` is what gives controlled stdout.)"""
     import importlib.util
     spec = importlib.util.spec_from_file_location("flexrun", REPO / "tools" / "flex-run.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    s = mod.script_for({"name": "pyyaml", "import_name": "yaml", "python": "3.12",
-                        "smoke": "import yaml\nprint('FLEX_OK')"})
-    assert "# /// script" in s and 'dependencies = ["pyyaml"]' in s
-    assert s.rstrip().endswith("print('FLEX_OK')")
+    proj = mod.make_project(
+        {"name": "pyyaml", "import_name": "yaml", "python": "3.12",
+         "smoke": "import yaml\nprint('FLEX_OK')"}, tmp_path)
 
-    # no smoke -> import the IMPORT name, not the distribution name
-    s2 = mod.script_for({"name": "pyyaml", "import_name": "yaml"})
-    assert "import yaml as _m" in s2 and 'dependencies = ["pyyaml"]' in s2
+    pyproject = (proj / "pyproject.toml").read_text()
+    assert 'dependencies = ["pyyaml"]' in pyproject
+    assert 'name = "flexapp"' in pyproject
+
+    main = (proj / "flexapp" / "__main__.py").read_text()
+    assert "import yaml" in main and "FLEX_OK" in main
+    assert (proj / "flexapp" / "__init__.py").exists()
+
+    hp = (proj / "haru_pack.toml").read_text()
+    assert 'entrypoint = ["python", "-m", "flexapp"]' in hp, (
+        "the entrypoint must be a `python -m` module so stdout comes from something that "
+        "had to be importable inside the packaged environment"
+    )
+
+
+@pytest.mark.invariant("INV-FLEX-02")
+def test_declared_sharp_edges_reach_haru_pack_toml(tmp_path):
+    """Known-ahead-of-time bundle/post_install steps must be written into the project, or
+    the hard targets fail on exactly the thing they were chosen to exercise."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("flexrun", REPO / "tools" / "flex-run.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    proj = mod.make_project({
+        "name": "playwright", "import_name": "playwright", "python": "3.12",
+        "smoke": "print('FLEX_OK')",
+        "bundle": '[[bundle]]\n  run = ["playwright", "install", "firefox"]\n'
+                  '  into = "vendor/ms-playwright"',
+    }, tmp_path)
+    hp = (proj / "haru_pack.toml").read_text()
+    assert "[[bundle]]" in hp and "ms-playwright" in hp
+
+
+@pytest.mark.invariant("INV-FLEX-01")
+def test_a_package_with_its_own_dash_m_entrypoint_is_exercised(tmp_path):
+    """`module` in curation means the package ships its own `python -m`; run it too, so the
+    evidence includes stdout from the package's own entrypoint."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("flexrun", REPO / "tools" / "flex-run.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    body = mod.smoke_body({"name": "certifi", "import_name": "certifi",
+                           "module": "certifi", "smoke": "print('FLEX_OK')"})
+    assert "runpy.run_module('certifi'" in body
+    assert "except SystemExit" in body, (
+        "a module that exits normally would otherwise abort the harness's own script"
+    )

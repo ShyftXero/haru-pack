@@ -19,16 +19,23 @@ def _dot_python_version(d: Path) -> str:
     return _pyver_from_spec(f.read_text()) if f.exists() else ""
 
 def _pep723(script: Path) -> dict:
-    """Parse a PEP 723 `# /// script` block for requires-python."""
+    """Parse a PEP 723 `# /// script` block for requires-python and dependencies.
+
+    The dependency list matters for more than information: at the thick tier a script's
+    declared dependencies have to be staged into the payload, or `--thick` ships a binary
+    that still needs the network on first run (INV-TIER-01).
+    """
     txt = script.read_text()
     m = re.search(r"# /// script\s*(.*?)# ///", txt, re.S)
-    out = {}
+    out = {"dependencies": []}
     if m:
         body = "\n".join(l[2:] if l.startswith("# ") else l.lstrip("#")
                          for l in m.group(1).splitlines())
         try:
             meta = tomlio._toml.loads(body)
             out["python"] = _pyver_from_spec(meta.get("requires-python", ""))
+            deps = meta.get("dependencies") or []
+            out["dependencies"] = [d for d in deps if isinstance(d, str)]
         except Exception:
             pass
     return out

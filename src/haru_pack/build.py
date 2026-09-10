@@ -11,7 +11,8 @@ from .sources import Sources
 from .targets import Target
 from .entrypoints import resolve_entrypoint
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
-                     warm_cache_windows, run_bundle_step, run_bundle_steps_wine)
+                     warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
+                     warm_cache_for_script)
 
 class BuildError(RuntimeError): ...
 
@@ -48,12 +49,26 @@ def _resolve(project: Path, tier: str, python_cli: str,
              expires, geo, machine, user, embed_secret, encrypt: bool = False,
              entry_point: str = ""):
     """Discover + merge haru_pack.toml + CLI. Returns (manifest, enc, python_version)."""
-    disc = discovery.discover(project)
+    # The declaration is read FIRST. Discovery only has to succeed when nothing else says
+    # what to run: refusing to guess (INV-BUILD-03) must never become refusing to obey.
+    # This ordering was backwards, and the symptom was absurd — a project with an explicit
+    # `entrypoint` in haru_pack.toml was rejected with advice telling the operator to set
+    # `entrypoint` in haru_pack.toml.
     decl_dir = project if project.is_dir() else project.parent
     decl = {}
     p = decl_dir / "haru_pack.toml"
     if p.exists():
         decl = tomlio.load(p)
+    explicit_ep = entry_point or decl.get("entrypoint")
+    try:
+        disc = discovery.discover(project)
+    except discovery.AmbiguousProject as e:
+        if not explicit_ep:
+            raise
+        # Ambiguity is resolved: the operator said which one. Keep what the exception
+        # already worked out about the project so the rest of the merge is unchanged.
+        disc = {"kind": e.kind, "name": e.name, "app_subdir": "app",
+                "entrypoint": [], "python": e.python, "source": e.source or project}
     # --entry-point beats haru_pack.toml beats discovery. Accepts a script name, a
     # console-script name, or a `module:callable` object reference in the same spelling
     # [project.scripts] uses — resolved to argv here so the launcher never parses it.
@@ -67,6 +82,8 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "entrypoint": ep,
         "cwd_policy": decl.get("cwd_policy", "launch"),
         "verbose_uv": decl.get("verbose_uv", False),
+        # PEP 723 inline dependencies, so the thick tier can stage them (INV-TIER-01).
+        "script_dependencies": list(disc.get("dependencies") or []),
     }
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:
@@ -89,7 +106,8 @@ def _resolve(project: Path, tier: str, python_cli: str,
 
 def assemble_payload(source: Path, manifest: dict, tier: str, target,
                      python: str, workdir: Path, wine: bool = False,
-                     sources: Sources | None = None) -> Path:
+                     sources: Sources | None = None, eager_deps: bool = False,
+                     log=None) -> Path:
     sources = sources or Sources()
     tgt = target if isinstance(target, Target) else Target.parse(target)
     payload = workdir / "payload"
@@ -129,14 +147,39 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
                 if steps and wine:
                     run_bundle_steps_wine(steps, payload, py, app_dir)
             manifest["cache_dir"] = "vendor/cache"
+
+        # A PEP 723 script's dependencies live in its inline metadata, and until 2026-09-09
+        # nothing staged them: `kind == "project"` got its cache warmed and `kind ==
+        # "script"` did not, so `--thick` produced a binary that still hit the network on
+        # first run. The tier's contract is "download NOTHING", so at thick this is not
+        # optional and not silent (INV-TIER-01).
+        if manifest.get("kind") == "script" and target_is_host(tgt):
+            deps = manifest.get("script_dependencies") or []
+            if deps:
+                cache = vendor / "cache"; cache.mkdir(parents=True, exist_ok=True)
+                say = log or (lambda _m: None)
+                say(f"staging {len(deps)} script dependency/ies into the payload: "
+                    + ", ".join(deps[:6]) + (" …" if len(deps) > 6 else ""))
+                warm_cache_for_script(Path(source), py, cache, sources=sources)
+                manifest["cache_dir"] = "vendor/cache"
+    manifest.pop("script_dependencies", None)   # build-time only; not for the launcher
     tomlio.dump(manifest, payload / "manifest.toml")
     return payload
+
+def target_is_host(tgt) -> bool:
+    """Cache warming runs the TARGET's interpreter, so it only works building for this box.
+
+    Cross-compiled thick builds use warm_cache_windows, which resolves wheels for the
+    target platform without executing them.
+    """
+    return tgt.is_host
+
 
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           machine: str = "", user: str = "", embed_secret: bool = False,
           python: str = "", wine: bool = False, encrypt: bool = False,
-          entry_point: str = "") -> dict:
+          entry_point: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -154,7 +197,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         payload_dir = assemble_payload(source, manifest, tier, tgt, pyver, tdp / "asm",
-                                       wine, sources=sources)
+                                       wine, sources=sources, log=log)
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:
