@@ -1,0 +1,269 @@
+# flex harness — hand-written curation. NOT generated; edit this file directly.
+#
+# Two lists, and they answer different questions.
+#
+#   top25       Breadth. The most-downloaded packages on PyPI, in rank order from
+#               flex/sources.toml. The public number. Answers "does haru-pack handle
+#               ordinary dependencies", and the honest answer is that most of these are
+#               pure-Python wheels that were never going to be hard.
+#
+#   hard_targets  The real proof. Packages whose *shape* breaks packaging tools: browser
+#               binaries, post-install downloads, huge native wheels, system libraries.
+#               These are the ones worth failing on. Keyed by the same names as
+#               src/haru_pack/scaffold.py's KNOWN table, and a test fails if the two
+#               drift apart.
+#
+# `smoke` is the body of a tiny program that imports the package and does the smallest
+# real thing with it, then prints FLEX_OK. It must:
+#   * work offline once the package is installed (no network at run time),
+#   * need no credentials, no display, no files on disk,
+#   * finish in a second or two,
+#   * print FLEX_OK exactly once on success.
+#
+# A package with no `smoke` is imported and its version printed — weaker, but honest, and
+# better than pretending a bare import exercises anything.
+
+schema_version = 1
+
+[defaults]
+tier = "default"          # bundle uv, fetch Python + deps on first run
+python = "3.12"
+
+# ---------------------------------------------------------------------------
+# Packages the ranking will pick up. Only entries needing something non-default
+# appear here; the rest get an import-and-version smoke test.
+# ---------------------------------------------------------------------------
+
+[package.boto3]
+smoke = """
+import boto3
+s = boto3.session.Session(region_name="us-east-1")
+assert s.region_name == "us-east-1"
+print("FLEX_OK")
+"""
+why = "AWS SDK. Constructs a session offline; no credentials, no calls."
+
+[package.requests]
+smoke = """
+import requests
+r = requests.Request("GET", "https://example.invalid/x", params={"a": 1}).prepare()
+assert r.url.endswith("?a=1")
+print("FLEX_OK")
+"""
+why = "Prepares a request without sending it — exercises urllib3 + certifi + idna."
+
+[package.cryptography]
+smoke = """
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import os
+k = AESGCM.generate_key(bit_length=256)
+ct = AESGCM(k).encrypt(os.urandom(12), b"hi", None)
+assert len(ct) == 18
+print("FLEX_OK")
+"""
+why = "Native wheel with a Rust extension. haru-pack itself depends on it."
+
+[package.numpy]
+smoke = """
+import numpy as np
+assert float(np.arange(10).sum()) == 45.0
+print("FLEX_OK")
+"""
+why = "Large native wheel; the common case for scientific projects."
+
+[package.pydantic]
+smoke = """
+import pydantic
+class M(pydantic.BaseModel):
+    x: int
+assert M(x="3").x == 3
+print("FLEX_OK")
+"""
+why = "pydantic-core is a compiled Rust extension."
+
+[package.pyyaml]
+import_name = "yaml"
+smoke = """
+import yaml
+assert yaml.safe_load("a: 1")["a"] == 1
+print("FLEX_OK")
+"""
+why = "Import name differs from the distribution name — the mapping problem, concretely."
+
+[package.click]
+smoke = """
+import click
+@click.command()
+def cli(): pass
+assert cli.name == "cli"
+print("FLEX_OK")
+"""
+
+[package.pytest]
+smoke = """
+import pytest
+assert hasattr(pytest, "raises")
+print("FLEX_OK")
+"""
+why = "A console script as well as a library."
+
+[package.pygments]
+import_name = "pygments"
+smoke = """
+from pygments import highlight
+from pygments.lexers import PythonLexer
+from pygments.formatters import NullFormatter
+assert "def" in highlight("def f(): pass", PythonLexer(), NullFormatter())
+print("FLEX_OK")
+"""
+
+[package.python-dateutil]
+import_name = "dateutil"
+smoke = """
+from dateutil import parser
+assert parser.parse("2026-09-09").year == 2026
+print("FLEX_OK")
+"""
+why = "Another import-name/distribution-name mismatch."
+
+[package.charset-normalizer]
+import_name = "charset_normalizer"
+
+[package.typing-extensions]
+import_name = "typing_extensions"
+
+[package.annotated-types]
+import_name = "annotated_types"
+
+[package.pydantic-core]
+import_name = "pydantic_core"
+
+[package.typing-inspection]
+import_name = "typing_inspection"
+
+[package.setuptools]
+skip = true
+skip_reason = """
+Packaging machinery, not an application dependency. Bundling setuptools into a launcher
+tests the packaging of the packager and tells us nothing about haru-pack.
+"""
+
+[package.pluggy]
+why = "pytest's plugin system; pure Python, trivially packable."
+
+[package.iniconfig]
+[package.pycparser]
+[package.six]
+[package.idna]
+[package.certifi]
+[package.urllib3]
+[package.packaging]
+[package.attrs]
+[package.h11]
+[package.anyio]
+[package.cffi]
+[package.botocore]
+[package.aiobotocore]
+
+# ---------------------------------------------------------------------------
+# hard_targets — where a packaging tool earns its keep.
+#
+# `known` must match a key in scaffold.py's KNOWN table. tests/test_flex.py fails if a
+# name here is absent there, or if KNOWN grows an entry nobody put in this list: the two
+# are the same knowledge written down twice, and they must not drift.
+# ---------------------------------------------------------------------------
+
+[hard.playwright]
+known = "playwright"
+tier = "thick"
+corner = "Ships browser binaries separately from the wheel, per OS, via `playwright install`."
+smoke = """
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.firefox.launch()
+    page = b.new_page()
+    page.set_content("<h1>flex</h1>")
+    assert page.inner_text("h1") == "flex"
+    b.close()
+print("FLEX_OK")
+"""
+expect = "bundle step; browser must be baked in and found via PLAYWRIGHT_BROWSERS_PATH"
+
+[hard.spacy]
+known = "spacy"
+tier = "thick"
+corner = "Language models are downloaded, not shipped in the wheel."
+smoke = """
+import spacy
+nlp = spacy.blank("en")
+assert len(nlp("a b c")) == 3
+print("FLEX_OK")
+"""
+expect = "blank pipeline needs no model; a real model needs a post_install step"
+
+[hard.nltk]
+known = "nltk"
+tier = "thick"
+corner = "Corpora download at runtime into NLTK_DATA."
+smoke = """
+import nltk
+assert nltk.__version__
+print("FLEX_OK")
+"""
+expect = "import alone is safe; tokenizers need a downloaded corpus"
+
+[hard.tiktoken]
+known = "tiktoken"
+tier = "thick"
+corner = "Downloads BPE vocabulary files on first use and caches them."
+smoke = """
+import tiktoken
+assert tiktoken.__version__
+print("FLEX_OK")
+"""
+expect = "encoding_for_model() would need a warmed cache — that is the post_install step"
+
+[hard.transformers]
+known = "transformers"
+tier = "thick"
+corner = "Model weights download on first use; multi-GB."
+smoke = """
+import transformers
+assert transformers.__version__
+print("FLEX_OK")
+"""
+expect = "import only; pre-fetching a model is a post_install step"
+
+[hard.torch]
+known = "torch"
+tier = "thick"
+corner = "Very large native wheels; CPU vs CUDA index selection at build time."
+smoke = """
+import torch
+assert torch.tensor([1, 2, 3]).sum().item() == 6
+print("FLEX_OK")
+"""
+expect = "the size stress test — expect a payload in the hundreds of MB"
+
+[hard.selenium]
+known = "selenium"
+tier = "thick"
+corner = "Selenium Manager fetches browser drivers at runtime — needs network on first use."
+smoke = """
+import selenium
+assert selenium.__version__
+print("FLEX_OK")
+"""
+expect = "import only; starting a driver would reach the network"
+
+[hard.weasyprint]
+known = "weasyprint"
+tier = "thick"
+corner = "Needs system libraries (pango, cairo) that pip cannot bundle."
+smoke = """
+import weasyprint
+assert weasyprint.__version__
+print("FLEX_OK")
+"""
+expect = "EXPECTED TO FAIL on a host without pango/cairo — that is the finding, not a bug"
+expect_failure = true

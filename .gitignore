@@ -23,3 +23,10 @@ __pycache__/
 
 # session worktrees / local
 .claude/
+
+# flex harness: fetched upstream data and per-package build output
+flex/snapshots/
+flex/out/
+
+# busybody chaos-run artifacts
+busybody/out/

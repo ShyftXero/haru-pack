@@ -50,6 +50,57 @@ Those narrowings are recorded in the entries themselves rather than quietly appl
 
 ---
 
+## FLEX — the harness that decides what haru-pack is tested against
+
+### INV-FLEX-01
+Status: active
+Statement: `flex/packages.toml` is a pure function of two committed files —
+`flex/sources.toml` and `flex/curation.toml` — regenerable offline and byte-identical every
+time; the raw upstream snapshot it derives from is not required to reproduce it.
+Actors: a maintainer six months from now asking "why is this package in the list"; anyone
+auditing what the tool was actually tested against.
+Assets: the meaning of a green flex run. A matrix nobody can reproduce is a matrix nobody
+can reason about, and "we test the top 25" becomes a claim rather than a fact.
+Red-path: Make `tools/gen-package-manifest.py` fetch the ranking itself instead of reading
+the committed extract, or hand-edit `flex/packages.toml`. `--check` regenerates from the
+inputs and compares; the claiming tests go red. An import-level AST check also fails if the
+generator grows a dependency on the network or the clock.
+Source: Added 2026-09-09 with the flex harness. The constraint came first: artifacts must
+carry their provenance and regenerate deterministically, on the assumption that whoever
+maintains this later has no AI and possibly no network.
+Note: Fetching is deliberately a SEPARATE tool (`tools/fetch-top-pypi.py`). The ranking
+changes monthly, so a generator that fetched would produce a different file from the same
+command — reproducible-with-provenance, not deterministic-from-nothing. Refreshing produces
+a reviewable diff instead of silent drift.
+Note: The raw snapshot is gitignored; the committed extract is names in rank order, without
+download counts, because counts change daily and would churn the file without changing which
+packages are tested. The snapshot's sha256 is recorded so a refetch can be compared.
+Territory: flex/, tools/fetch-top-pypi.py, tools/gen-package-manifest.py, tests/test_flex.py
+
+### INV-FLEX-02
+Status: active
+Statement: Every package `scaffold.KNOWN` claims to handle specially appears as a flex hard
+target, and every hard target names a real `KNOWN` entry; each states the packaging corner it
+exercises.
+Actors: a maintainer adding support for a package with an awkward install shape.
+Assets: the honesty of haru-pack's "we handle this" list. `KNOWN` is what the tool advertises
+it can special-case; the hard targets are what proves it. Two copies of the same knowledge
+that drift apart is how a tool ends up claiming support it no longer has.
+Red-path: Add an entry to `scaffold.KNOWN` without adding a matching hard target (or the
+reverse). The set-comparison test names the offender in both directions.
+Source: Added 2026-09-09. The top-25 list is a breadth check and mostly pure-Python wheels;
+the hard targets — browser binaries, post-install downloads, giant native wheels, system
+libraries — are where a packaging tool earns its keep.
+Note: `weasyprint` is marked `expect_failure`: it needs pango and cairo, which pip cannot
+bundle. Failing is the correct result and is recorded as such, so a known limitation does not
+read as a regression — and so an unexpected PASS becomes visible, which is the interesting
+direction.
+Note: These tests do not build anything. `tools/flex-run.py` does that, and it needs a
+toolchain and several minutes; the invariants here are about the LIST, not the builds.
+Territory: flex/curation.toml, src/haru_pack/scaffold.py, tests/test_flex.py
+
+---
+
 ## BUILD — the build pipeline reports what it actually did
 
 ### INV-BUILD-01
