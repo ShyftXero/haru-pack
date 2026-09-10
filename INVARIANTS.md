@@ -88,6 +88,31 @@ so it is host-target only.
 Territory: src/haru_pack/build.py, src/haru_pack/bundle.py, src/haru_pack/discovery.py,
 tests/test_tiers_offline.py, tools/flex-run.py
 
+### INV-TIER-02
+Status: active
+Statement: A build that combines `post_install` steps with `--thick` says so loudly, because
+the two are contradictory: `post_install` means "fetch and set up on the target, on first
+run", and thick sets `UV_OFFLINE=1` and promises to download nothing.
+Actors: an operator following haru-pack's own advice. `scaffold.KNOWN` tells you to declare a
+`post_install` step for spacy, nltk, transformers and tiktoken; nothing warned that doing so
+and then building thick produces a binary that fails on the target.
+Assets: the operator's time, and their trust in the tool's advice. The failure lands on first
+run, on the target machine, after the build reported success.
+Red-path: Delete the `tier == "thick" and manifest.get("post_install")` warning from
+`assemble_payload`. The claiming test builds a thick project with a post_install step and
+requires the warning; it goes red.
+Source: Measured 2026-09-09 by the flex hard-target run — the first time these were built.
+`spacy` FAILED on the first run of its thick binary: its documented post_install step is
+`python -m spacy download en_core_web_sm`, and uv refused the download the tier had disabled.
+`nltk` passed with a network and then FAILED the offline check. Both were configured exactly
+as `scaffold.KNOWN` recommends.
+Note: A warning, not a refusal. haru-pack cannot tell whether a given step needs the network —
+`flask db upgrade` does not, `spacy download` does — and refusing would block the legitimate
+cases. The fix for a downloading step is a `[[bundle]]` step, which runs at build time and
+ships its output in the payload; that is what playwright does, and playwright passed thick +
+offline at 225 MB with firefox bundled.
+Territory: src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_tiers_offline.py
+
 ---
 
 ## FLEX — the harness that decides what haru-pack is tested against

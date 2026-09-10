@@ -127,6 +127,31 @@ def test_top_n_matches_the_ranking_order(manifest):
         list(range(1, len(got) + 1))
 
 
+@pytest.mark.invariant("INV-TIER-02")
+def test_no_hard_target_pairs_a_real_post_install_step_with_thick(manifest):
+    """post_install means "fetch on first run"; thick sets UV_OFFLINE=1 and promises to
+    download nothing. Pairing them tests a combination haru-pack now warns against.
+
+    Measured 2026-09-09, the first time the hard targets were built: spacy failed on the
+    FIRST run at thick (uv refused the download the tier had disabled) and nltk failed the
+    offline check. Both were configured exactly as scaffold.KNOWN recommends — which is
+    what made it a finding about haru-pack rather than about the packages.
+
+    Only a REAL step counts. Some KNOWN entries carry a commented placeholder
+    ("# warm the cache in a post_install step"), which declares nothing.
+    """
+    for p in manifest["package"]:
+        if p["list"] != "hard_targets" or p.get("tier") != "thick":
+            continue
+        block = p.get("post_install", "")
+        if "[[post_install]]" in block:
+            pytest.fail(
+                f"{p['name']} declares a real post_install step and is tested at thick, "
+                f"which sets UV_OFFLINE=1 — the step fails on the target (INV-TIER-02). "
+                f"Test it at the default tier, or convert it to a [[bundle]] step."
+            )
+
+
 @pytest.mark.invariant("INV-FLEX-02")
 def test_hard_targets_match_the_scaffold_known_table(curation):
     """Red-path: add a package to scaffold.KNOWN without adding it to flex/curation.toml.
@@ -159,14 +184,25 @@ def test_every_hard_target_says_what_corner_it_exercises(manifest):
 
 
 @pytest.mark.invariant("INV-FLEX-02")
-def test_expected_failures_are_declared_not_discovered(manifest):
-    """weasyprint needs system libraries pip cannot bundle. That it fails is the FINDING.
-    Marking it expected keeps a known limitation from reading as a regression — and makes
-    an unexpected PASS visible, which is the interesting direction."""
-    xfail = [p["name"] for p in manifest["package"] if p.get("expect_failure")]
-    assert "weasyprint" in xfail, (
-        "weasyprint is no longer marked expect_failure; if it now packs cleanly that is a "
-        "real result worth investigating, not a silent edit"
+def test_host_dependent_targets_say_so(manifest):
+    """weasyprint was marked expect_failure and then XPASSed on 2026-09-09 — because this
+    build host has pango and cairo, AND because the smoke test only imported the module,
+    which never touches them.
+
+    Both causes were fixed rather than the mark being flipped: the smoke now renders a real
+    PDF, and the expectation records that the outcome is a property of the HOST, which the
+    harness cannot settle from here. An expectation that encodes a guess about someone
+    else's machine is worse than no expectation.
+    """
+    w = [p for p in manifest["package"] if p["name"] == "weasyprint"]
+    assert w, "weasyprint left the hard targets"
+    w = w[0]
+    assert "write_pdf" in w.get("smoke", ""), (
+        "the weasyprint smoke does not render; `import weasyprint` alone passes on a host "
+        "that could never produce a PDF"
+    )
+    assert "host" in w.get("expect", "").lower(), (
+        "the expectation does not record that this outcome depends on the build host"
     )
 
 

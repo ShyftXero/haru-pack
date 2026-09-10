@@ -191,7 +191,11 @@ expect = "bundle step; browser must be baked in and found via PLAYWRIGHT_BROWSER
 
 [hard.spacy]
 known = "spacy"
-tier = "thick"
+# default, NOT thick. Its documented handling is a post_install step, and post_install is
+# definitionally "fetch on first run" — which thick forbids (INV-TIER-02). Measured
+# 2026-09-09: at thick this failed on the FIRST run, uv refusing the download the tier had
+# disabled. Testing it at default tests the advice in the tier the advice is for.
+tier = "default"
 corner = "Language models are downloaded, not shipped in the wheel."
 smoke = """
 import spacy
@@ -199,11 +203,13 @@ nlp = spacy.blank("en")
 assert len(nlp("a b c")) == 3
 print("FLEX_OK")
 """
-expect = "blank pipeline needs no model; a real model needs a post_install step"
+expect = "blank pipeline needs no model; the post_install model download needs network"
 
 [hard.nltk]
 known = "nltk"
-tier = "thick"
+# default, for the same reason as spacy (INV-TIER-02). At thick it passed with a network and
+# then failed the offline check — its corpora download at first run, by design.
+tier = "default"
 corner = "Corpora download at runtime into NLTK_DATA."
 smoke = """
 import nltk
@@ -262,8 +268,18 @@ tier = "thick"
 corner = "Needs system libraries (pango, cairo) that pip cannot bundle."
 smoke = """
 import weasyprint
-assert weasyprint.__version__
+# Render for real. `import weasyprint` alone does not touch pango/cairo, so it passes on a
+# host that could never actually produce a PDF — which is exactly what happened on
+# 2026-09-09, when this was marked expect_failure and XPASSed on a build host that has the
+# system libraries installed.
+pdf = weasyprint.HTML(string="<h1>flex</h1>").write_pdf()
+assert pdf[:4] == b"%PDF", pdf[:16]
 print("FLEX_OK")
 """
-expect = "EXPECTED TO FAIL on a host without pango/cairo — that is the finding, not a bug"
-expect_failure = true
+expect = """
+Host-dependent, and the harness CANNOT settle it from here. weasyprint needs pango and cairo
+on the machine that RUNS the binary; pip cannot bundle them and neither can haru-pack. A pass
+here means this build host has them, not that the binary is portable. Deliberately not marked
+expect_failure any more: it passed on 2026-09-09 and pretending otherwise would be recording
+a result we did not get.
+"""

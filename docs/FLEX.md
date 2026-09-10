@@ -139,3 +139,47 @@ imports no network or clock module, that the hard targets and `scaffold.py`'s `K
 have not drifted apart, and that every smoke script parses and signals success.
 
 See `INV-FLEX-01` and `INV-FLEX-02` in [INVARIANTS.md](../INVARIANTS.md).
+
+## First full hard-target run — 2026-09-09
+
+This box: linux-x86_64, all thick unless noted, `--offline-check`.
+
+| package | tier | verdict | size | build | run | offline |
+|---|---|---|---|---|---|---|
+| playwright | thick | ok | 224.8 MB | 126 s | 15.7 s | carried |
+| torch | thick | ok | **3072 MB** | 669 s | 78.8 s | carried |
+| transformers | thick | ok | 105.7 MB | 63 s | 9.2 s | carried |
+| selenium | thick | ok | 73.1 MB | 48 s | 3.5 s | carried |
+| tiktoken | thick | ok | 63.8 MB | 50 s | 3.4 s | carried |
+| weasyprint | thick | XPASS | 78.3 MB | 50 s | 6.9 s | carried |
+| nltk | thick | FAIL | 64.0 MB | 46 s | 6.8 s | **FETCHED** |
+| spacy | thick | FAIL | 142.9 MB | 93 s | 11.0 s | — |
+
+**playwright is the headline pass.** Firefox baked in by a `[[bundle]]` step, launched a
+real browser, rendered, and did it from a pristine cache with uv offline. 225 MB.
+
+**torch at 3 GB** builds in 11 minutes and runs offline. The size stress case works.
+
+### The two failures were findings, not bugs in the packages
+
+`spacy` failed on the **first** run; `nltk` passed with a network and failed the offline
+check. Both were configured exactly as `scaffold.KNOWN` recommends — a `post_install` step.
+
+That combination is contradictory: `post_install` means "fetch on the target, first run",
+and thick sets `UV_OFFLINE=1` and promises to download nothing. haru-pack accepted it
+silently. It now warns and names the steps (`INV-TIER-02`), and these two are tested at the
+default tier — the tier their documented handling is actually for.
+
+The fix for a step that downloads is a `[[bundle]]` step, which runs at build time and ships
+its output. That is precisely what playwright does, and why playwright passes thick.
+
+### The XPASS was a weak test, not a capability
+
+`weasyprint` was marked `expect_failure` because it needs pango and cairo, which pip cannot
+bundle. It passed. Two reasons, both worth naming: this build host **has** those libraries,
+and the smoke test only did `import weasyprint`, which never touches them.
+
+Both were fixed rather than the mark being flipped: the smoke now renders a real PDF and
+asserts the `%PDF` header, and the expectation records that the outcome depends on the host
+running the binary — something this harness cannot settle from here. A pass means *this*
+machine has the libraries, not that the binary is portable.

@@ -300,7 +300,7 @@ name = "nltk"
 list = "hard_targets"
 known = "nltk"
 import_name = "nltk"
-tier = "thick"
+tier = "default"
 python = "3.12"
 corner = "Corpora download at runtime into NLTK_DATA."
 expect = "import alone is safe; tokenizers need a downloaded corpus"
@@ -330,10 +330,6 @@ bundle = """
   [bundle.env]
     PLAYWRIGHT_BROWSERS_PATH = "{into}"
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
-"""
-post_install = """
-[[post_install]]
-  run = ["playwright", "install", "firefox"]
 """
 smoke = """
 from playwright.sync_api import sync_playwright
@@ -366,10 +362,10 @@ name = "spacy"
 list = "hard_targets"
 known = "spacy"
 import_name = "spacy"
-tier = "thick"
+tier = "default"
 python = "3.12"
 corner = "Language models are downloaded, not shipped in the wheel."
-expect = "blank pipeline needs no model; a real model needs a post_install step"
+expect = "blank pipeline needs no model; the post_install model download needs network"
 post_install = """
 [[post_install]]
   run = ["python", "-m", "spacy", "download", "en_core_web_sm"]
@@ -390,9 +386,7 @@ tier = "thick"
 python = "3.12"
 corner = "Downloads BPE vocabulary files on first use and caches them."
 expect = "encoding_for_model() would need a warmed cache — that is the post_install step"
-post_install = """
-# warm the tiktoken cache in a post_install step
-"""
+steps_note = "scaffold.KNOWN offers only a post_install step for this package, which thick forbids (INV-TIER-02); nothing was declared"
 smoke = """
 import tiktoken
 assert tiktoken.__version__
@@ -423,9 +417,7 @@ tier = "thick"
 python = "3.12"
 corner = "Model weights download on first use; multi-GB."
 expect = "import only; pre-fetching a model is a post_install step"
-post_install = """
-# pre-fetch your model in a post_install step to stay offline
-"""
+steps_note = "scaffold.KNOWN offers only a post_install step for this package, which thick forbids (INV-TIER-02); nothing was declared"
 smoke = """
 import transformers
 assert transformers.__version__
@@ -440,10 +432,14 @@ import_name = "weasyprint"
 tier = "thick"
 python = "3.12"
 corner = "Needs system libraries (pango, cairo) that pip cannot bundle."
-expect = "EXPECTED TO FAIL on a host without pango/cairo — that is the finding, not a bug"
-expect_failure = true
+expect = "Host-dependent, and the harness CANNOT settle it from here. weasyprint needs pango and cairo on the machine that RUNS the binary; pip cannot bundle them and neither can haru-pack. A pass here means this build host has them, not that the binary is portable. Deliberately not marked expect_failure any more: it passed on 2026-09-09 and pretending otherwise would be recording a result we did not get."
 smoke = """
 import weasyprint
-assert weasyprint.__version__
+# Render for real. `import weasyprint` alone does not touch pango/cairo, so it passes on a
+# host that could never actually produce a PDF — which is exactly what happened on
+# 2026-09-09, when this was marked expect_failure and XPASSed on a build host that has the
+# system libraries installed.
+pdf = weasyprint.HTML(string="<h1>flex</h1>").write_pdf()
+assert pdf[:4] == b"%PDF", pdf[:16]
 print("FLEX_OK")
 """

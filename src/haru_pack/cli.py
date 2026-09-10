@@ -78,7 +78,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          expires=expires, geo=[g for g in geo.split(",") if g],
                          machine=machine, user=user, embed_secret=embed_secret, python=python,
                          wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
-                         entry_point=entry_point)
+                         entry_point=entry_point,
+                         log=lambda m: typer.secho(f"haru-pack: {m}",
+                                                   fg="yellow" if "WARNING" in m else "cyan"))
     except AmbiguousProject as e:
         _report_ambiguity(project, e)
         raise typer.Exit(2)

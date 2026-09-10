@@ -162,6 +162,27 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
                     + ", ".join(deps[:6]) + (" …" if len(deps) > 6 else ""))
                 warm_cache_for_script(Path(source), py, cache, sources=sources)
                 manifest["cache_dir"] = "vendor/cache"
+    # INV-TIER-02. `post_install` means "fetch/setup on the target, on first run"; thick
+    # means "download NOTHING, fully offline" and sets UV_OFFLINE=1 in the launcher. Those
+    # are contradictory, and haru-pack used to accept the combination silently. It cannot
+    # know whether a given step needs the network — `flask db upgrade` does not, `spacy
+    # download` does — so it warns rather than refusing, and names the steps.
+    #
+    # Measured 2026-09-09 on the flex hard targets: spacy's documented post_install failed
+    # on the FIRST run of a thick binary (uv refused the download the tier had disabled),
+    # and nltk's succeeded with network but failed the offline check. Both are the
+    # documented advice from scaffold.KNOWN, combined with a tier that forbids it.
+    if tier == "thick" and manifest.get("post_install"):
+        say = log or (lambda _m: None)
+        steps = manifest["post_install"]
+        say(f"WARNING: {len(steps)} post_install step(s) with --thick. thick sets "
+            f"UV_OFFLINE=1, so any step that downloads will FAIL on the target. Move the "
+            f"work to a [[bundle]] step (runs at build time, output ships in the payload) "
+            f"or use --tier default.")
+        for st in steps:
+            run = st.get("run") if isinstance(st, dict) else st
+            say(f"  post_install: {' '.join(run) if isinstance(run, list) else run}")
+
     manifest.pop("script_dependencies", None)   # build-time only; not for the launcher
     tomlio.dump(manifest, payload / "manifest.toml")
     return payload

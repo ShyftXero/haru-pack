@@ -136,14 +136,23 @@ def build(sources: dict, curation: dict, top_n: int) -> str:
             L.append(f"expect = {_q(' '.join(h['expect'].split()))}")
         if h.get("expect_failure"):
             L.append("expect_failure = true")
-        # The bundle / post_install steps come from scaffold.KNOWN rather than being
-        # restated here. That table is what haru-pack tells users to declare for these
-        # packages, so the harness must test the same text — a hard target configured
-        # differently from the advice would prove the advice works when it does not.
+        # Steps come from scaffold.KNOWN rather than being restated here: that table is the
+        # text haru-pack tells users to declare, so the harness must test the same text.
+        #
+        # They are ALTERNATIVES, not both. KNOWN offers playwright a `bundle` step (runs at
+        # build time, output ships) and a `post_install` step (runs on the target, first
+        # run) as two ways to solve the same problem. Emitting both would ship a thick
+        # binary carrying a post_install step that thick's own UV_OFFLINE=1 forbids
+        # (INV-TIER-02). Pick by tier: bundle for thick, post_install otherwise.
         k = scaffold.KNOWN.get(h.get("known", name), {})
-        for block in ("bundle", "post_install"):
-            if k.get(block):
-                L.append(f"{block} = {_ml(k[block])}")
+        tier = h.get("tier", "thick")
+        block = "bundle" if tier == "thick" else "post_install"
+        if k.get(block):
+            L.append(f"{block} = {_ml(k[block])}")
+        elif tier == "thick" and k.get("post_install"):
+            # No bundle alternative exists; say so rather than silently shipping nothing.
+            L.append('steps_note = "scaffold.KNOWN offers only a post_install step for this '
+                     'package, which thick forbids (INV-TIER-02); nothing was declared"')
         if h.get("smoke"):
             L.append(f"smoke = {_ml(h['smoke'])}")
         L.append("")
