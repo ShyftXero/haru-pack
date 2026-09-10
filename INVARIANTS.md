@@ -239,6 +239,48 @@ Territory: tools/busybody_analyze.py, tools/busybody.py, tests/test_busybody_led
 
 ---
 
+### INV-CHAOS-05
+Status: active
+Statement: The harness's own environment failing is never reported as a product finding. A
+run that exhausts scratch space aborts, says the box failed, and writes nothing to the
+findings ledger. And scratch is freed per case, so a long sweep's live footprint stays at
+one case's worth rather than the whole sweep's.
+Actors: whoever reads the ledger. Also whoever runs a 900-case sweep on a machine with a
+quota they have never had reason to think about.
+Assets: the credibility of every finding. A ledger holding 470 rows that are all one disk
+quota wearing thirty persona costumes is worse than an empty ledger — it cannot be triaged,
+and it teaches the reader that busybody findings are noise.
+Red-path: Delete the `infra_failure_reason` check from the case loop and a sweep that runs
+out of room scores the box's failure as chaos findings across every remaining fixture.
+Delete the `reaper.release(work)` call and the sweep holds every work directory until the
+end — about 100 GB for 37 cases x 25 fixtures at the thick tier. Change `if bad and not
+aborted` back to `if bad` and a poisoned run pollutes the ledger permanently. Each has a
+claiming test.
+Source: 2026-09-10, from a real 925-run sweep. It died at case 168 with `errno 122 Disk
+quota exceeded` and reported 470 findings. Three separate defects in one event:
+
+  1. Work dirs were tracked and reaped only in the run-level `finally`. That was itself a
+     fix for an earlier leak-on-raise bug, and it traded a small leak for a large one:
+     168 cases x ~145 MB is 24 GiB, which is exactly the user quota on this box's /tmp.
+  2. The quota failure was classified per case, so one environment failure became thirty
+     different "findings" per fixture.
+  3. `--analyze` reported 30 of 37 cases as having DIVERGED by fixture. They had not. The
+     five fixtures that passed everything were the five built before the quota ran out.
+
+Note: The divergence report was what made the run readable at all — the same five fixtures
+passing every single case is not a pattern any package property produces. The tool found its
+own run invalid, which is the point of having it. It should not have needed to.
+Note: `df` is not the ceiling. This box reported 31 GiB free on /tmp and refused the next
+write at 24 GiB, because the mount carries `usrquota` and a per-user quota is invisible to
+`statvfs`. The harness now prints the mount's quota options at the start of a sweep, and
+`--work-root` moves scratch elsewhere.
+Note: `--scratch-cap-gb` (default 8) aborts on a leak at a number the operator chose rather
+than at whatever the filesystem happens to allow.
+Territory: tools/busybody.py, tools/busybody_ledger.py, tools/busybody_analyze.py,
+tests/test_busybody_ledger.py
+
+---
+
 ## FLEX — the harness that decides what haru-pack is tested against
 
 ### INV-FLEX-01

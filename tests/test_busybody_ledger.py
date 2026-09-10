@@ -15,10 +15,12 @@ partial findings as a completed verdict is the same lie facing the other way."
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
 import time
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -479,3 +481,169 @@ def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
     assert "fingerprints against 1 case(s)" in text, (
         "the fingerprint/outcome gap should be explained, not hidden"
     )
+
+
+def _module_code(path):
+    """A module's source with every comment and docstring removed.
+
+    Source-shape assertions are only as good as what they read. A comment that MENTIONS a
+    guard makes a "the guard is present" assertion pass with the guard deleted — which is
+    the exact trap tests/test_sources.py documents. `ast.unparse` drops comments, and the
+    docstrings are stripped explicitly.
+    """
+    tree = ast.parse(pathlib.Path(path).read_text())
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            node.body = body[1:]
+    return ast.unparse(tree)
+
+
+# ------------------------------------------------- the box failing is not a product finding
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_a_disk_quota_failure_is_recognised_as_the_environment():
+    """No persona imposes capacity limits.
+
+    `hoarder` starves file descriptors, address space and TMPDIR writability — never disk
+    space. So errno 122 or 28 coming out of a case means the box gave up, and every result
+    after it is the same failure in a different costume.
+    """
+    bb = _load_busybody()
+    assert bb.infra_failure_reason(
+        {"stderr": "haru-pack: IOError: errno: 122 `Disk quota exceeded`"})
+    assert bb.infra_failure_reason({"stderr": "OSError: [Errno 28] No space left on device"})
+    assert bb.infra_failure_reason({"stdout": "", "stderr": ""}) == ""
+    assert bb.infra_failure_reason(
+        {"stderr": "haru-pack: no payload appended to this executable"}) == "", (
+        "an ordinary launcher refusal must not be mistaken for an environment failure"
+    )
+    # the returned reason is the offending line, so the abort message is actionable
+    assert "122" in bb.infra_failure_reason(
+        {"stderr": "line one\nharu-pack: IOError: errno: 122 `Disk quota exceeded`\nlast"})
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_an_environment_failure_aborts_the_sweep_and_spares_the_ledger():
+    """Red-path, at the call sites — the checks are worthless if nothing invokes them.
+
+    Deleting the `infra_failure_reason` guard scores the box's failure as chaos findings.
+    Reverting `if bad and not aborted` to `if bad` writes them to the ledger permanently.
+    """
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "infra_failure_reason(r)" in src, (
+        "the case loop must test each result for an environment failure"
+    )
+    assert "raise InfraFailure(" in src, "detection without an abort is just a log line"
+    assert "if bad and (not aborted):" in src, (
+        "a run aborted on an environment failure must not write to the findings ledger"
+    )
+    assert "jr.write('infra_failure'" in src, (
+        "the journal must record WHY the run stopped, or --analyze cannot tell"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_scratch_is_freed_per_case_not_at_the_end_of_the_run(tmp_path):
+    """The leak with a delayed fuse.
+
+    Tracking every work dir and reaping only in the run-level `finally` was itself a fix for
+    a leak-on-raise bug, and it traded a small leak for a large one: 925 thick-tier work dirs
+    at ~145 MB each is about 100 GB. On this box the 24 GiB /tmp quota stopped it at case
+    168 — 168 x 145 MB, almost exactly.
+    """
+    dirs = []
+    reaper = bl.Reaper(log=lambda _m: None)
+    for i in range(4):
+        d = tmp_path / f"work{i}"
+        d.mkdir()
+        (d / "payload").write_bytes(b"x" * 4096)
+        dirs.append(reaper.track(d))
+
+    for d in dirs[:3]:
+        reaper.release(d)
+
+    live = [d for d in dirs if d.exists()]
+    assert live == [dirs[3]], (
+        f"released dirs must be gone immediately, still on disk: {live}"
+    )
+    assert reaper.reaped == 3 and reaper.freed >= 3 * 4096
+
+    reaper.reap()          # the backstop still takes the remainder
+    assert not any(d.exists() for d in dirs)
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_release_leaves_held_directories_alone(tmp_path):
+    """A finding's preserved artifacts must survive the very mechanism that frees scratch."""
+    reaper = bl.Reaper(log=lambda _m: None)
+    keep = reaper.track(tmp_path / "keep")
+    keep.mkdir()
+    (keep / "evidence").write_bytes(b"y" * 128)
+    reaper.hold(keep)
+
+    assert reaper.release(keep) == 0
+    assert keep.exists(), "held directories are the artifacts of a finding; never released"
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_the_case_loop_releases_scratch_and_the_finally_is_only_the_backstop():
+    """Deleting the per-case release call reinstates the 100 GB sweep. Nothing else catches
+    it, because the totals reported at the end are identical either way."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "reaper.release(work)" in src, (
+        "each completed case must free its own scratch; the run-level reap() is a backstop"
+    )
+    assert "reaper.reap()" in src, "the backstop must still exist for a raise or a Ctrl-C"
+    assert "SCRATCH_CAP_GB" in src, (
+        "a leak should stop the sweep at a number the operator chose"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_a_quota_is_invisible_to_df_and_the_report_says_so(tmp_path):
+    """The trap that made this hard to see: /tmp reported 31 GiB free and refused the next
+    write at 24 GiB, because the mount carries `usrquota`."""
+    bb = _load_busybody()
+    lines = bb.work_root_report(tmp_path)
+    assert lines and "free per statvfs" in lines[0]
+
+    mounts = pathlib.Path("/proc/mounts").read_text()
+    if "usrquota" in mounts or "prjquota" in mounts:
+        quota_mount = next(
+            ln.split()[1] for ln in mounts.splitlines()
+            if len(ln.split()) >= 4 and ("usrquota" in ln.split()[3]
+                                         or "prjquota" in ln.split()[3]))
+        text = " ".join(bb.work_root_report(pathlib.Path(quota_mount)))
+        assert "quota" in text and "NOT the ceiling" in text, (
+            f"{quota_mount} has a quota; the report must not present statvfs as the limit"
+        )
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_an_aborted_run_is_never_read_as_a_verdict(tmp_path):
+    """--analyze must refuse to let a poisoned run look like results. The real one reported
+    "30 of 37 cases DIVERGED by fixture"; none had. The five fixtures that passed everything
+    were the five built before the quota ran out."""
+    a = _analyze()
+    run = tmp_path / "run-aborted"
+    run.mkdir()
+    recs = [{"kind": "started", "total": 925, "planned": []}]
+    # two fixtures that ran clean, then one poisoned by the environment
+    recs += [_case("c1", "early", "RAN"), _case("c1", "late", "REFUSED", ok=False)]
+    recs += [{"kind": "infra_failure", "completed": 2,
+              "detail": "landlord/hostile_umask on idna: errno: 122 `Disk quota exceeded`"}]
+    (run / "journal.jsonl").write_text("\n".join(json.dumps(x) for x in recs) + "\n")
+
+    got = a.analyze_run(run)
+    assert got["state"] == "ABORTED (environment)"
+    text = a.format_analysis(got)
+    assert "THE BOX FAILED, NOT THE PRODUCT" in text
+    assert "Discard this section" in text, (
+        "the divergence a quota failure fabricates must be labelled as fabricated"
+    )
+    assert "122" in text, "the abort reason belongs in the report, not just the journal"

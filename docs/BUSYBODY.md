@@ -40,6 +40,60 @@ plainly that the number is machine-specific and does not transfer.
 
 Neither needs a model. Neither needs you to open the raw records.
 
+## When the box fails, not the product
+
+A 925-run sweep on 2026-09-10 reported **470 findings**. All of them were one disk quota.
+
+The harness wrote work directories into `/tmp`, which on this machine carries `usrquota`
+with a 24 GiB per-user ceiling. At case 168 the launcher started failing with
+`errno: 122 Disk quota exceeded`, and every case after that — across all twenty remaining
+fixtures — recorded that failure under whichever persona happened to be running. Three
+distinct defects, all in one event:
+
+1. **Work dirs were freed only at the end of the run.** The reaper tracked all 925 and
+   removed them in the run-level `finally`. That was itself the fix for an earlier
+   leak-on-raise bug, and it traded a small leak for a large one: 925 thick-tier work dirs
+   at ~145 MB each needs about 100 GB. 168 x 145 MB is 24 GiB — exactly where it died.
+2. **The failure was scored per case.** One environment failure became thirty different
+   "findings" per fixture, and 470 rows went into the findings ledger.
+3. **`--analyze` called it divergence.** It reported *30 of 37 cases diverged by fixture*.
+   None had.
+
+What made it readable in seconds was the divergence matrix itself: the same five fixtures
+passed every single case, and no property of a Python package produces that. Those five were
+the five built before the quota ran out. The tool found its own run invalid — which is the
+point of having it, and it should not have needed to.
+
+### What changed
+
+| | |
+|---|---|
+| `reaper.release(work)` | frees each case's scratch immediately; `reap()` stays as the backstop for a raise or Ctrl-C |
+| `infra_failure_reason()` | errno 122/28 aborts the sweep instead of scoring it |
+| ledger | an aborted run writes **nothing** — a ledger full of one failure in thirty costumes is worse than an empty one |
+| `--work-root DIR` | put scratch on a filesystem with room |
+| `--scratch-cap-gb N` | abort on a leak at a number you chose, default 8 |
+| `--analyze` | an aborted run prints `THE BOX FAILED, NOT THE PRODUCT` and labels the fake divergence |
+
+### `df` is not the ceiling
+
+This is the part worth remembering. `df` said 31 GiB free on `/tmp`, and the next write
+failed at 24 GiB, because a **per-user quota is invisible to `statvfs`**. A preflight that
+only checked free space would have reported plenty of room and been wrong.
+
+So the harness prints the scratch mount's quota options at the start of every sweep:
+
+```
+scratch    : /tmp  (31.2 GiB free per statvfs)
+             /tmp has a quota (usrquota). The number above is NOT the ceiling —
+             a per-user quota is invisible to statvfs. Use --work-root to move scratch
+             somewhere unquota'd if a long sweep dies with errno 122.
+```
+
+Recovering an already-poisoned run: `--analyze <RUN>` now labels it, and the ledger rows can
+be dropped by `run` id. The run's journal is append-only, so the honest repair is to *append*
+an `infra_failure` annotation rather than edit the original records.
+
 Exit codes are a contract: `0` clean, `1` findings, `130` interrupted. **An interrupt beats
 findings** — a run you killed did not finish, and reporting its partial findings as a
 completed verdict is the same lie facing the other way.

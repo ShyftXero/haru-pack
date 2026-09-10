@@ -264,13 +264,22 @@ def _tree_size(path: Path) -> int:
 
 
 class Reaper:
-    """Tracks every working directory a run creates, and removes them all at the end.
+    """Tracks every working directory a run creates and guarantees all of them are removed.
 
-    Reaping happens in a `finally`, unconditionally. The previous version removed a work
-    directory only on the success path, so a case that raised, or a Ctrl-C, leaked it — and
-    at the thick tier each one holds a staged interpreter, so the leak is tens of megabytes
-    per case. A chaos harness is exactly the program most likely to be interrupted, which
-    makes best-effort cleanup the wrong shape.
+    Two mechanisms, and both are needed:
+
+      * `release()` frees one directory the moment its case is done. This is what keeps a
+        long sweep's live footprint at one case's worth.
+      * `reap()` in a `finally` removes whatever is left, unconditionally. This is what
+        survives a raise or a Ctrl-C.
+
+    Having only the second is a leak with a delayed fuse, and it bit us. Each tracked
+    directory holds a staged interpreter at the thick tier — around 145 MB — and a
+    37-case x 25-fixture sweep tracks 925 of them. Holding them all until the end needs
+    roughly 100 GB. The 2026-09-10 sweep died at case 168 on a 24 GiB user quota, which is
+    168 x 145 MB almost exactly, and then reported the quota failure as 470 chaos findings.
+
+    Having only the first is the older bug: a case that raised leaked its directory.
 
     `hold()` marks a directory to survive: findings whose artifacts are being preserved, or
     everything when --keep is passed. Those are reported rather than silently retained, so
@@ -290,6 +299,30 @@ class Reaper:
 
     def hold(self, path: Path) -> None:
         self._held.add(str(Path(path)))
+
+    def release(self, path: Path) -> int:
+        """Free one directory now, and stop tracking it. Returns bytes freed.
+
+        Silent by design: a per-case line for 925 cases is noise, and the totals are
+        reported once by `reap()`. Held directories are left alone.
+        """
+        d = Path(path)
+        if str(d) in self._held:
+            return 0
+        size = 0
+        try:
+            if d.exists():
+                size = _tree_size(d)
+                shutil.rmtree(d, ignore_errors=True)
+                if not d.exists():
+                    self.reaped += 1
+                    self.freed += size
+                else:
+                    size = 0
+        except OSError:
+            return 0
+        self._dirs = [x for x in self._dirs if x != d]
+        return size
 
     def reap(self) -> tuple:
         """Remove every tracked directory that is not held. Never raises."""

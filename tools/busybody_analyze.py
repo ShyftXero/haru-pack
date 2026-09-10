@@ -43,6 +43,7 @@ def analyze_run(run_dir: Path) -> dict:
     finished = next((r for r in recs if r.get("kind") == "finished"), None)
     interrupted = next((r for r in recs if r.get("kind") == "interrupted"), None)
     setup_failure = next((r for r in recs if r.get("kind") == "setup_failure"), None)
+    infra = next((r for r in recs if r.get("kind") == "infra_failure"), None)
 
     fixtures = sorted({c.get("fixture", "?") for c in cases})
     # outcome per (case, fixture) — the matrix everything else is derived from
@@ -58,8 +59,10 @@ def analyze_run(run_dir: Path) -> dict:
         "run": run_dir.name,
         "dir": run_dir,
         "state": ("SETUP FAILURE" if setup_failure else
+                  "ABORTED (environment)" if infra else
                   "INTERRUPTED" if interrupted or not finished else "complete"),
         "setup_failure": (setup_failure or {}).get("detail", ""),
+        "infra_failure": (infra or {}).get("detail", ""),
         "planned": started.get("planned") or [],
         "planned_total": started.get("total"),
         "cases": cases,
@@ -106,6 +109,20 @@ def format_analysis(a: dict) -> str:
           f"(mean {a['seconds']['mean']}s, max {a['seconds']['max']}s)",
           f"findings     : {len(a['findings'])}", ""]
 
+    if a["state"] == "ABORTED (environment)":
+        L += ["  *** THE BOX FAILED, NOT THE PRODUCT ***",
+              "",
+              f"  {a['infra_failure'][:W - 4]}",
+              "",
+              "  Scratch space ran out mid-sweep. Every result after that point is the same",
+              "  environment failure wearing a different persona's costume, so nothing below",
+              "  is a verdict on haru-pack. The findings ledger was deliberately NOT written.",
+              "",
+              "  Re-run with --work-root DIR on a filesystem with room. Note that a per-user",
+              "  quota is invisible to df: this box reported 31 GiB free on /tmp and refused",
+              "  the next write at 24 GiB.",
+              ""]
+
     if a["state"] == "INTERRUPTED":
         planned = a.get("planned_total") or len(a["planned"])
         L += ["  *** INTERRUPTED — the numbers above are what completed, not the suite ***",
@@ -143,6 +160,14 @@ def format_analysis(a: dict) -> str:
                       f"  ({distinct} fingerprints against {n_case_names} case(s): same",
                       "  outcome, differing diagnostic text. Message wording varies by",
                       "  package; the verdict did not.)"]
+        elif a["state"] == "ABORTED (environment)":
+            L += ["",
+                  f"  {len(a['diverged'])} of {n_case_names} case(s) appear to have diverged",
+                  "  by fixture — but this run ABORTED on an environment failure, and that",
+                  "  failure splits fixtures into 'ran before it' and 'ran after it'. That",
+                  "  is not package-dependent behaviour. Discard this section.",
+                  "",
+                  "  The tell: the passing fixtures are the ones built first."]
         else:
             L += ["",
                   f"  {len(a['diverged'])} of {n_case_names} case(s) DIVERGED by fixture —",

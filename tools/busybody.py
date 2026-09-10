@@ -108,10 +108,18 @@ from haru_pack import overlay  # noqa: E402
 
 from busybody_analyze import analyze_run, format_analysis  # noqa: E402
 from busybody_ledger import (  # noqa: E402
-    Journal, Reaper, fingerprint, ledger_append, ledger_path, ledger_rollup,
+    Journal, Reaper, fingerprint, human_bytes, ledger_append, ledger_path, ledger_rollup,
     prune_runs, reap_orphans, scan_runs)
 
 OUT = REPO / "busybody" / "out"
+# Overridable because the default scratch filesystem may be quota'd; see
+# work_root_report(). None means "tempfile's default", i.e. $TMPDIR.
+WORK_ROOT: Path | None = None
+# A sweep that leaks scratch should die at a number the operator chose, not at
+# whatever the filesystem happens to allow. The 2026-09-10 sweep reached the 24 GiB
+# user quota on /tmp; nobody had asked for 24 GiB, and nobody found out until it
+# had written 470 bogus findings.
+SCRATCH_CAP_GB = 8.0
 RUNS = OUT / "runs"
 MARKER = "BUSYBODY_OK"
 
@@ -151,6 +159,83 @@ TRACEBACK_MARKERS = (
     "[IndexDefect]", "[RangeDefect]", "[ValueError]", "[OSError]",
     "sysFatal", "signal SIGSEGV", "core dumped",
 )
+
+
+# The harness's own environment running out of room is not a chaos finding. Disk quota and
+# no-space are never imposed deliberately by any persona — `hoarder` starves file
+# descriptors, address space and TMPDIR writability, never capacity — so seeing one of these
+# means the box gave up, and every result after it is garbage.
+#
+# Measured 2026-09-10, the hard way: a 925-run sweep exhausted the user quota on /tmp at case
+# 168 and reported 470 "findings", all of them the same environment failure wearing 30
+# different persona costumes. --analyze showed the tell immediately (the same five fixtures
+# passing every case, and those five were the first five built) but the run had already
+# written 470 rows to the findings ledger.
+INFRA_MARKERS = (
+    "Disk quota exceeded", "errno: 122", "[Errno 122]",
+    "No space left on device", "errno: 28", "[Errno 28]",
+    "Read-only file system) while writing the journal",
+)
+
+
+def dir_bytes(d: Path) -> int:
+    """Apparent size of a tree. Metadata only, so it is cheap enough to call per case."""
+    total = 0
+    for root, _dirs, files in os.walk(d, onerror=lambda _e: None):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+class InfraFailure(RuntimeError):
+    """The box, not the product. Aborts the sweep instead of scoring it."""
+
+
+def infra_failure_reason(r: dict) -> str:
+    """Return the environment failure in this result, or "" if it is a real outcome."""
+    blob = (r.get("stdout") or "") + (r.get("stderr") or "")
+    for m in INFRA_MARKERS:
+        if m in blob:
+            line = next((ln.strip() for ln in blob.splitlines() if m in ln), m)
+            return line[:200]
+    return ""
+
+
+def work_root_report(root: Path) -> list:
+    """Lines describing the scratch filesystem, including the trap that bit us.
+
+    `df` reports free space on the filesystem. A user quota is invisible to it, so a box can
+    report 31 GB free and still refuse the harness's next write at 24 GB. If the mount says
+    `usrquota` or `grpquota`, say so — that number is the real ceiling and it is not the one
+    df prints.
+    """
+    lines = []
+    try:
+        st = os.statvfs(root)
+        free_gb = st.f_bavail * st.f_frsize / 1024**3
+        lines.append(f"scratch    : {root}  ({free_gb:.1f} GiB free per statvfs)")
+    except OSError as e:
+        lines.append(f"scratch    : {root}  (could not stat: {e})")
+        return lines
+    try:
+        mounts = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return lines
+    best, opts = "", ""
+    for ln in mounts:
+        parts = ln.split()
+        if len(parts) >= 4 and str(root).startswith(parts[1]) and len(parts[1]) > len(best):
+            best, opts = parts[1], parts[3]
+    if any(q in opts for q in ("usrquota", "grpquota", "prjquota", "quota")):
+        lines.append(f"             {best} has a quota ({opts.split(',')[-1]}). The number "
+                     f"above is NOT the ceiling —")
+        lines.append("             a per-user quota is invisible to statvfs. Use "
+                     "--work-root to move scratch")
+        lines.append("             somewhere unquota'd if a long sweep dies with errno 122.")
+    return lines
 
 
 def blame(out: str, err: str) -> str:
@@ -1350,7 +1435,7 @@ def build_top25_fixtures(tier: str, reaper, log=print) -> list:
             log(f"  [{i}/{len(pkgs)}] {name}: reusing")
             built.append((name, exe))
             continue
-        work = reaper.track(Path(tempfile.mkdtemp(prefix="bb-fixture-")))
+        work = reaper.track(Path(tempfile.mkdtemp(prefix="bb-fixture-", dir=WORK_ROOT)))
         proj = flex.make_project({**pkg, "smoke": (pkg.get("smoke") or "").replace(
             "FLEX_OK", MARKER) or f"print('{MARKER}')"}, work)
         r = subprocess.run([haru, "build", str(proj), "-o", str(exe), "--tier", tier],
@@ -1408,7 +1493,7 @@ def calibrate(fixtures: list, log=print) -> int:
 
     needs = {}
     for name, exe in fixtures:
-        work = Path(tempfile.mkdtemp(prefix="bb-calibrate-"))
+        work = Path(tempfile.mkdtemp(prefix="bb-calibrate-", dir=WORK_ROOT))
         try:
             cache, first = warm(exe, work)
             if first["outcome"] != "RAN":
@@ -1460,6 +1545,7 @@ def calibrate(fixtures: list, log=print) -> int:
 
 
 def main() -> int:
+    global WORK_ROOT, SCRATCH_CAP_GB
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--persona", default="", help="comma-separated personas")
@@ -1480,9 +1566,31 @@ def main() -> int:
                     help="list runs, marking any that were interrupted")
     ap.add_argument("--analyze", nargs="?", const="latest", default=None,
                     metavar="RUN", help="analyse a run (default: the most recent)")
+    ap.add_argument("--work-root", metavar="DIR", default=None,
+                    help="filesystem for scratch dirs (default $TMPDIR; move it if a long "
+                         "sweep dies with errno 122)")
+    ap.add_argument("--scratch-cap-gb", type=float, default=SCRATCH_CAP_GB,
+                    metavar="N", help=f"abort if the scratch root exceeds N GiB "
+                                      f"(default {SCRATCH_CAP_GB}; guards against a leak)")
     ap.add_argument("--calibrate", action="store_true",
                     help="measure the resource band between fixtures and stop")
     a = ap.parse_args()
+
+    SCRATCH_CAP_GB = a.scratch_cap_gb
+
+    if a.work_root:
+        WORK_ROOT = Path(a.work_root).expanduser().resolve()
+        # INV-LAUNCH-07: a work dir inside the repository lets uv discover haru-pack's own
+        # pyproject.toml from it, and a staged run then adopts this project instead of the
+        # one it packed. That bug clobbered the repo's .venv twice before the work dirs were
+        # moved out. --work-root must not be a way to walk back into it.
+        if WORK_ROOT == REPO or REPO in WORK_ROOT.parents:
+            raise SystemExit(
+                f"--work-root must be outside the repository (got {WORK_ROOT}).\n"
+                f"A work dir under {REPO} lets uv discover haru-pack's own project from it, "
+                f"so a\nstaged run adopts this checkout instead of the payload it was "
+                f"built with. See INV-LAUNCH-07.")
+        WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
     if a.history:
         return print_history()
@@ -1534,7 +1642,8 @@ def main() -> int:
     # each work directory holds a staged interpreter — tens of megabytes per case. The
     # previous version removed a work dir only on the success path, so a raising case or a
     # Ctrl-C leaked it.
-    results, interrupted, rc = [], False, 0
+    results, interrupted, aborted, rc = [], False, False, 0
+    peak_scratch = 0
     try:
         reap_orphans(RUNS, log=lambda m: print(f"  {m}"))
 
@@ -1564,18 +1673,30 @@ def main() -> int:
                  fixtures=[n for n, _ in fixtures], cases=len(picked), total=total)
         jr.beat()
         print(f"\nbusybody: {len(picked)} case(s) x {len(fixtures)} fixture(s) "
-              f"= {total} run(s)   run {run_id}\n")
+              f"= {total} run(s)   run {run_id}")
+        for ln in work_root_report(WORK_ROOT or Path(tempfile.gettempdir())):
+            print(ln)
+        print()
 
         for fname, exe in fixtures:
             if len(fixtures) > 1:
                 print(f"-- {fname} ({exe.stat().st_size / 1e6:.0f}MB)")
             for c in picked:
-                work = reaper.track(Path(tempfile.mkdtemp(prefix=f"bb-{c['name']}-")))
+                work = reaper.track(Path(tempfile.mkdtemp(prefix=f"bb-{c['name']}-", dir=WORK_ROOT)))
                 try:
                     r = c["fn"](exe, work)
                 except Exception as e:
                     r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0,
                          "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+                scratch = dir_bytes(work)
+                r["scratch_bytes"] = scratch
+                peak_scratch = max(peak_scratch, scratch)
+
+                if reason := infra_failure_reason(r):
+                    # Abort rather than score. Continuing would attribute the box's failure
+                    # to 30 different personas across every remaining fixture.
+                    raise InfraFailure(
+                        f"{c['persona']}/{c['name']} on {fname}: {reason}")
                 ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
                 msg = (r.get("stderr") or r.get("stdout") or "").strip()
                 rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
@@ -1592,11 +1713,42 @@ def main() -> int:
 
                 results.append(rec)
                 jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
+
+                # Free this case's scratch NOW. The run-level reap() in the finally is the
+                # backstop for a raise or a Ctrl-C, not the primary mechanism: holding 925
+                # thick-tier work dirs until the end needs ~100 GB.
+                if not a.keep and "artifacts" not in rec:
+                    reaper.release(work)
+
+                # With per-case release the work root should stay near one case's footprint.
+                # If it climbs, something is leaking and the sweep should stop while the
+                # number is still small enough to read.
+                if len(results) % 25 == 0:
+                    live = dir_bytes(WORK_ROOT or Path(tempfile.gettempdir()))
+                    if live > SCRATCH_CAP_GB * 1024**3:
+                        raise InfraFailure(
+                            f"scratch root holds {human_bytes(live)} after {len(results)} "
+                            f"case(s), over the {SCRATCH_CAP_GB} GiB cap. Reaping is "
+                            f"per-case, so this is a leak, not normal growth.")
                 jr.beat()
                 prefix = f"  {'ok ' if ok else 'BAD'} "
                 label = f"{c['persona']:14} {c['name']:42}"
                 print(f"{prefix}{label} {r['outcome']:9}{'  ' if ok else '<-'}")
 
+    except InfraFailure as e:
+        aborted = True
+        jr.write("infra_failure", detail=str(e)[:400], completed=len(results))
+        print(f"\n*** ABORTED — the environment failed, not haru-pack.\n"
+              f"    {e}\n\n"
+              f"    {len(results)} case(s) had already run. They are journalled but NOT\n"
+              f"    written to the findings ledger: once scratch space is exhausted every\n"
+              f"    later result is the same failure wearing a different persona's costume,\n"
+              f"    and a ledger full of those is worse than an empty one.\n",
+              file=sys.stderr)
+        for ln in work_root_report(WORK_ROOT or Path(tempfile.gettempdir())):
+            print(f"    {ln}", file=sys.stderr)
+        print("\n    Re-run with --work-root DIR pointing at a filesystem with room.",
+              file=sys.stderr)
     except KeyboardInterrupt:
         interrupted = True
         jr.write("interrupted", completed=len(results),
@@ -1605,7 +1757,7 @@ def main() -> int:
               file=sys.stderr)
     finally:
         bad = [r for r in results if not r["ok"]]
-        if bad:
+        if bad and not aborted:
             ledger_append([{k: v for k, v in r.items()
                             if k in ("name", "persona", "outcome", "severity",
                                      "fingerprint", "inv", "remedy", "artifacts",
@@ -1617,8 +1769,9 @@ def main() -> int:
             (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
             write_report(results, ", ".join(sorted({r["fixture"] for r in results})),
                          run_dir / "report.txt", run_id=run_id, interrupted=interrupted)
-        if not interrupted and results:
-            jr.write("finished", cases=len(results), findings=len(bad))
+        if not interrupted and not aborted and results:
+            jr.write("finished", cases=len(results), findings=len(bad),
+                     peak_scratch_bytes=peak_scratch)
         jr.close()
 
         # Unconditional. This is the line the whole finally block exists for.
@@ -1627,8 +1780,15 @@ def main() -> int:
         prune_runs(RUNS, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
 
     bad = [r for r in results if not r["ok"]]
+    if aborted:
+        print(f"\n{len(results)} case(s) ran before the environment failed. This run is NOT"
+              f"\na verdict on haru-pack — see the message above.")
+        return 2
     print(f"\n{len(results) - len(bad)}/{len(results)} behaved as expected"
           + ("  (RUN INTERRUPTED — this is not the whole suite)" if interrupted else ""))
+    if peak_scratch:
+        print(f"peak scratch per case: {human_bytes(peak_scratch)}  "
+              f"(cap {SCRATCH_CAP_GB} GiB on the root)")
     if results:
         print(f"report : {(run_dir / 'report.txt').relative_to(REPO)}   "
               f"<- read this; it explains every finding")
