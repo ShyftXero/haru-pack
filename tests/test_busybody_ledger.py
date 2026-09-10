@@ -192,3 +192,104 @@ def test_a_harness_bug_is_not_reported_as_a_product_defect():
     real run, and is exactly the confusion the severity split exists to prevent."""
     bb = _load_busybody()
     assert bb.severity_for({}, {"outcome": "CASE-ERROR"}, ok=False) == "note"
+
+
+# ---------------------------------------------------------------- reaping
+
+@pytest.mark.invariant("INV-CHAOS-02")
+def test_reaper_removes_tracked_dirs_and_reports_what_it_freed(tmp_path):
+    r = bl.Reaper(log=lambda _m: None)
+    a = r.track(tmp_path / "a")
+    b = r.track(tmp_path / "b")
+    for d in (a, b):
+        d.mkdir()
+        (d / "big").write_bytes(b"x" * 4096)
+    n, freed = r.reap()
+    assert n == 2 and freed >= 8192
+    assert not a.exists() and not b.exists()
+
+
+@pytest.mark.invariant("INV-CHAOS-02")
+def test_held_dirs_survive_and_are_reported(tmp_path):
+    """A finding's artifacts must not be reaped — that is the evidence. Everything else
+    goes."""
+    r = bl.Reaper(log=lambda _m: None)
+    keep = r.track(tmp_path / "keep")
+    drop = r.track(tmp_path / "drop")
+    for d in (keep, drop):
+        d.mkdir()
+        (d / "f").write_text("x")
+    r.hold(keep)
+    r.reap()
+    assert keep.exists(), "a held directory was reaped; the finding's artifacts are gone"
+    assert not drop.exists()
+
+
+@pytest.mark.invariant("INV-CHAOS-02")
+def test_reap_never_raises_even_on_a_hostile_tree(tmp_path):
+    """Reaping runs in a finally. If it can raise, it can mask the original failure —
+    which is the one worth reading."""
+    r = bl.Reaper(log=lambda _m: None)
+    d = r.track(tmp_path / "weird")
+    d.mkdir()
+    (d / "dangling").symlink_to(tmp_path / "does-not-exist")
+    (d / "sub").mkdir()
+    (d / "sub").chmod(0o000)
+    try:
+        r.reap()          # must not raise
+    finally:
+        try:
+            (d / "sub").chmod(0o755)
+        except OSError:
+            pass
+
+
+@pytest.mark.invariant("INV-CHAOS-02")
+def test_reaping_is_in_a_finally_not_on_the_success_path():
+    """Red-path: move `reaper.reap()` out of the finally block.
+
+    A chaos harness is the program most likely to be interrupted, and at the thick tier
+    each work directory holds a staged interpreter. The first version removed a work dir
+    only when a case succeeded, so a raising case or a Ctrl-C leaked it — measured at
+    ~490 MB across three cases.
+    """
+    import ast
+    src = (REPO / "tools" / "busybody.py").read_text()
+    tree = ast.parse(src)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    tries = [n for n in ast.walk(main) if isinstance(n, ast.Try) and n.finalbody]
+    assert tries, "main() has no try/finally at all"
+    in_finally = any(
+        "reap" in ast.unparse(stmt)
+        for t in tries for stmt in t.finalbody)
+    assert in_finally, (
+        "reaper.reap() is not reached from a finally block; an interrupted or raising run "
+        "will leak its work directories"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-02")
+def test_orphans_are_not_reaped_while_a_run_is_live(tmp_path):
+    """lotek's heartbeat rule: a fresh heartbeat means something may still be using those
+    directories, so nothing is touched."""
+    runs = tmp_path / "runs"
+    live = runs / "bb-live"
+    live.mkdir(parents=True)
+    (live / "heartbeat").write_text(str(time.time()))
+    n, freed = bl.reap_orphans(runs, log=lambda _m: None)
+    assert (n, freed) == (0, 0), "orphans were reaped while a run was still live"
+
+
+@pytest.mark.invariant("INV-CHAOS-02")
+def test_pruning_keeps_the_most_recent_runs_and_never_a_live_one(tmp_path):
+    runs = tmp_path / "runs"
+    for i in range(5):
+        d = runs / f"bb2026010{i}-000000"
+        d.mkdir(parents=True)
+        (d / "journal.jsonl").write_text('{"kind":"started"}\n')
+    (runs / "bb20260100-000000" / "heartbeat").write_text(str(time.time()))
+    bl.prune_runs(runs, keep=2, log=lambda _m: None)
+    left = sorted(d.name for d in runs.iterdir())
+    assert "bb20260100-000000" in left, "a live run was pruned"
+    assert len(left) == 3, f"expected 2 kept + 1 live, got {left}"

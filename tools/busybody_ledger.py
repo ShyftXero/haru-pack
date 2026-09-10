@@ -39,11 +39,14 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
 __all__ = ["SEVERITIES", "normalize", "fingerprint", "Journal", "ledger_path",
-           "ledger_append", "ledger_rollup", "scan_runs", "heartbeat_state"]
+           "ledger_append", "ledger_rollup", "scan_runs", "heartbeat_state",
+           "Reaper", "reap_orphans", "prune_runs", "human_bytes"]
 
 # A closed vocabulary, as in lotek. Not "error", not "info" — three levels, chosen once.
 #   critical  the product did something it must never do
@@ -234,3 +237,133 @@ def ledger_rollup(path: Path | None = None) -> list:
         g["personas"] = sorted(x for x in g["personas"] if x)
         out.append(g)
     return sorted(out, key=lambda g: (-g["count"], g["fingerprint"]))
+
+
+# ---------------------------------------------------------------- reaping
+
+WORK_PREFIX = "bb-"
+
+
+def human_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n / 1:.1f}{unit}"
+        n /= 1024.0
+    return f"{n:.1f}GB"
+
+
+def _tree_size(path: Path) -> int:
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+class Reaper:
+    """Tracks every working directory a run creates, and removes them all at the end.
+
+    Reaping happens in a `finally`, unconditionally. The previous version removed a work
+    directory only on the success path, so a case that raised, or a Ctrl-C, leaked it — and
+    at the thick tier each one holds a staged interpreter, so the leak is tens of megabytes
+    per case. A chaos harness is exactly the program most likely to be interrupted, which
+    makes best-effort cleanup the wrong shape.
+
+    `hold()` marks a directory to survive: findings whose artifacts are being preserved, or
+    everything when --keep is passed. Those are reported rather than silently retained, so
+    the disk they occupy is never a surprise.
+    """
+
+    def __init__(self, log=print):
+        self._dirs: list = []
+        self._held: set = set()
+        self._log = log
+        self.reaped = 0
+        self.freed = 0
+
+    def track(self, path: Path) -> Path:
+        self._dirs.append(Path(path))
+        return Path(path)
+
+    def hold(self, path: Path) -> None:
+        self._held.add(str(Path(path)))
+
+    def reap(self) -> tuple:
+        """Remove every tracked directory that is not held. Never raises."""
+        held_bytes = 0
+        for d in self._dirs:
+            try:
+                if not d.exists():
+                    continue
+                if str(d) in self._held:
+                    held_bytes += _tree_size(d)
+                    continue
+                size = _tree_size(d)
+                shutil.rmtree(d, ignore_errors=True)
+                if not d.exists():
+                    self.reaped += 1
+                    self.freed += size
+            except OSError:
+                continue
+        if self.reaped:
+            self._log(f"reaped {self.reaped} work dir(s), {human_bytes(self.freed)} freed")
+        if self._held:
+            self._log(f"kept {len(self._held)} work dir(s) holding "
+                      f"{human_bytes(held_bytes)} (findings or --keep)")
+        return self.reaped, self.freed
+
+
+def reap_orphans(runs_dir: Path, log=print) -> tuple:
+    """Remove work directories abandoned by earlier runs.
+
+    Guarded by the heartbeat rule, from lotek's cleanup.py: if ANY run has a fresh
+    heartbeat something may still be using its temporary directories, so nothing is
+    touched. A missing or unreadable heartbeat means not live, and both are safe to reap —
+    a live run always has a fresh one.
+    """
+    if any(heartbeat_state(d) == "live"
+           for d in (runs_dir.iterdir() if runs_dir.is_dir() else [])
+           if d.is_dir()):
+        log("a run is live (fresh heartbeat) — not reaping orphans")
+        return 0, 0
+    n = freed = 0
+    for d in Path(tempfile.gettempdir()).glob(f"{WORK_PREFIX}*"):
+        if not d.is_dir():
+            continue
+        try:
+            size = _tree_size(d)
+            shutil.rmtree(d, ignore_errors=True)
+            if not d.exists():
+                n += 1
+                freed += size
+        except OSError:
+            continue
+    if n:
+        log(f"reaped {n} orphaned work dir(s) from earlier runs, {human_bytes(freed)} freed")
+    return n, freed
+
+
+def prune_runs(runs_dir: Path, keep: int = 10, log=print) -> tuple:
+    """Keep the most recent N run directories; drop the rest.
+
+    Run directories hold preserved artifacts, which is the point, but they are also the
+    thing that grows without bound. Never prunes a live run.
+    """
+    if not runs_dir.is_dir():
+        return 0, 0
+    dirs = sorted((d for d in runs_dir.iterdir() if d.is_dir()), key=lambda d: d.name)
+    victims = [d for d in dirs[:-keep] if heartbeat_state(d) != "live"] if len(dirs) > keep else []
+    n = freed = 0
+    for d in victims:
+        size = _tree_size(d)
+        shutil.rmtree(d, ignore_errors=True)
+        if not d.exists():
+            n += 1
+            freed += size
+    if n:
+        log(f"pruned {n} old run dir(s), {human_bytes(freed)} freed "
+            f"(keeping the most recent {keep})")
+    return n, freed

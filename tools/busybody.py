@@ -93,7 +93,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from haru_pack import overlay  # noqa: E402
 
 from busybody_ledger import (  # noqa: E402
-    Journal, fingerprint, ledger_append, ledger_path, ledger_rollup, scan_runs)
+    Journal, Reaper, fingerprint, ledger_append, ledger_path, ledger_rollup,
+    prune_runs, reap_orphans, scan_runs)
 
 OUT = REPO / "busybody" / "out"
 RUNS = OUT / "runs"
@@ -917,6 +918,73 @@ def build_fixture(tier: str, log=print) -> Path:
     return exe
 
 
+
+def _flexrun():
+    """Reuse the flex harness's project builder rather than a second copy of it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("flexrun", REPO / "tools" / "flex-run.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def build_top25_fixtures(tier: str, reaper, log=print) -> list:
+    """One binary per top-25 package, so the chaos cases run against real payloads.
+
+    The synthetic fixture is a two-line script: its payload is a handful of files. A real
+    package brings native libraries, deep trees, and thousands of staged files — which is
+    what the staging, verification and truncation cases are actually about.
+
+    THICK on purpose. Every case runs with a pristine cache directory (otherwise the
+    tampering cases prove nothing, since a warm stage is reused). At the default tier that
+    would mean each of several hundred case-runs re-downloading an interpreter and the
+    package's dependencies; thick puts them in the payload, so the runs need no network at
+    all and are the same speed for every case.
+    """
+    from haru_pack import tomlio
+    manifest = REPO / "flex" / "packages.toml"
+    if not manifest.exists():
+        raise SystemExit("flex/packages.toml missing — run tools/gen-package-manifest.py")
+    pkgs = [p for p in tomlio.load(manifest).get("package", []) if p.get("list") == "top25"]
+    if not pkgs:
+        raise SystemExit("no top25 packages in flex/packages.toml")
+
+    flex = _flexrun()
+    haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
+    fixdir = OUT / "fixtures"
+    fixdir.mkdir(parents=True, exist_ok=True)
+
+    built, failed = [], []
+    log(f"building {len(pkgs)} top-25 fixture(s) at tier={tier} — once, then reused")
+    for i, pkg in enumerate(pkgs, 1):
+        name = pkg["name"]
+        exe = fixdir / f"fixture-{name}"
+        if exe.exists():
+            log(f"  [{i}/{len(pkgs)}] {name}: reusing")
+            built.append((name, exe))
+            continue
+        work = reaper.track(Path(tempfile.mkdtemp(prefix="bb-fixture-")))
+        proj = flex.make_project({**pkg, "smoke": (pkg.get("smoke") or "").replace(
+            "FLEX_OK", MARKER) or f"print('{MARKER}')"}, work)
+        r = subprocess.run([haru, "build", str(proj), "-o", str(exe), "--tier", tier],
+                           capture_output=True, text=True, timeout=3600)
+        if r.returncode != 0 or not exe.exists():
+            failed.append((name, (r.stderr or r.stdout).strip()[-200:]))
+            log(f"  [{i}/{len(pkgs)}] {name}: BUILD FAILED")
+            continue
+        log(f"  [{i}/{len(pkgs)}] {name}: {exe.stat().st_size / 1e6:.0f}MB")
+        built.append((name, exe))
+
+    if failed:
+        log(f"{len(failed)} fixture(s) could not be built; those packages are skipped, "
+            f"not silently passed:")
+        for name, err in failed:
+            log(f"  {name}: {err[:120]}")
+    if not built:
+        raise SystemExit("no fixtures built")
+    return built
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -924,6 +992,11 @@ def main() -> int:
     ap.add_argument("--case", default="", help="comma-separated case names")
     ap.add_argument("--tier", default="thick",
                     help="fixture tier; thick keeps network out of the results")
+    ap.add_argument("--fixtures", default="synthetic",
+                    help="'synthetic' (a two-line script), 'top25' (one binary per top-25 "
+                         "package), or a path to an existing binary")
+    ap.add_argument("--keep-runs", type=int, default=10,
+                    help="how many past run directories to retain")
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--keep", action="store_true", help="keep each case's wreckage")
     ap.add_argument("--list", action="store_true")
@@ -965,84 +1038,115 @@ def main() -> int:
     run_id = "bb" + time.strftime("%Y%m%d-%H%M%S")
     run_dir = RUNS / run_id
     jr = Journal(run_dir, run_id)
+    reaper = Reaper(log=lambda m: print(f"  {m}"))
 
+    # EVERYTHING below is inside try/finally. Reaping is not conditional on success: a
+    # chaos harness is the program most likely to be interrupted, and at the thick tier
+    # each work directory holds a staged interpreter — tens of megabytes per case. The
+    # previous version removed a work dir only on the success path, so a raising case or a
+    # Ctrl-C leaked it.
+    results, interrupted, rc = [], False, 0
     try:
-        exe = build_fixture(a.tier)
-    except SystemExit as e:
-        # lotek calls this a SETUP FAILURE: the harness could not get to the starting line,
-        # so there are no results — reporting zero findings here would be a lie.
-        jr.write("setup_failure", detail=str(e)[:400])
-        jr.close()
-        print(f"SETUP FAILURE: {e}", file=sys.stderr)
-        print(f"no cases ran; journal at {run_dir.relative_to(REPO)}", file=sys.stderr)
-        return 2
+        reap_orphans(RUNS, log=lambda m: print(f"  {m}"))
 
-    jr.write("started", planned=[c["name"] for c in picked], tier=a.tier,
-             fixture=exe.name, cases=len(picked))
-    jr.beat()
-    print(f"\nbusybody: {len(picked)} case(s) against {exe.name}   run {run_id}\n")
+        try:
+            if a.fixtures == "synthetic":
+                fixtures = [("synthetic", build_fixture(a.tier))]
+            elif a.fixtures == "top25":
+                fixtures = build_top25_fixtures(a.tier, reaper)
+            else:
+                exe = Path(a.fixtures).expanduser().resolve()
+                if not exe.exists():
+                    raise SystemExit(f"no such binary: {exe}")
+                fixtures = [(exe.name, exe)]
+        except SystemExit as e:
+            # lotek calls this a SETUP FAILURE: the harness never reached the starting
+            # line, so there are no results. Reporting zero findings would be a lie.
+            jr.write("setup_failure", detail=str(e)[:400])
+            print(f"SETUP FAILURE: {e}", file=sys.stderr)
+            print(f"no cases ran; journal at {run_dir.relative_to(REPO)}", file=sys.stderr)
+            return 2
 
-    results = []
-    interrupted = False
-    try:
-        for c in picked:
-            work = Path(tempfile.mkdtemp(prefix=f"bb-{c['name']}-"))
-            try:
-                r = c["fn"](exe, work)
-            except Exception as e:
-                r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0,
-                     "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
-            ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
-            msg = (r.get("stderr") or r.get("stdout") or "").strip()
-            rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
-                   **r, "ok": ok, "expect": list(c["expect"]),
-                   "severity": severity_for(c, r, ok),
-                   "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
+        total = len(fixtures) * len(picked)
+        jr.write("started", planned=[c["name"] for c in picked], tier=a.tier,
+                 fixtures=[n for n, _ in fixtures], cases=len(picked), total=total)
+        jr.beat()
+        print(f"\nbusybody: {len(picked)} case(s) x {len(fixtures)} fixture(s) "
+              f"= {total} run(s)   run {run_id}\n")
 
-            if not ok:
-                rec["artifacts"] = preserve(run_dir, c["name"], work)
-            elif not a.keep:
-                shutil.rmtree(work, ignore_errors=True)
-            if a.keep and ok:
-                rec["artifacts"] = str(work)
+        for fname, exe in fixtures:
+            if len(fixtures) > 1:
+                print(f"-- {fname} ({exe.stat().st_size / 1e6:.0f}MB)")
+            for c in picked:
+                work = reaper.track(Path(tempfile.mkdtemp(prefix=f"bb-{c['name']}-")))
+                try:
+                    r = c["fn"](exe, work)
+                except Exception as e:
+                    r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0,
+                         "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+                ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
+                msg = (r.get("stderr") or r.get("stdout") or "").strip()
+                rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
+                       **r, "ok": ok, "expect": list(c["expect"]), "fixture": fname,
+                       "severity": severity_for(c, r, ok),
+                       "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
 
-            results.append(rec)
-            jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
-            jr.beat()
-            print(f"  {'ok ' if ok else 'BAD'} {c['persona']:14} {c['name']:42} "
-                  f"{r['outcome']:9}{'  ' if ok else '<-'}")
+                if not ok:
+                    rec["artifacts"] = preserve(run_dir, f"{fname}--{c['name']}", work)
+                    reaper.hold(work) if a.keep else None
+                if a.keep:
+                    reaper.hold(work)
+                    rec.setdefault("artifacts", str(work))
+
+                results.append(rec)
+                jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
+                jr.beat()
+                prefix = f"  {'ok ' if ok else 'BAD'} "
+                label = f"{c['persona']:14} {c['name']:42}"
+                print(f"{prefix}{label} {r['outcome']:9}{'  ' if ok else '<-'}")
+
     except KeyboardInterrupt:
         interrupted = True
-        jr.write("interrupted", completed=len(results), planned=len(picked))
+        jr.write("interrupted", completed=len(results),
+                 planned=len(picked) * max(1, len(locals().get("fixtures", [1]))))
         print("\n^C — interrupted. Everything completed so far is in the journal.",
               file=sys.stderr)
+    finally:
+        bad = [r for r in results if not r["ok"]]
+        if bad:
+            ledger_append([{k: v for k, v in r.items()
+                            if k in ("name", "persona", "outcome", "severity",
+                                     "fingerprint", "inv", "remedy", "artifacts",
+                                     "fixture")}
+                           | {"run": run_id, "at": time.time(),
+                              "message": (r.get("stderr") or r.get("stdout") or "")[:500]}
+                           for r in bad])
+        if results:
+            (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+            write_report(results, ", ".join(sorted({r["fixture"] for r in results})),
+                         run_dir / "report.txt", run_id=run_id, interrupted=interrupted)
+        if not interrupted and results:
+            jr.write("finished", cases=len(results), findings=len(bad))
+        jr.close()
+
+        # Unconditional. This is the line the whole finally block exists for.
+        print()
+        reaper.reap()
+        prune_runs(RUNS, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
 
     bad = [r for r in results if not r["ok"]]
-    if bad:
-        ledger_append([{k: v for k, v in r.items()
-                        if k in ("name", "persona", "outcome", "severity", "fingerprint",
-                                 "inv", "remedy", "artifacts")}
-                       | {"run": run_id, "at": time.time(),
-                          "message": (r.get("stderr") or r.get("stdout") or "")[:500]}
-                       for r in bad])
-
-    (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    report = run_dir / "report.txt"
-    write_report(results, exe.name, report, run_id=run_id, interrupted=interrupted)
-    if not interrupted:
-        jr.write("finished", cases=len(results), findings=len(bad))
-    jr.close()
-
     print(f"\n{len(results) - len(bad)}/{len(results)} behaved as expected"
           + ("  (RUN INTERRUPTED — this is not the whole suite)" if interrupted else ""))
-    print(f"report : {report.relative_to(REPO)}   <- read this; it explains every finding")
-    print(f"journal: {(run_dir / 'journal.jsonl').relative_to(REPO)}")
+    if results:
+        print(f"report : {(run_dir / 'report.txt').relative_to(REPO)}   "
+              f"<- read this; it explains every finding")
+        print(f"journal: {(run_dir / 'journal.jsonl').relative_to(REPO)}")
     if bad:
         print(f"ledger : {ledger_path()}   (--triage to group by fingerprint)")
         print(f"\n{len(bad)} finding(s):")
         for r in bad:
-            print(f"  [{r['severity']}] {r['outcome']:9} {r['persona']}/{r['name']}"
-                  + (f"  {r['inv']}" if r.get("inv") else ""))
+            print(f"  [{r['severity']}] {r['outcome']:9} {r.get('fixture', '?')} "
+                  f"{r['persona']}/{r['name']}" + (f"  {r['inv']}" if r.get("inv") else ""))
 
     # lotek's exit-code contract. An interrupt wins over findings: a run the operator
     # killed did not finish, and reporting its partial findings as a completed verdict is
