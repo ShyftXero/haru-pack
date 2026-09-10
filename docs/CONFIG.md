@@ -46,6 +46,15 @@ into = "vendor/ms-playwright"
 PLAYWRIGHT_BROWSERS_PATH = "{into}"        # {into} -> stage dir at runtime
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
 
+# --shake (thick only): how to OBSERVE this project so unused payload files can be pruned.
+# Full semantics and limits: docs/SHAKE.md
+[shake]
+test = ["pytest", "-q"]          # required; a bare tests/ dir is discovered as ["pytest"]
+also_run = [["python", "-m", "myapp", "--selftest"]]   # extra observation runs
+keep = ["torch/lib/libtorch_cpu.so"]   # never prune these, whatever the trace says
+follow_lazy_imports = true       # keep the AST closure of function-level imports too
+shake_interpreter = true         # also apply the CPython rulepack (test/, idlelib, tk, ...)
+
 # encryption — same fields as the --encrypt CLI flags; the SECRET is never stored here
 [encryption]
 enabled = true

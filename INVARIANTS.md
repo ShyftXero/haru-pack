@@ -958,3 +958,91 @@ its body. The claiming test goes red.
 Source: CRIT C2, adversarial review 2026-09-09. This is the control aimed squarely at the
 hallucinated-security-feature failure mode.
 Territory: docs/, tests/test_invariants_enforced.py
+
+---
+
+## SHAKE — a file is only deleted from a payload on evidence, and only shipped on proof
+
+`--shake` prunes a `--thick` payload down to the files the project's own test suite was
+observed to touch. It is the one feature in haru-pack that makes a signed artifact *smaller
+by deleting things*, which means its failure mode is unique: an `ImportError` on a customer
+machine, on first run, for a file nobody remembers removing. Everything below exists to
+keep that from being possible to reach by accident.
+
+The honest limit, stated once so no entry below has to over-claim: **a passing test suite is
+evidence about the suite, not about the program.** A code path the suite never exercises is
+invisible to observation. `--shake` is therefore opt-in, refuses to run without a declared
+test command, keeps the static closure of every lazy import inside a kept module, and writes
+down every file it removed. It does not claim that a shaken payload is safe; it claims that
+a shaken payload was *observed running and re-proven afterwards*, and that the operator can
+see exactly what changed.
+
+### INV-SHAKE-01
+Status: active
+Statement: A shaken payload is never emitted unless, after pruning, the project's declared
+test command passes against a fresh environment installed offline from the pruned payload;
+if it does not, the build fails rather than falling back to an unshaken binary.
+Actors: not an attacker — the operator who asked for a small binary, and their customer, who
+runs it first on a machine with no network and no Python.
+Assets: the meaning of a build that exits 0. haru-pack's stated design rule is that a wrong
+guess "compiles cleanly, exits 0, and fails on the customer's machine — which is the worst
+place to find out". Pruning on an unverified trace is that failure with the file already
+deleted, and the *other* tempting fallback — warn and ship the unshaken payload — hands back
+a binary many times the requested size, which the operator learns from `ls -l` or not at all.
+Red-path: Wrap the `_verify(...)` call in `shake.shake()` in `try/except ShakeError: pass`,
+or change `build()`'s `except ShakeError` to log a warning and continue. Either makes
+`test_a_failed_verification_raises_instead_of_returning_a_report` or
+`test_a_shake_error_fails_the_build_rather_than_shipping_unshaken` go red.
+Source: Written with the feature, 2026-09-10, from the tier's own precedent: INV-TIER-01
+exists because `--thick` once quietly needed the network. `--shake` can quietly need a file.
+Territory: src/haru_pack/shake.py, src/haru_pack/build.py, tests/test_shake.py
+
+### INV-SHAKE-02
+Status: active
+Statement: The verification runs against a tree that is genuinely missing the pruned files;
+if any pruned path reappears in the verification environment, the build fails instead of
+reporting a pass.
+Actors: a dev-group dependency that pins a different version of a runtime dist, so `uv`
+reinstalls that dist whole — un-pruned — into the environment the suite is about to run in.
+Assets: the difference between "we checked and it was fine" and "we did not check". A false
+green here is worse than no verification at all, because it is the thing an operator would
+point to when the field failure arrives.
+Red-path: Delete the `_resurrected(...)` check from `shake._verify`, or move it after the
+suite loop. `test_verification_checks_the_pruned_files_are_still_absent` goes red. To watch
+it fail for real: add a dev dependency pinning an older version of a runtime dist, shake, and
+observe the suite pass against files the payload no longer contains.
+Source: Found while designing the verification step, 2026-09-10 — the first draft installed
+the dev group into the verification env and would have verified the wrong tree.
+Territory: src/haru_pack/shake.py, tests/test_shake.py
+
+### INV-SHAKE-03
+Status: active
+Statement: `--shake` deletes nothing without an observation to justify it: no declared or
+discoverable test command is a hard refusal, and an observation run that exits non-zero
+prunes nothing.
+Actors: an operator reaching for `--shake` because the binary is too big, on a project with
+no suite; and an AI agent "fixing" the refusal by adding a default rulepack.
+Assets: the evidence requirement itself. A red suite is the worst possible input — every
+test after the first failure went unexecuted, so the files it would have exercised look
+prunable — and it is exactly the state in which a build would appear to save the most.
+Red-path: Give `shake.resolve_config` a fallback (`test = test or ["pytest"]`), or drop the
+non-zero-exit check in `shake._observe`. `test_shake_refuses_a_project_with_no_test_command`
+or `test_a_failing_observation_run_prunes_nothing` goes red.
+Source: Written with the feature, 2026-09-10. The repo's standing rule — "it refuses instead
+of guessing" — applied to deletion, where guessing is least recoverable.
+Territory: src/haru_pack/shake.py, tests/test_shake.py
+
+### INV-SHAKE-04
+Status: proposed
+Statement: A binary built with `--shake` fails at *startup* with a message naming the shake
+receipt when an import resolves to a file the shake removed, rather than surfacing a bare
+`ModuleNotFoundError` from wherever the program happened to reach for it.
+Actors: the customer hitting the residual risk this feature cannot design away, and the
+support engineer reading their screenshot.
+Assets: diagnosability of the one failure mode `--shake` adds. The sidecar
+`<out>.shake.json` receipt makes this answerable *if the operator still has the build*;
+nothing in the shipped binary points at it.
+Red-path: Not yet implemented — there is no launcher-side hook, so there is no test to go
+red. Would require the stager to install an import hook that consults a pruned-path list
+shipped in the manifest.
+Source: Named as a known gap when `--shake` landed, 2026-09-10, rather than left implicit.

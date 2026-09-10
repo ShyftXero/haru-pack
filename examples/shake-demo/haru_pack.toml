@@ -1,0 +1,14 @@
+name = "demo"
+kind = "project"
+entrypoint = ["python", "-m", "demo"]
+
+# How to OBSERVE this project. `--shake` runs this command under a file-access tracer, keeps
+# the bundled files it touched, then re-runs it against the pruned payload and refuses to
+# ship if it fails (INV-SHAKE-01). Discovery would have found `pytest` on its own here; it
+# is spelled out because this is the example.
+[shake]
+test = ["pytest", "-q"]
+
+# Anything the suite cannot exercise but the program needs goes here. Empty on purpose: if
+# this list is long, the suite is the thing to fix.
+keep = []

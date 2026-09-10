@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import List
 import typer
 from typer.core import TyperGroup
 from . import __version__
@@ -42,7 +43,7 @@ app = typer.Typer(add_completion=False, cls=_DefaultToBuild,
 def _run_build(*, project, out=None, target="host", tier="default", thin=False, thick=False,
                chonky=False, encrypt=False, secret=None, secret_env=None, secret_prompt=False,
                embed_secret=False, expires="", machine="", user="", geo="", python="",
-               entry_point="", wine=False) -> None:
+               entry_point="", wine=False, shake=False, shake_keep=()) -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -78,7 +79,8 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          expires=expires, geo=[g for g in geo.split(",") if g],
                          machine=machine, user=user, embed_secret=embed_secret, python=python,
                          wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
-                         entry_point=entry_point,
+                         entry_point=entry_point, shake=shake,
+                         shake_keep=list(shake_keep or []),
                          log=lambda m: typer.secho(f"haru-pack: {m}",
                                                    fg="yellow" if "WARNING" in m else "cyan"))
     except AmbiguousProject as e:
@@ -91,6 +93,13 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     except BuildError as e:
         typer.secho(str(e), fg="red"); raise typer.Exit(2)
     tag = " 🔒encrypted" if info.get("encrypted") else ""
+    if info.get("shake"):
+        sh = info["shake"]
+        before, after = sh["payload_bytes_before"], sh["payload_bytes_after"]
+        pct = (100.0 * (before - after) / before) if before else 0.0
+        typer.secho(f"shaken: {sh['dropped_files']} files, {before/1e6:.1f} → "
+                    f"{after/1e6:.1f} MB unpacked ({pct:.0f}% off), traced with "
+                    f"{sh['tracer']} — receipt {sh['report']}", fg="green")
     typer.secho(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
                 f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", fg="green")
 
@@ -252,7 +261,12 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           entry_point: str = typer.Option("", "--entry-point", "-e",
               help="what to run: a script (app.py), a console script (lotek), or "
                    "module:callable (app.cli:main) — same spelling as [project.scripts]"),
-          wine: bool = typer.Option(False, "--wine", help="run execute-required bundle steps under wine (thick cross)")):
+          wine: bool = typer.Option(False, "--wine", help="run execute-required bundle steps under wine (thick cross)"),
+          shake: bool = typer.Option(False, "--shake",
+              help="thick only: run the project's tests under a file tracer and drop bundled "
+                   "files nothing touched; refuses to ship if the suite then fails"),
+          shake_keep: List[str] = typer.Option(None, "--shake-keep", metavar="GLOB",
+              help="never prune paths matching GLOB (repeatable)")):
     """Build a single-file launcher from a project payload dir.
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
@@ -261,7 +275,7 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                chonky=chonky, encrypt=encrypt, secret=secret, secret_env=secret_env,
                secret_prompt=secret_prompt, embed_secret=embed_secret, expires=expires,
                machine=machine, user=user, geo=geo, python=python, entry_point=entry_point,
-               wine=wine)
+               wine=wine, shake=shake, shake_keep=shake_keep)
 
 @app.command()
 def verify(exe: Path):

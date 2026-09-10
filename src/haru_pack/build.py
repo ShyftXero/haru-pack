@@ -13,6 +13,7 @@ from .entrypoints import resolve_entrypoint
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
                      warm_cache_for_script)
+from . import shake as shake_mod
 
 class BuildError(RuntimeError): ...
 
@@ -84,6 +85,10 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "verbose_uv": decl.get("verbose_uv", False),
         # PEP 723 inline dependencies, so the thick tier can stage them (INV-TIER-01).
         "script_dependencies": list(disc.get("dependencies") or []),
+        # `[shake]` — how to OBSERVE this project, and what to keep regardless. Carried
+        # here (and popped before the manifest is written) for the same reason
+        # script_dependencies is: it is build-time input, not something the launcher reads.
+        "shake_declared": dict(decl.get("shake") or {}),
     }
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:
@@ -107,9 +112,31 @@ def _resolve(project: Path, tier: str, python_cli: str,
 def assemble_payload(source: Path, manifest: dict, tier: str, target,
                      python: str, workdir: Path, wine: bool = False,
                      sources: Sources | None = None, eager_deps: bool = False,
-                     log=None) -> Path:
+                     log=None, shake: bool = False, shake_keep=(),
+                     shake_report: dict | None = None) -> Path:
     sources = sources or Sources()
     tgt = target if isinstance(target, Target) else Target.parse(target)
+    # --shake's preconditions are checked BEFORE anything is downloaded. Discovering that a
+    # shake was impossible after staging a 90 MB interpreter wastes the operator's time,
+    # and — worse — the tempting fix at that point is to carry on and emit an unshaken
+    # binary, which is precisely the "asked for small, silently got fat" outcome the flag
+    # exists to prevent. Refuse early and say what to do instead.
+    if shake:
+        if tier != "thick":
+            raise BuildError(
+                f"--shake needs --thick (got tier '{tier}'). At thin/default the "
+                "dependencies are not in the payload — uv fetches them on the target — so "
+                "there is nothing to prune and no size to save.")
+        if not tgt.is_host:
+            raise BuildError(
+                f"--shake cannot build for --target {tgt} from here. Observing which files "
+                "a program touches means RUNNING its test suite, and this host cannot run "
+                f"{tgt} binaries. Shake on a {tgt} machine, or build for {tgt} without it.")
+        if manifest.get("kind") != "project":
+            raise BuildError(
+                "--shake needs a project (a pyproject.toml with a dependency group to run "
+                "the suite from), not a single PEP 723 script. A script's payload is its "
+                "inline dependencies and there is no declared test command to observe.")
     payload = workdir / "payload"
     app = payload / manifest["app_subdir"]
     if source.is_file():
@@ -140,6 +167,22 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
                     warm_cache_and_lock(app_dir, py, cache, tmp_env, sources=sources)
                     for step in steps:
                         run_bundle_step(step, payload, tmp_env, app_dir)
+                    if shake:
+                        # `tmp_env` is the right place to observe from and the reason the
+                        # shake happens here rather than after the payload is assembled:
+                        # it was built by uv FROM THE BUNDLED CACHE with the BUNDLED
+                        # interpreter, so every path the tracer sees maps onto a file that
+                        # is actually in the payload. Observing a project's own `.venv`
+                        # instead would trace a different resolution against a different
+                        # Python and produce a keep set for a payload that does not exist.
+                        cfg = shake_mod.resolve_config(
+                            app_dir, {"shake": manifest.get("shake_declared") or {}},
+                            cli_keep=shake_keep)
+                        rep = shake_mod.shake(payload, app_dir, cache, py, tmp_env, cfg,
+                                              workdir, sources=sources, log=log)
+                        if shake_report is not None:
+                            shake_report.update(rep)
+                        manifest.update(shake_mod.manifest_summary(rep))
                 finally:
                     shutil.rmtree(tmp_env, ignore_errors=True)
             else:
@@ -184,6 +227,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
             say(f"  post_install: {' '.join(run) if isinstance(run, list) else run}")
 
     manifest.pop("script_dependencies", None)   # build-time only; not for the launcher
+    manifest.pop("shake_declared", None)        # ditto — the launcher never re-shakes
     tomlio.dump(manifest, payload / "manifest.toml")
     return payload
 
@@ -200,7 +244,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           machine: str = "", user: str = "", embed_secret: bool = False,
           python: str = "", wine: bool = False, encrypt: bool = False,
-          entry_point: str = "", log=None) -> dict:
+          entry_point: str = "", shake: bool = False, shake_keep=(),
+          log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -215,10 +260,20 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
+    shake_report: dict = {}
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        payload_dir = assemble_payload(source, manifest, tier, tgt, pyver, tdp / "asm",
-                                       wine, sources=sources, log=log)
+        try:
+            payload_dir = assemble_payload(source, manifest, tier, tgt, pyver, tdp / "asm",
+                                           wine, sources=sources, log=log, shake=shake,
+                                           shake_keep=shake_keep,
+                                           shake_report=shake_report)
+        except shake_mod.ShakeError as e:
+            # A shake that cannot be PROVEN safe is a failed build, not a smaller one. The
+            # alternative — warn and ship the unshaken payload — hands the operator a
+            # binary that is nothing like the one they asked for, and they find out from
+            # its size or not at all.
+            raise BuildError(f"--shake refused to ship: {e}") from e
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:
@@ -244,4 +299,9 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     info.update(sources=sources.describe(),
                 tier=tier, target=str(tgt), nim=nim, compiler=tc["compiler"], out=str(out),
                 encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver)
+    if shake_report:
+        info["shake"] = {k: shake_report[k] for k in
+                         ("tracer", "dropped_files", "freed_bytes",
+                          "payload_bytes_before", "payload_bytes_after")}
+        info["shake"]["report"] = str(shake_mod.write_report(shake_report, out))
     return info

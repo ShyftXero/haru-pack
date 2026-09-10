@@ -90,6 +90,16 @@ rewritten, so a hostile mirror gets you a failed build, not a compromised one.
 you build Pi binaries on an x86_64 machine with `--target linux-aarch64`. You never need a
 toolchain on the Pi.
 
+**Thick can be shaken, on evidence, never on a guess.** `--shake` runs the project's own
+test suite under a file-access tracer, keeps the bundled files it touched, then rebuilds the
+environment from the pruned payload and re-runs the suite — and fails the build if that
+does not pass. The observation is syscall-level rather than line coverage, because the
+megabytes are in shared libraries `dlopen`ed from C extensions and in data files, neither of
+which coverage can see. It refuses to run without a declared test command, keeps the static
+closure of every lazy import, and writes down every file it removed. A passing suite is
+evidence about the suite, not the program, so this is opt-in and the receipt is the point.
+[`docs/SHAKE.md`](docs/SHAKE.md).
+
 **It refuses instead of guessing.** Ambiguous entrypoint, missing digest, unknown target,
 malformed `--entry-point`: all of these stop the build. A wrong guess here compiles
 cleanly, exits 0, and fails on the customer's machine — which is the worst place to find
@@ -123,6 +133,8 @@ in this repo that were never implemented.
 | `--tier thin\|default\|thick` | `default` | bundling tier (below) |
 | `--thin` | | shortcut for `--tier thin` |
 | `--thick` / `--chonky` | | shortcut for `--tier thick` |
+| `--shake` | off | thick only: run the project's tests under a file tracer, drop bundled files nothing touched, and refuse to ship if the suite then fails ([`docs/SHAKE.md`](docs/SHAKE.md)) |
+| `--shake-keep GLOB` | | never prune paths matching `GLOB` (repeatable) |
 | `--encrypt` | off | AES-256-GCM encrypt the payload |
 | `--secret TEXT` | | secret (key material) literal |
 | `--secret-env VAR` | | read the secret from env var `VAR` at build |

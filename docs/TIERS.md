@@ -28,6 +28,16 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
   at runtime (`UV_OFFLINE=1`). The launcher **discovers the bundled interpreter at runtime**
   (robust to uv's version-alias symlink dir, which the zip doesn't preserve).
 
+## Making thick smaller: `--shake`
+`--thick` bundles the resolved dependency closure, which is always larger than the set of
+files the program opens. `haru-pack build ./proj --thick --shake` runs the project's
+declared test command under a file-access tracer, drops what nothing touched, then rebuilds
+from the pruned payload offline and re-runs the suite — failing the build if it does not
+pass (`INV-SHAKE-01`). Measured on `examples/shake-demo`: 92.1 → 75.9 MB payload. The floor
+is the bundled `uv` (~55 MB unpacked) plus CPython, so expect ~50-60 MB however hard you
+shake; the big wins are projects whose dependencies dwarf that. Details, limits and the
+config block: [`SHAKE.md`](SHAKE.md).
+
 ## Cross-compile notes (Linux → Windows)
 - **thin / default**: fully supported from Linux. `haru-pack` fetches the **Windows** uv
   release when `--target windows` (uv binaries are per-OS), and the launcher links WinHTTP
