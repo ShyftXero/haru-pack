@@ -6,7 +6,7 @@ from .paths import launcher_src_dir
 from .payload import build_payload_zip
 from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
-from .tiers import apply_tier
+from .tiers import apply_tier, bundles_uv
 from .sources import Sources
 from .targets import Target
 from .entrypoints import resolve_entrypoint
@@ -101,7 +101,9 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
         shutil.copytree(source, app, ignore=_IGNORE)
     manifest = apply_tier(dict(manifest), tier)
     vendor = payload / "vendor"
-    if tier in ("default", "thick"):
+    # tiers.bundles_uv is the single statement of which tiers ship a uv (main's
+    # INV-TIER work); tgt/sources carry the arch and mirror plumbing.
+    if bundles_uv(tier):
         bundle_uv(tgt, vendor, sources=sources)
     if tier == "thick":
         steps = manifest.get("bundle") or []

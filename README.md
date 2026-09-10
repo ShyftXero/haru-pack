@@ -1,7 +1,7 @@
 # haru-pack
 
 Pack a Python project — a **PEP 723 script** or a full **multi-folder project** (Flask,
-Playwright, …) — into a single, **EV-signable native launcher** that stages `uv` + a
+Playwright, …) — into a single, **signable native launcher** that stages `uv` + a
 standalone Python and runs it **as if it were a compiled binary in the folder it was
 launched from**. Windows-first, cross-compiled from Linux. Built on `uv`; launcher in Nim.
 
@@ -197,7 +197,7 @@ user data — the code lives in the stage dir.
   licensing feature does and does not actually enforce
 - [docs/CONFIG.md](docs/CONFIG.md) — haru_pack.toml reference + discovery
 - [docs/TIERS.md](docs/TIERS.md) — bundling tiers + the Playwright example
-- [docs/SIGNING.md](docs/SIGNING.md) — Windows EV code signing (cross-platform)
+- [docs/SIGNING.md](docs/SIGNING.md) — Windows Authenticode code signing (cross-platform)
 - [docs/ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) — `--encrypt` + license checks
 - [docs/RELEASING.md](docs/RELEASING.md) — cutting a release (`./scripts/cut-release.sh`)
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — publishing to PyPI
@@ -205,7 +205,7 @@ user data — the code lives in the stage dir.
 
 ## Status
 Alpha. Core exercised on Linux (host + Windows cross-compile): run-in-place UX, CLI
-fidelity, all three tiers, EV-signable output, offline Playwright+Firefox, and encryption
+fidelity, all three tiers, signable output, offline Playwright+Firefox, and encryption
 + license checks.
 
 Read [THREAT_MODEL.md](THREAT_MODEL.md) before relying on `--encrypt` for anything
@@ -222,3 +222,13 @@ commercial. What the licensing feature does and does not enforce:
   footer an attacker would edit, so someone who modifies the payload can recompute it. Real
   tamper-evidence needs a signature ([`INV-LAUNCH-03`](INVARIANTS.md), not yet implemented),
   or Authenticode on a signed Windows build.
+
+## Prior art
+haru-pack is not the first tool to stage `uv` from a native launcher.
+[`ofek/pyapp`](https://github.com/ofek/pyapp) established the shape (and
+[Hatch](https://hatch.pypa.io/latest/plugins/builder/binary/) builds on it);
+[`PyCrucible`](https://github.com/razorblade23/PyCrucible) independently arrived at
+embedding uv and extracting beside the executable; [`pex --scie`](https://docs.pex-tool.org/scie.html)
+and the [a-scie](https://github.com/a-scie/lift) project named the eager/lazy bundling split
+that our tiers rediscover. `research/05-uv-as-distribution-prior-art.md` credits the field
+in full and records which ideas we borrowed from whom.

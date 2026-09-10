@@ -1,23 +1,27 @@
 # haru-pack — Plan
 
-A single-file, **EV-signable native launcher** that carries an arbitrary Python project
+A single-file, **signable native launcher** that carries an arbitrary Python project
 (PEP 723 script *or* a full multi-folder project), stages `uv` + a standalone Python into
 per-user appdata on first run, and runs the project **as if it were a compiled binary in
 the folder the exe sits in**. Windows-first, Linux supported. Written in **Nim**.
 
-> Research backing every decision here: `research/01`–`04`. TL;DR of the big one:
+> Research backing every decision here: `research/01`–`05`. TL;DR of the big one:
 > **astral `war` is NOT a builder** — it's a draft archive-format spec with *no binary
 > encoding defined yet*. We honor its spirit (magic + index + per-entry zstd + atomic
 > unpack) in our own overlay container, and can swap to real `war` when it ships. Real
-> prior art is `ofek/pyapp` (Rust); we take its shape but keep the Nim stub + run-in-place
-> UX + explicit EV-signing story.
+> prior art is `ofek/pyapp` (Rust) and `razorblade23/PyCrucible`; we take their shape but
+> keep the Nim stub + run-in-place UX + an explicit code-signing story.
+>
+> `research/05` surveys the wider field and **corrects this document**: PyCrucible already
+> embeds uv and extracts beside the exe, so those are differentiators against pyapp only.
+> It also supersedes the EV-certificate advice below — see `docs/SIGNING.md`.
 
 ---
 
 ## 0. Core requirements (non-negotiable)
 
 1. **Signable on Windows.** Output is a normal Authenticode PE. It **may ship unsigned,
-   but MUST support being signed** with an EV code-signing cert later, by us or the
+   but MUST support being signed** with a code-signing cert later, by us or the
    downstream distributor. Payload is appended **before** signing; the fixed footer is
    found by a **backward magic scan** so an appended cert table never hides it. No UPX.
    *(Validated end-to-end — see `docs/SIGNING.md` and §10.)*
@@ -44,7 +48,7 @@ Scenario: user downloads `myapp.exe` into `C:\Users\user\Downloads\images\`, dro
    in appdata. Python must NOT use `__file__` to find it (that points into appdata).
 4. Subsequent runs: hash dir already `.ready` → **skip staging, exec immediately**.
 5. Works offline. No network calls at runtime.
-6. The exe is a normal PE that `signtool` (EV cert) signs; no AV self-extractor stigma
+6. The exe is a normal PE that `signtool` signs; no AV self-extractor stigma
    beyond what signing + reputation resolves.
 
 ### The three roots (PyInstaller's two-root lesson, made explicit)
@@ -161,7 +165,7 @@ cross-machine portable (warm on target OS/arch at build, or ship prebuilt venv).
 4. Cross-compile the Nim launcher: `nim c -d:mingw --cpu:amd64 -d:release` (Win from
    Linux via `mingw-w64`) / native Linux build. Console subsystem (`--app:console`).
 5. Append payload + footer to the launcher PE. **No UPX.**
-6. **Sign LAST:** `signtool sign /fd SHA256 /tr <ts> /td SHA256 /a myapp.exe` (EV cert).
+6. **Sign LAST:** `signtool sign /fd SHA256 /tr <ts> /td SHA256 /a myapp.exe`.
    Cert table appends at EOF → footer still found by backward scan; payload is inside the
    Authenticode hash (correct: append then sign).
 
@@ -189,7 +193,7 @@ haru-pack/
 - **M2 (uv offline):** full env wiring; PEP 723 single-script mode fully offline.
 - **M3 (project mode):** prebuilt venv + `--no-sync` Flask example offline.
 - **M4 (builder CLI):** `haru-pack build ./project` → unsigned exe end-to-end.
-- **M5 (signing/AV):** EV signing step, external-payload mode, splash, docs.
+- **M5 (signing/AV):** signing step, external-payload mode, splash, docs.
 - **M6 (Linux + polish):** Linux target, eviction, cross-platform CI.
 
 ---
@@ -220,7 +224,7 @@ Proven on this Linux box, no Windows machine:
 3. `osslsigncode sign -h sha256` (throwaway cert) appends the attribute cert table
    **after** our footer (+1527 B). `osslsigncode verify`: **Calculated == Current
    message digest** → Authenticode integrity covers our payload. (Only failure is
-   `self-signed certificate` chain — a real EV cert fixes that.)
+   `self-signed certificate` chain — any publicly-trusted code-signing cert fixes that.)
 4. `builder/verify.py` and, under wine, **the Nim exe reading its own signed self** both
    relocate the footer by backward scan and confirm `payload_sha256` intact.
 

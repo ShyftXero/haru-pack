@@ -14,6 +14,7 @@ from .discovery import AmbiguousProject
 from .entrypoints import EntryPointError
 from .overlay import verify as verify_exe
 from .targets import KNOWN_TARGETS, Target, TargetError
+from .tiers import TIERS
 
 class _DefaultToBuild(TyperGroup):
     """Make `haru-pack somescript.py` mean `haru-pack build somescript.py`.
@@ -52,8 +53,8 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     """
     if thin: tier = "thin"
     if thick or chonky: tier = "thick"
-    if tier not in ("thin", "default", "thick"):
-        typer.secho(f"unknown tier '{tier}' (thin|default|thick)", fg="red"); raise typer.Exit(2)
+    if tier not in TIERS:
+        typer.secho(f"unknown tier '{tier}' ({'|'.join(TIERS)})", fg="red"); raise typer.Exit(2)
     if chonky:
         typer.secho("🦣 chonky mode: bundling everything…", fg="magenta")
     if out is None:

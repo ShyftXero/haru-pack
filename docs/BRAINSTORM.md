@@ -89,7 +89,7 @@ stable. Against those:
   pip/uv. But the blockers for THIS job:
   1. **Windows / cross-compile.** Mojo's native Windows target + Linux→Windows
      cross-compilation are not a solved, first-class path (historically Linux/macOS-first,
-     Windows via WSL). Our primary target is Windows + EV signing + cross-build-from-Linux
+     Windows via WSL). Our primary target is Windows + code signing + cross-build-from-Linux
      — that's the deciding factor. (Mojo moves fast; re-verify current status before ruling
      it out forever.)
   2. **Runtime weight.** Mojo/MAX binaries pull a heavier runtime than a lean Nim stub; the
@@ -125,5 +125,12 @@ cross-compile/one-source-many-targets story.
 ## 4. Positioning vs pyapp
 pyapp already ships a Rust launcher. haru-pack's wedge (say it out loud in the README):
 native **PEP 723 ingestion**, **truly embedded** uv+python+wheels (zero runtime network),
-**run-in-place cwd + adjacent config** UX, **first-class cross-compile + EV-signing from
+**run-in-place cwd + adjacent config** UX, **first-class cross-compile + code-signing from
 Linux**, and the **build-fuzzer** as a correctness story pyapp doesn't have.
+
+> **Corrected by `research/05`.** Two of those are differentiators against *pyapp*, not
+> against the field: `razorblade23/PyCrucible` embeds uv by default and extracts beside the
+> executable. What survives as genuinely ours: **code signing and payload integrity** (no
+> tool in the Python-uv space has either — pyapp verifies nothing and accepts `http://`),
+> **Linux→Windows cross-compile including thick**, the **explicit tier ladder**, **PEP 723
+> ingestion**, and **licensing/expiry/machine binding**.
