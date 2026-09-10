@@ -28,7 +28,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from haru_pack import tomlio  # noqa: E402
+from haru_pack import scaffold, tomlio  # noqa: E402
 
 FLEX = REPO / "flex"
 SOURCES = FLEX / "sources.toml"
@@ -136,6 +136,14 @@ def build(sources: dict, curation: dict, top_n: int) -> str:
             L.append(f"expect = {_q(' '.join(h['expect'].split()))}")
         if h.get("expect_failure"):
             L.append("expect_failure = true")
+        # The bundle / post_install steps come from scaffold.KNOWN rather than being
+        # restated here. That table is what haru-pack tells users to declare for these
+        # packages, so the harness must test the same text — a hard target configured
+        # differently from the advice would prove the advice works when it does not.
+        k = scaffold.KNOWN.get(h.get("known", name), {})
+        for block in ("bundle", "post_install"):
+            if k.get(block):
+                L.append(f"{block} = {_ml(k[block])}")
         if h.get("smoke"):
             L.append(f"smoke = {_ml(h['smoke'])}")
         L.append("")
