@@ -111,6 +111,8 @@ def render(disc: dict, deps: list[str], learned_from_venv: bool = False) -> str:
         "",
         'cwd_policy = "launch"          # "launch" (native cwd) | "exe" (always exe-adjacent)',
         "# verbose_uv = false",
+        "# keep_days = 30               # evict stage dirs unused this long; 0 = never",
+        "# keep_max = 3                 # always keep this many most-recent stage dirs",
         "",
     ]
     hints = detect(deps)

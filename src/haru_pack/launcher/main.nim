@@ -16,6 +16,11 @@ proc die(msg: string, code = 1) =
   stderr.writeLine "haru-pack: " & msg
   quit(code)
 
+proc parseIntOr(s: string, fallback: int): int =
+  ## env override that refuses to fail the launch on a typo
+  if s.len == 0: return fallback
+  try: parseInt(s.strip) except ValueError: fallback
+
 proc findUv(stageRoot: string, m: Manifest): string =
   # bundled (thick/default) -> PATH -> fetch on target (thin)
   let bundled = stageRoot / "vendor" / (when defined(windows): "uv.exe" else: "uv")
@@ -99,6 +104,15 @@ when isMainModule:
   if not fileExists(mfPath): die("manifest.toml missing in payload: " & mfPath)
   let m = parseManifest(mfPath)
   let appDir = stageRoot / m.appSubdir
+
+  # 2b. mark this stage dir as in use, then retire ones nobody has run for a while.
+  #     Skipped in dev mode: the dev tree is not ours to garbage-collect.
+  if dev.len == 0:
+    touchStage(stageRoot)
+    let
+      keepDays = parseIntOr(getEnv("HARUPACK_KEEP_DAYS"), m.keepDays)
+      keepMax = parseIntOr(getEnv("HARUPACK_KEEP_MAX"), m.keepMax)
+    evictStale(stageRoot, keepDays, keepMax)
 
   # 3. env wiring (three roots + uv offline knobs)
   putEnv("HARUPACK_EXE_DIR", exeDir)

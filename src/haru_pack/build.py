@@ -49,6 +49,10 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "entrypoint": ep,
         "cwd_policy": decl.get("cwd_policy", "launch"),
         "verbose_uv": decl.get("verbose_uv", False),
+        # stage-dir retention: evict trees unused for keep_days, but never drop the
+        # keep_max most recent. keep_days = 0 disables eviction.
+        "keep_days": int(decl.get("keep_days", 30)),
+        "keep_max": int(decl.get("keep_max", 3)),
     }
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:

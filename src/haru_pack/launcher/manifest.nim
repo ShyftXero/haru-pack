@@ -27,12 +27,16 @@ type
     fetchUv*: bool
     uvVersion*: string
     cacheDir*: string
+    keepDays*: int              # evict stage dirs unused this long; 0 disables
+    keepMax*: int               # always retain this many most-recent stage dirs
     bundle*: seq[BundleStep]
 
 proc gs(t: TomlValueRef, k, d: string): string =
   if t.contains(k): t[k].getStr(d) else: d
 proc gb(t: TomlValueRef, k: string, d: bool): bool =
   if t.contains(k): t[k].getBool(d) else: d
+proc gi(t: TomlValueRef, k: string, d: int): int =
+  if t.contains(k): t[k].getInt(d) else: d
 proc strSeq(t: TomlValueRef, k: string): seq[string] =
   if not t.contains(k): return
   let v = t[k]
@@ -57,6 +61,8 @@ proc parseManifest*(path: string): Manifest =
   result.fetchUv = gb(t, "fetch_uv", false)
   result.uvVersion = gs(t, "uv_version", "0.10.4")
   result.cacheDir = gs(t, "cache_dir", "")
+  result.keepDays = gi(t, "keep_days", 30)
+  result.keepMax = gi(t, "keep_max", 3)
   proc installSteps(node: TomlValueRef): seq[InstallStep] =
     for step in node.getElems:
       result.add InstallStep(os: strSeq(step, "os"), run: strSeq(step, "run"))
