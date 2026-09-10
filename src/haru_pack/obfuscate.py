@@ -112,6 +112,12 @@ class PyArmorEngine(ObfuscationEngine):
     pyarmor's `gen` writes the obfuscated sources under `<out>/<app_dir_basename>/` and a
     sibling `<out>/pyarmor_runtime_*/`. Both are moved into the app dir so the entry keeps
     its path and `from pyarmor_runtime_* import ...` resolves alongside it.
+
+    Supported interpreters: STANDARD CPython 3.7 through 3.14 (verified 3.11/3.12/3.13/3.14
+    all obfuscate and run when targeted). pyarmor does NOT support free-threaded (GIL-less)
+    CPython — the `+freethreaded` / `python3.14t` builds — and a bare "3.14" can resolve to
+    one of those via uv, so that failure is caught and re-raised with the real constraint.
+    There is nothing special about 3.12; it is only haru-pack's default `python`.
     """
 
     name = "pyarmor"
@@ -144,8 +150,19 @@ class PyArmorEngine(ObfuscationEngine):
                 f"{entry_rel})")
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
             if r.returncode != 0:
+                blob = (r.stderr or r.stdout)
+                if "free-threading" in blob or "free-threaded" in blob:
+                    # The one Python variant pyarmor refuses. Bare "3.13"/"3.14" can resolve
+                    # to a +freethreaded build via uv, so name the real constraint and the
+                    # fix rather than surfacing pyarmor's raw line.
+                    raise ObfuscationError(
+                        f"pyarmor does not support free-threaded (GIL-less) CPython, and the "
+                        f"interpreter resolved for Python {pyver} is a free-threaded build. "
+                        f"pyarmor works on STANDARD CPython (3.7 through 3.14). Pin a standard "
+                        f"interpreter (e.g. --python 3.12), or drop --obfuscate for a "
+                        f"free-threaded target.")
                 raise ObfuscationError(
-                    "pyarmor gen failed:\n" + (r.stderr or r.stdout).strip()[-800:])
+                    "pyarmor gen failed:\n" + blob.strip()[-800:])
 
             inner = out / app_dir.name
             runtimes = [d for d in out.iterdir()

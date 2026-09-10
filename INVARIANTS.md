@@ -1277,10 +1277,18 @@ interpreter version the binary will stage.
 Note: Obfuscation binds the payload to an EXACT Python minor version. Measured 2026-09-10: a
 payload obfuscated for 3.12 imports only under 3.12 — 3.11 fails on `_PyThreadState_GetCurrent`,
 3.13/3.14 on `_PyErr_GetTopmostException`, because pyarmor's runtime .so references
-version-private symbols. Only `--thick` bundles the exact interpreter and guarantees the
-match; thin/default resolve a Python on the target and may not land on the same minor, so a
-non-thick obfuscated build warns loudly that the binary will fail to start unless the target
-has exactly that version.
+version-private symbols. This is not a lock TO 3.12: pyarmor obfuscates for standard CPython
+3.7 through 3.14 (verified 3.11/3.12/3.13/3.14 each build and run when targeted), and
+haru-pack obfuscates under whatever `--python` selects. 3.12 is only the default. Only
+`--thick` bundles the exact interpreter and guarantees the run-time match; thin/default
+resolve a Python on the target and may not land on the same minor, so a non-thick obfuscated
+build warns loudly that the binary will fail to start unless the target has exactly that
+version.
+Note: pyarmor does NOT support free-threaded (GIL-less) CPython — the `+freethreaded` /
+`python3.14t` builds. A bare "3.14" can resolve to a free-threaded interpreter via uv, so the
+engine catches pyarmor's free-threading error and re-raises it naming the real constraint and
+the fix (pin a standard interpreter, or drop --obfuscate for a free-threaded target). This is
+the single hard ceiling; standard 3.14 obfuscates fine.
 Note: The engine is modular (an `ObfuscationEngine` interface with a registry) because
 pyarmor is commercial, versioned, and may be unavailable — offline, a lapsed licence, or a
 future where it is abandoned. This project exists to outlive its tools, so pyarmor is one

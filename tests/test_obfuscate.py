@@ -141,3 +141,31 @@ def test_pyarmor_actually_removes_the_literal_and_keeps_the_entry(tmp_path):
         "the plaintext literal is still in the obfuscated source"
     )
     assert "pyarmor" in body.lower(), "the obfuscated file should be a pyarmor bootstrap"
+
+
+@pytest.mark.invariant("INV-OBF-01")
+def test_free_threaded_python_gives_a_clear_error_not_a_raw_pyarmor_line(monkeypatch):
+    """pyarmor's one hard ceiling is free-threaded CPython, and a bare "3.14" can resolve to
+    a +freethreaded build via uv. The engine must name the real constraint and the fix, not
+    surface pyarmor's raw "does not support free-threading" line with no guidance."""
+    import subprocess as _sp
+    eng = PyArmorEngine()
+
+    class _R:
+        returncode = 1
+        stdout = ""
+        stderr = "ERROR    Pyarmor does not support free-threading Python"
+
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/uv")
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
+
+    app = Path("/tmp")  # never touched; the entry-exists check is what we skip past
+    # make the entry-exists guard pass without a real tree
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    with pytest.raises(ObfuscationError) as e:
+        eng.obfuscate(app, "app.py", python="3.14")
+    msg = str(e.value)
+    assert "free-threaded" in msg and "standard" in msg.lower(), (
+        "the error must name the constraint (free-threaded) and the fix (standard interpreter)"
+    )
+    assert "3.14" in msg
