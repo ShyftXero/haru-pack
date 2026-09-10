@@ -13,6 +13,10 @@ authors = [{ name = "ShyftXero" }]
 keywords = ["packaging", "uv", "pep723", "executable", "nim", "single-file", "pyinstaller", "distribution"]
 dependencies = [
   "typer>=0.12",
+  # Declared explicitly even though typer already requires it: `haru_pack.ui` imports rich
+  # directly, and depending on a transitive dep is how a build breaks when the intermediary
+  # drops it. >=13 for `Console(soft_wrap=...)` and named themes.
+  "rich>=13",
   "platformdirs>=4",
   "tomli-w>=1",
   "tomli>=2; python_version < '3.11'",

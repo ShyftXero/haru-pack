@@ -4,6 +4,10 @@ import subprocess
 from pathlib import Path
 from typing import List
 import typer
+
+# rich, via a wrapper that keeps markup OFF by default: rich reads `[project.scripts]`
+# as a style tag and silently prints nothing. See ui.py.
+from .ui import print, fields
 from typer.core import TyperGroup
 from . import __version__
 from .bootstrap import (find_nim, nim_version, ensure_nim_deps, nim_dep_specs,
@@ -55,14 +59,14 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     if thin: tier = "thin"
     if thick or chonky: tier = "thick"
     if tier not in TIERS:
-        typer.secho(f"unknown tier '{tier}' ({'|'.join(TIERS)})", fg="red"); raise typer.Exit(2)
+        print(f"unknown tier '{tier}' ({'|'.join(TIERS)})", style="error"); raise typer.Exit(2)
     if chonky:
-        typer.secho("🦣 chonky mode: bundling everything…", fg="magenta")
+        print("🦣 chonky mode: bundling everything…", style="magenta")
     if out is None:
         try:
             suffix = Target.parse(target).exe_suffix
         except TargetError as e:
-            typer.secho(f"haru-pack: {e}", fg="red"); raise typer.Exit(2)
+            print(f"haru-pack: {e}", style="error"); raise typer.Exit(2)
         out = Path(project.name or "app").with_suffix(suffix)
     want_enc = encrypt or embed_secret or secret or secret_env or secret_prompt or expires or machine or user or geo
     sec = None
@@ -72,8 +76,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
         elif secret_prompt:
             import getpass; sec = getpass.getpass("build secret: ").encode()
         if not sec:
-            typer.secho("encryption requested but no secret — use --secret / --secret-env / --secret-prompt",
-                        fg="red"); raise typer.Exit(2)
+            print("encryption requested but no secret — use --secret / --secret-env / --secret-prompt", style="error"); raise typer.Exit(2)
     try:
         info = build_exe(project, out, target=target, tier=tier, secret=sec,
                          expires=expires, geo=[g for g in geo.split(",") if g],
@@ -81,33 +84,34 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
                          entry_point=entry_point, shake=shake,
                          shake_keep=list(shake_keep or []),
-                         log=lambda m: typer.secho(f"haru-pack: {m}",
-                                                   fg="yellow" if "WARNING" in m else "cyan"))
+                         log=lambda m: print(
+                             f"haru-pack: {m}",
+                             style="warn" if "WARNING" in m else "info"))
     except AmbiguousProject as e:
         _report_ambiguity(project, e)
         raise typer.Exit(2)
     except TargetError as e:
-        typer.secho(f"haru-pack: {e}", fg="red"); raise typer.Exit(2)
+        print(f"haru-pack: {e}", style="error"); raise typer.Exit(2)
     except EntryPointError as e:
-        typer.secho(str(e), fg="red"); raise typer.Exit(2)
+        print(str(e), style="error"); raise typer.Exit(2)
     except BuildError as e:
-        typer.secho(str(e), fg="red"); raise typer.Exit(2)
+        print(str(e), style="error"); raise typer.Exit(2)
     tag = " 🔒encrypted" if info.get("encrypted") else ""
     if info.get("shake"):
         sh = info["shake"]
         before, after = sh["payload_bytes_before"], sh["payload_bytes_after"]
         pct = (100.0 * (before - after) / before) if before else 0.0
-        typer.secho(f"shaken: {sh['dropped_files']} files, {before/1e6:.1f} → "
+        print(f"shaken: {sh['dropped_files']} files, {before/1e6:.1f} → "
                     f"{after/1e6:.1f} MB unpacked ({pct:.0f}% off), traced with "
-                    f"{sh['tracer']} — receipt {sh['report']}", fg="green")
-    typer.secho(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
-                f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", fg="green")
+                    f"{sh['tracer']} — receipt {sh['report']}", style="ok")
+    print(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
+                f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", style="ok")
 
 
 @app.command()
 def version():
     """Show the haru-pack version."""
-    typer.echo(f"haru-pack {__version__}")
+    print(f"haru-pack {__version__}")
 
 
 def _report_ambiguity(project: Path, e: "AmbiguousProject") -> None:
@@ -116,20 +120,20 @@ def _report_ambiguity(project: Path, e: "AmbiguousProject") -> None:
     A wrong guess here builds cleanly and runs the wrong program, so the failure shows up
     at the customer rather than at the build. Refusing costs the operator one command.
     """
-    typer.secho(f"haru-pack: {e}", fg="yellow")
+    print(f"haru-pack: {e}", style="warn")
     if e.candidates:
-        typer.echo("\ncandidates:")
+        print("\ncandidates:")
         for c in e.candidates:
-            typer.echo(f"  - {c}")
+            print(f"  - {c}")
     out_dir = project if project.is_dir() else project.parent
     cfg = out_dir / "haru_pack.toml"
-    typer.echo("\npick one, either way:")
+    print("\npick one, either way:")
     first = e.candidates[0] if e.candidates else "app.cli:main"
-    typer.echo(f"  haru-pack build {project} --entry-point {first}")
+    print(f"  haru-pack build {project} --entry-point {first}")
     if cfg.exists():
-        typer.echo(f"  ...or set `entrypoint` in {cfg}")
+        print(f"  ...or set `entrypoint` in {cfg}")
     else:
-        typer.echo(f"  ...or run `haru-pack init {project}` to write {cfg.name} and edit it")
+        print(f"  ...or run `haru-pack init {project}` to write {cfg.name} and edit it")
 
 
 @app.command()
@@ -138,13 +142,13 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
                help="'host', or <os>-<arch>: " + ", ".join(KNOWN_TARGETS))):
     """Check the build toolchain, and (if given a project) detect needed bundle/post_install steps."""
     nim = find_nim()
-    typer.secho(f"nim       : {nim_version(nim) if nim else 'NOT FOUND — run `haru-pack bootstrap`'}",
-                fg=("green" if nim else "red"))
+    print(f"nim       : {nim_version(nim) if nim else 'NOT FOUND — run `haru-pack bootstrap`'}",
+          style=("ok" if nim else "error"))
     tc = detect_c_toolchain(target)
-    typer.secho(f"C ({target}) : {tc['compiler'] if tc['ok'] else 'MISSING'}",
-                fg=("green" if tc["ok"] else "red"))
+    print(f"C ({target}) : {tc['compiler'] if tc['ok'] else 'MISSING'}",
+          style=("ok" if tc["ok"] else "error"))
     if not tc["ok"]:
-        typer.secho(tc["advice"], fg="yellow")
+        print(tc["advice"], style="warn")
 
     if path is not None:
         from .discovery import discover
@@ -152,7 +156,7 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
         try:
             disc = discover(path)
         except Exception as e:
-            typer.secho(f"project scan skipped: {e}", fg="yellow")
+            print(f"project scan skipped: {e}", style="warn")
             disc = None
         if disc is not None:
             deps = set(scaffold.project_deps(path, disc))
@@ -160,19 +164,19 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
             if venv:
                 _, vpkgs = scaffold.venv_info(venv)
                 deps |= set(vpkgs)
-                typer.secho(f"scanned {len(deps)} deps ({disc['kind']}; venv: {venv.name})", fg="cyan")
+                print(f"scanned {len(deps)} deps ({disc['kind']}; venv: {venv.name})", style="info")
             else:
-                typer.secho(f"scanned {len(deps)} deps ({disc['kind']}; no venv)", fg="cyan")
+                print(f"scanned {len(deps)} deps ({disc['kind']}; no venv)", style="info")
             hints = scaffold.detect(sorted(deps))
             if not hints:
-                typer.secho("bundle steps: none needed — plain deps only ✓", fg="green")
+                print("bundle steps: none needed — plain deps only ✓", style="ok")
             else:
-                typer.secho("needed bundle/install steps:", fg="yellow")
+                print("needed bundle/install steps:", style="warn")
                 for h in hints:
                     tag = {"bundle": "bundle (offline)", "post_install": "post_install (1st run)",
                            "note": "note"}[h["kind"]]
-                    typer.echo(f"  • {h['package']:14} [{tag}]  {h['why']}")
-                typer.secho("  run `haru-pack init` to scaffold them into haru_pack.toml", fg="cyan")
+                    print(f"  • {h['package']:14} [{tag}]  {h['why']}")
+                print("  run `haru-pack init` to scaffold them into haru_pack.toml", style="info")
 
     if not nim or not tc["ok"]:
         raise typer.Exit(1)
@@ -195,48 +199,47 @@ def bootstrap(target: list[str] = typer.Option(None, "--target",
     missing = toolchain.system_packages(targets)
     if missing:
         cmd = toolchain.sudo_command(missing)
-        typer.secho(f"needs {len(missing)} system package(s): {', '.join(missing)}", fg="yellow")
+        print(f"needs {len(missing)} system package(s): {', '.join(missing)}", style="warn")
         if not cmd:
-            typer.secho("install them with your package manager, then re-run "
-                        "`haru-pack bootstrap`.", fg="yellow")
+            print("install them with your package manager, then re-run "
+                        "`haru-pack bootstrap`.", style="warn")
             raise typer.Exit(1)
-        typer.echo("\n    " + " ".join(cmd) + "\n")
+        print("\n    " + " ".join(cmd) + "\n")
         run_it = yes or typer.confirm("run it now?", default=True)
         if not run_it:
-            typer.secho("skipped. Run that command, then `haru-pack bootstrap` again.",
-                        fg="yellow")
+            print("skipped. Run that command, then `haru-pack bootstrap` again.", style="warn")
             raise typer.Exit(1)
         rc = subprocess.call(cmd)
         if rc != 0:
-            typer.secho(f"package install failed (exit {rc}). Run the command above by hand.",
-                        fg="red")
+            print(f"package install failed (exit {rc}). Run the command above by hand.", style="error")
             raise typer.Exit(rc)
     else:
-        typer.secho("system packages: nothing needed ✓", fg="green")
+        print("system packages: nothing needed ✓", style="ok")
 
     # 2. Nim, via choosenim, with no sudo at all.
     try:
-        nim = toolchain.install_nim(force=force, log=lambda m: typer.echo(f"  {m}"))
+        nim = toolchain.install_nim(force=force, log=lambda m: print(f"  {m}"))
     except ToolchainError as e:
-        typer.secho(str(e), fg="red"); raise typer.Exit(1)
-    typer.secho(f"nim: {nim_version(nim)}  ({nim})", fg="green")
+        print(str(e), style="error"); raise typer.Exit(1)
+    print(f"nim: {nim_version(nim)}  ({nim})", style="ok")
 
     # 3. the launcher's Nim libraries, pinned.
-    typer.echo("ensuring nim deps (" + ", ".join(nim_dep_specs()) + ") ...")
+    print("ensuring nim deps (" + ", ".join(nim_dep_specs()) + ") ...")
     ok = ensure_nim_deps(nim)
-    typer.secho("nim deps: ok" if ok else "nim deps: FAILED", fg=("green" if ok else "red"))
+    print("nim deps: ok" if ok else "nim deps: FAILED",
+          style=("ok" if ok else "error"))
     if not ok:
         raise typer.Exit(1)
 
     # 4. report the toolchain per requested target.
     for t in ["host", *targets]:
         tc = detect_c_toolchain(t)
-        typer.secho(f"C ({t}) : {tc['compiler'] if tc['ok'] else 'MISSING'}",
-                    fg=("green" if tc["ok"] else "red"))
+        print(f"C ({t}) : {tc['compiler'] if tc['ok'] else 'MISSING'}",
+              style=("ok" if tc["ok"] else "error"))
         if not tc["ok"]:
-            typer.secho(tc["advice"], fg="yellow")
+            print(tc["advice"], style="warn")
 
-    typer.secho("\nready — try `haru-pack yourscript.py`", fg="green")
+    print("\nready — try `haru-pack yourscript.py`", style="ok")
 
 
 @app.command()
@@ -281,9 +284,13 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
 def verify(exe: Path):
     """Inspect a built launcher's footer + confirm payload integrity."""
     info = verify_exe(exe)
-    for k, v in info.items():
-        typer.echo(f"{k:20}: {v}")
-    raise typer.Exit(0 if info["sha_ok"] else 1)
+    # Aligned on a terminal, `key: value` lines when piped — `ui.table` decides, because
+    # this is the command a CI job runs and its output has to stay greppable.
+    fields(info.items(), title=str(exe))
+    ok = info["sha_ok"]
+    print("payload integrity: OK" if ok else "payload integrity: FAILED",
+          style="ok" if ok else "error")
+    raise typer.Exit(0 if ok else 1)
 
 @app.command()
 def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
@@ -294,11 +301,11 @@ def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
     out_dir = path if path.is_dir() else path.parent
     out = out_dir / "haru_pack.toml"
     if out.exists() and not force:
-        typer.secho(f"{out} already exists (use --force)", fg="yellow"); raise typer.Exit(1)
+        print(f"{out} already exists (use --force)", style="warn"); raise typer.Exit(1)
     try:
         disc = discover(path)
     except Exception as e:
-        typer.secho(f"discovery failed: {e}", fg="red"); raise typer.Exit(2)
+        print(f"discovery failed: {e}", style="error"); raise typer.Exit(2)
     deps = set(scaffold.project_deps(path, disc))
     learned = False
     venv = scaffold.find_venv(out_dir)
@@ -306,15 +313,15 @@ def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
         vver, vpkgs = scaffold.venv_info(venv)
         if vpkgs: deps |= set(vpkgs); learned = True
         if vver and not disc.get("python"): disc["python"] = vver
-        typer.secho(f"learned from venv: {venv}  ({len(vpkgs)} packages, python {vver or '?'})", fg="cyan")
+        print(f"learned from venv: {venv}  ({len(vpkgs)} packages, python {vver or '?'})", style="info")
     out.write_text(scaffold.render(disc, sorted(deps), learned_from_venv=learned))
-    typer.secho(f"wrote {out}  (kind={disc['kind']}, entrypoint={disc['entrypoint']}, python={disc.get('python') or 'auto'})", fg="green")
+    print(f"wrote {out}  (kind={disc['kind']}, entrypoint={disc['entrypoint']}, python={disc.get('python') or 'auto'})", style="ok")
 
 @app.command("machine-id")
 def machine_id_cmd():
     """Print this machine's id (give it to a vendor to bind an --encrypt license)."""
     from .crypto import machine_id
-    typer.echo(machine_id())
+    print(machine_id())
 
 def main():
     app()

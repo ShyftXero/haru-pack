@@ -1258,3 +1258,38 @@ Verified 2026-09-10 against a package defining `main` and `helper`: the refusal 
 Source: Asked for 2026-09-10 with INV-BUILD-08.
 Territory: src/haru_pack/discovery.py, src/haru_pack/entrypoints.py, src/haru_pack/cli.py,
 tests/test_entrypoints.py
+
+---
+
+## UI — what haru-pack prints is what it meant to print
+
+### INV-UI-01
+Status: active
+Statement: No text haru-pack prints is lost to terminal markup. Rich markup is opt-in per
+call, never the default, and the `name: value` shape of `haru-pack verify`'s output is
+preserved so it stays machine-readable.
+Actors: `docs/PRINCIPLES.md`'s second user — the developer reading a refusal — and a CI job
+grepping `haru-pack verify`.
+Assets: the actionable half of every error message. Measured 2026-09-10 with rich 15.0.0:
+`from rich import print` renders `[project.scripts]` as **nothing at all** and `[[bundle]]`
+as `[]`, because rich reads `[...]` as a style tag and drops unrecognised ones silently
+rather than raising. Those exact strings are what the entrypoint and config refusals exist
+to tell the operator — `[project.scripts]`, `[tool.haru-pack]`, `[shake]`, `[sources]`,
+`[[bundle]]`, `[[post_install]]`. A refusal that names no fix is worse than the bug it
+reports.
+Red-path: Change `ui.print`'s `markup` default to `True`, or `from rich import print`
+directly in `cli.py`. Ten parametrizations of
+`test_bracketed_text_survives_printing` go red. Separately, render `ui.fields` as a
+`rich.Table` again — it drops the `:` separator and
+`test_fields_keeps_the_colon_separator` goes red, which is what would have broken
+`haru-pack verify app | grep 'sha_ok: True'`.
+Source: Asked for 2026-09-10 — "haru should use rich to print things nicely… `from rich
+import print` to make the change as small as possible". The change is that small at every
+call site; it just routes through `haru_pack.ui` so the brackets survive. The first draft
+of `ui.fields` did render a table and did drop the colon, which is why that half is an
+invariant too.
+Note: `NO_COLOR=1` and a non-tty stdout are honoured by rich, so piped output is plain —
+verified. Colour is never the carrier of meaning: every state that is coloured is also
+stated in words (`payload integrity: OK`, `nim deps: FAILED`), because a colour is invisible
+to anyone reading a log file.
+Territory: src/haru_pack/ui.py, src/haru_pack/cli.py, tests/test_ui.py
