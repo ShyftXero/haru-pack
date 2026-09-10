@@ -647,3 +647,44 @@ def test_an_aborted_run_is_never_read_as_a_verdict(tmp_path):
         "the divergence a quota failure fabricates must be labelled as fabricated"
     )
     assert "122" in text, "the abort reason belongs in the report, not just the journal"
+
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_every_non_ran_result_names_who_failed(tmp_path):
+    """A "?" in the blame column is a hole in triage, not a finding.
+
+    The 2026-09-10 top-25 sweep printed 25 of them. All were `not_executable`, whose OS
+    refusal comes back through run_exe's OSError branch — which returned early without
+    setting blame. Four parties exist and the two that this cannot infer from output
+    (`os`, `harness`) have to be named by whoever knows.
+    """
+    bb = _load_busybody()
+
+    victim = tmp_path / "noexec"
+    victim.write_bytes(b"\x7fELF not really")
+    victim.chmod(0o644)
+    r = bb.run_exe(victim, tmp_path, env={"PATH": "/usr/bin:/bin"}, timeout=20)
+    assert r["outcome"] == "REFUSED"
+    assert r.get("blame") == "os", (
+        f"the kernel refused the exec; blame was {r.get('blame')!r}. A missing blame shows "
+        f"up in --analyze as a '?' bucket."
+    )
+
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "'blame': 'harness'" in src, (
+        "a CASE-ERROR is busybody breaking; it must never read as a statement about "
+        "haru-pack"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_the_blame_vocabulary_is_closed():
+    """Four values, and the docstring that defines them lists exactly those four. An
+    undocumented fifth is how a triage column turns back into free text."""
+    bb = _load_busybody()
+    doc = bb.blame.__doc__ or ""
+    for party in ("launcher", "app", "os", "harness"):
+        assert party in doc, f"{party} is produced but not documented in blame()"
+    assert bb.blame("", "haru-pack: nope") == "launcher"
+    assert bb.blame("", "Traceback (most recent call last):") == "app"
+    assert bb.blame("", "") == "unknown"

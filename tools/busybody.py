@@ -248,6 +248,20 @@ def blame(out: str, err: str) -> str:
 
     The launcher prefixes every diagnostic with "haru-pack:", which is what makes this
     cheap. An app traceback has no such prefix.
+
+    Four parties, not two. This function can only distinguish the first two from output, so
+    the others are set explicitly by whoever knows:
+
+      launcher  haru-pack reported it. Always a defect unless a case expected it.
+      app       the packaged application reported it. Expected when a persona starved it.
+      os        the kernel refused before either got a turn — `not_executable` chmods the
+                binary to 000, so exec is denied. Calling that "app" would be a lie in the
+                direction that hides defects.
+      harness   busybody itself broke (CASE-ERROR). Never a statement about haru-pack.
+
+    Every non-RAN result carries one. A missing blame surfaces in --analyze as a "?" bucket,
+    which is a hole in triage rather than a finding — there were 25 in the 2026-09-10 sweep,
+    all from run_exe's OSError path returning early without setting it.
     """
     blob = (out or "") + (err or "")
     if "haru-pack:" in blob:
@@ -311,7 +325,7 @@ def run_exe(exe: Path, cwd: Path, env=None, timeout: int = 120, args=(),
         # The OS refused to exec the file at all. That is a refusal by the system, not a
         # haru-pack crash, and it is what "the executable bit got dropped" looks like.
         return {"outcome": "REFUSED", "rc": None, "seconds": round(time.monotonic() - t0, 1),
-                "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+                "blame": "os", "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
     outcome = classify(rc, out, err, to)
     return {"outcome": outcome, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
             "blame": blame(out, err) if outcome != "RAN" else "none",
@@ -1687,7 +1701,14 @@ def main() -> int:
                     r = c["fn"](exe, work)
                 except Exception as e:
                     r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0,
-                         "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+                         "blame": "harness", "stdout": "",
+                         "stderr": f"{type(e).__name__}: {e}"}
+                # Every non-RAN result carries a blame. A missing one shows up in
+                # --analyze as a "?" bucket, which is a hole in triage rather than a
+                # finding: 25 of them in the 2026-09-10 sweep were all `not_executable`,
+                # whose result is built by hand from an OSError and never saw run_exe().
+                r.setdefault("blame", blame(r.get("stdout", ""), r.get("stderr", "")))
+
                 scratch = dir_bytes(work)
                 r["scratch_bytes"] = scratch
                 peak_scratch = max(peak_scratch, scratch)

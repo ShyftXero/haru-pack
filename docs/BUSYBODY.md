@@ -261,7 +261,7 @@ stops diverging, recalibrate — do not nudge it.
 **"The launcher crashed" and "the app crashed" are different findings.** Once calibrated, the
 case diverged and then reported the divergence as `CRASHED` — a haru-pack defect — because the
 classifier could not tell a numpy `MemoryError` from a Nim traceback. There is now an
-`APP-CRASHED` outcome and a `blame` field (`launcher` / `app` / `unknown`), split cheaply on
+`APP-CRASHED` outcome and a `blame` field (`launcher` / `app` / `os` / `harness`), split cheaply on
 the fact that the launcher prefixes every diagnostic with `haru-pack:`. `APP-CRASHED` is
 deliberately **not** fatal: an application declining a limit a persona imposed on purpose is
 behaving correctly, and a case has to opt into accepting it.
