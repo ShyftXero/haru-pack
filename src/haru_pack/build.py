@@ -8,6 +8,7 @@ from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier
 from .sources import Sources
+from .entrypoints import resolve_entrypoint
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine)
 
@@ -43,7 +44,8 @@ def compile_launcher(nim: str, target: str, workdir: Path) -> Path:
     return out
 
 def _resolve(project: Path, tier: str, python_cli: str,
-             expires, geo, machine, user, embed_secret, encrypt: bool = False):
+             expires, geo, machine, user, embed_secret, encrypt: bool = False,
+             entry_point: str = ""):
     """Discover + merge haru_pack.toml + CLI. Returns (manifest, enc, python_version)."""
     disc = discovery.discover(project)
     decl_dir = project if project.is_dir() else project.parent
@@ -51,9 +53,12 @@ def _resolve(project: Path, tier: str, python_cli: str,
     p = decl_dir / "haru_pack.toml"
     if p.exists():
         decl = tomlio.load(p)
-    ep = decl.get("entrypoint", disc["entrypoint"])
-    if isinstance(ep, str):
-        ep = [ep]
+    # --entry-point beats haru_pack.toml beats discovery. Accepts a script name, a
+    # console-script name, or a `module:callable` object reference in the same spelling
+    # [project.scripts] uses — resolved to argv here so the launcher never parses it.
+    ep = entry_point or decl.get("entrypoint") or disc["entrypoint"]
+    ep = resolve_entrypoint(ep, name=decl.get("name", disc["name"]),
+                            kind=decl.get("kind", disc["kind"]))
     manifest = {
         "name": decl.get("name", disc["name"]),
         "kind": decl.get("kind", disc["kind"]),
@@ -126,7 +131,8 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           machine: str = "", user: str = "", embed_secret: bool = False,
-          python: str = "", wine: bool = False, encrypt: bool = False) -> dict:
+          python: str = "", wine: bool = False, encrypt: bool = False,
+          entry_point: str = "") -> dict:
     project = Path(project); out = Path(out)
     nim = find_nim()
     if not nim:
@@ -135,7 +141,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     if not tc["ok"]:
         raise BuildError(f"C toolchain missing for target '{target}':\n{tc['advice']}")
     manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
-                                                     machine, user, embed_secret, encrypt)
+                                                     machine, user, embed_secret, encrypt,
+                                                     entry_point)
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")

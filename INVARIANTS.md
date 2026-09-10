@@ -76,6 +76,49 @@ with no policy flag then exits 0 with a plaintext payload and the claiming test 
 Source: CRIT C1, adversarial review 2026-09-09. The bug shipped in a documented example.
 Territory: src/haru_pack/cli.py, src/haru_pack/build.py
 
+### INV-BUILD-03
+Status: active
+Statement: When more than one entrypoint is defensible, haru-pack refuses and names the
+candidates; it never picks one silently.
+Actors: an operator pointing haru-pack at a project they did not write, or one that grew a
+second console script since the last build.
+Assets: correctness of the shipped artifact. A wrong guess is the worst outcome available here
+— it builds cleanly, exits 0, and runs the wrong program, so the failure surfaces at the
+customer rather than at the build.
+Red-path: Restore `entrypoint = [next(iter(scripts))] if scripts else [...]` in
+`discovery.discover`. `test_multiple_console_scripts_refuse_and_list_candidates` goes red,
+because that expression returns an arbitrary dict key instead of raising.
+Source: Found 2026-09-09 while designing the "just point it at a script" UX. `discover` picked
+the first key of `[project.scripts]`. lotek happens to declare exactly one, so it was right by
+luck; a project with `serve` and `migrate` got a coin flip and no warning.
+Note: Root-level `.py` files stop being candidates once `[project.scripts]` exists. In a real
+tree they are helpers, plugins, and one-off utilities that the console script invokes or takes
+as arguments — lotek's root has a dozen, and the only correct answer is the declared `lotek`.
+Note: `python -m <package>` is only offered when that package actually exists in the tree.
+Otherwise it is a guess dressed as a default.
+Territory: src/haru_pack/discovery.py, src/haru_pack/cli.py, tests/test_entrypoints.py
+
+### INV-BUILD-04
+Status: active
+Statement: An entrypoint may be given as a script filename, a console-script name, or a
+`module:callable` object reference; a malformed one is rejected at build time, never deferred
+to a runtime "command not found" on a customer machine.
+Actors: an operator typing `--entry-point`, or editing `entrypoint` in haru_pack.toml.
+Assets: build-time feedback. Every spelling accepted here is resolved to plain argv before it
+reaches the payload.
+Red-path: Delete the `if ":" in spec: raise` branch in `entrypoints.resolve_entrypoint`. Four
+parametrizations of `test_malformed_entry_points_are_rejected` go red — `mod:`, `:func`,
+`mod::func` and `not a ref!` all fall through to being treated as console-script names.
+Source: Added 2026-09-09 with `--entry-point`. The first implementation had exactly that bug:
+anything failing the object-reference pattern was silently treated as a command name, so a
+typo'd `app.cli:` became a search for a console script of that literal name.
+Note: Resolution happens at BUILD time, so the launcher never parses entry-point syntax. That
+is one less place for the Python and Nim sides to disagree (compare INV-CRYPTO-02, where they
+did). The generated argv sets `sys.argv[0]` and re-raises the callable's return value as
+`SystemExit`, matching what an installed console script does — without which a non-zero exit
+code would be reported as success.
+Territory: src/haru_pack/entrypoints.py, src/haru_pack/build.py, tests/test_entrypoints.py
+
 ---
 
 ## CRYPTO — the container is what both implementations think it is

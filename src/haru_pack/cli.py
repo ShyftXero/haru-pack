@@ -6,6 +6,8 @@ from . import __version__
 from .bootstrap import (find_nim, nim_version, install_nim, ensure_nim_deps,
                         detect_c_toolchain)
 from .build import build as build_exe, BuildError
+from .discovery import AmbiguousProject
+from .entrypoints import EntryPointError
 from .overlay import verify as verify_exe
 
 app = typer.Typer(add_completion=False, help="haru-pack — pack a Python project into a single, signable native launcher.")
@@ -14,6 +16,29 @@ app = typer.Typer(add_completion=False, help="haru-pack — pack a Python projec
 def version():
     """Show the haru-pack version."""
     typer.echo(f"haru-pack {__version__}")
+
+
+def _report_ambiguity(project: Path, e: "AmbiguousProject") -> None:
+    """Explain the choice, then write the config that records it — do not guess.
+
+    A wrong guess here builds cleanly and runs the wrong program, so the failure shows up
+    at the customer rather than at the build. Refusing costs the operator one command.
+    """
+    typer.secho(f"haru-pack: {e}", fg="yellow")
+    if e.candidates:
+        typer.echo("\ncandidates:")
+        for c in e.candidates:
+            typer.echo(f"  - {c}")
+    out_dir = project if project.is_dir() else project.parent
+    cfg = out_dir / "haru_pack.toml"
+    typer.echo("\npick one, either way:")
+    first = e.candidates[0] if e.candidates else "app.cli:main"
+    typer.echo(f"  haru-pack build {project} --entry-point {first}")
+    if cfg.exists():
+        typer.echo(f"  ...or set `entrypoint` in {cfg}")
+    else:
+        typer.echo(f"  ...or run `haru-pack init {project}` to write {cfg.name} and edit it")
+
 
 @app.command()
 def doctor(path: Path = typer.Argument(None, help="project/script to scan for needed bundle/install steps"),
@@ -95,6 +120,9 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           user: str = typer.Option("", "--user", help="bind to this OS username (cryptographic)"),
           geo: str = typer.Option("", "--geo", help="allowed country codes, comma-separated"),
           python: str = typer.Option("", "--python", help="Python version to stage (e.g. 3.12); default auto/3.12"),
+          entry_point: str = typer.Option("", "--entry-point", "-e",
+              help="what to run: a script (app.py), a console script (lotek), or "
+                   "module:callable (app.cli:main) — same spelling as [project.scripts]"),
           wine: bool = typer.Option(False, "--wine", help="run execute-required bundle steps under wine (thick cross)")):
     """Build a single-file launcher from a project payload dir.
 
@@ -122,7 +150,13 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
         info = build_exe(project, out, target=target, tier=tier, secret=sec,
                          expires=expires, geo=[g for g in geo.split(",") if g],
                          machine=machine, user=user, embed_secret=embed_secret, python=python,
-                         wine=wine, encrypt=bool(want_enc))   # INV-BUILD-02
+                         wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
+                         entry_point=entry_point)
+    except AmbiguousProject as e:
+        _report_ambiguity(project, e)
+        raise typer.Exit(2)
+    except EntryPointError as e:
+        typer.secho(str(e), fg="red"); raise typer.Exit(2)
     except BuildError as e:
         typer.secho(str(e), fg="red"); raise typer.Exit(2)
     tag = " 🔒encrypted" if info.get("encrypted") else ""
