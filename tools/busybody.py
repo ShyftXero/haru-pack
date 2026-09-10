@@ -530,6 +530,42 @@ def stage_replaced_with_symlink(exe: Path, work: Path) -> dict:
     return run_exe(exe, work, env=clean_env(cache))
 
 
+
+@case("vandal", ("REFUSED",),
+      "Modify a native library (.so/.pyd) in a staged tree, not a .py file. Verification "
+      "must cover compiled artifacts too — they are the ones an attacker would rather "
+      "replace, and the ones a naive 'check the Python files' implementation misses. "
+      "Measured 2026-09-10: catches a flipped byte in a wheel's .so AND in the bundled "
+      "interpreter's own libpython. NOTE: this was added believing it would be "
+      "payload-sensitive (pure-Python packages having no .so to modify). That was wrong "
+      "at the thick tier, where every payload ships an interpreter and therefore ships "
+      ".so files — iniconfig, which is pure Python, caught a modified libpython. The case "
+      "is worth keeping for what it does prove; it does NOT vary by package.",
+      inv="INV-STAGE-01",
+      remedy="SILENT or RAN means .stage-files does not record native libraries, or "
+             "isRuntimeMutable exempts them. Compiled code must be covered by the same "
+             "digest manifest as source.")
+def native_library_modified_after_success(exe: Path, work: Path) -> dict:
+    cache, _ = warm(exe, work)
+    root = stage_root(cache)
+    if root is None:
+        return {"outcome": "SILENT", "rc": 0, "seconds": 0, "stdout": "no stage", "stderr": ""}
+    libs = [p for p in root.rglob("*.so") if p.is_file()] + \
+           [p for p in root.rglob("*.pyd") if p.is_file()]
+    # Prefer something inside the app's own venv over the bundled interpreter's stdlib.
+    libs.sort(key=lambda p: (".venv" not in str(p), len(str(p))))
+    if not libs:
+        # Only reachable at a tier that bundles no interpreter; at thick this never fires.
+        return {"outcome": "REFUSED", "rc": None, "seconds": 0,
+                "stdout": "", "stderr": "SKIPPED: no native library in the payload"}
+    v = libs[0]
+    v.chmod(v.stat().st_mode | stat.S_IWUSR)
+    data = bytearray(v.read_bytes())
+    data[len(data) // 2] ^= 0xFF          # flip a byte in the middle of the machine code
+    v.write_bytes(bytes(data))
+    return run_exe(exe, work, env=clean_env(cache))
+
+
 # ================================================================ landlord
 
 @case("landlord", ("REFUSED",),

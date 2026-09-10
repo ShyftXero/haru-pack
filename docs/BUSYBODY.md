@@ -228,3 +228,44 @@ reach back out and modify the environment busybody itself runs from.
 
 A clean run means the faults somebody thought of did not break anything. It is evidence, not
 proof. **Adding a case that fails is worth more than re-running the ones that pass.**
+
+## The top-25 sweep, and what it did not tell us — 2026-09-10
+
+```sh
+python tools/busybody.py --fixtures top25 --tier thick
+```
+
+**575 runs (23 cases × 25 packages), 575 as expected, 35 minutes.** Every top-25 fixture
+built; 69.8 GB of work directories reaped afterwards.
+
+And the useful result is a negative one: **no case changed its outcome depending on the
+payload.** The ledger quantifies it — 575 runs produced exactly **23 distinct
+fingerprints**, one per case. Each case gave an identical answer 25 times.
+
+That is not a surprise in hindsight. These cases exercise the *launcher*, and the launcher
+is byte-identical in all 25 binaries. Sweeping it across packages re-confirms the same 23
+facts at 25× the cost.
+
+An attempt to fix that is instructive. `native_library_modified_after_success` was added
+believing it would be payload-sensitive: pure-Python packages have no `.so` to modify, so
+the case would skip on some and fire on others. **Wrong** — at the thick tier every payload
+bundles an interpreter and therefore ships `.so` files, and `iniconfig` (pure Python) caught
+a flipped byte in the bundled `libpython` itself. Same fingerprint as `cryptography`.
+
+The case stayed, because what it *does* prove is worth having: the staging digest manifest
+covers compiled artifacts, including `libpython`, not just `.py` files. A naive "verify the
+Python files" implementation would pass every other vandal case and fail this one.
+
+### What this means for how to run it
+
+- **The synthetic fixture is the right default.** It answers the same 23 questions in 100
+  seconds instead of 35 minutes.
+- **Sweeping the top 25 is worth it after a change to staging or overlay handling**, where
+  payload shape plausibly matters and the cost buys reassurance.
+- **Cases that would genuinely vary by package** have to exercise the *application*, not the
+  launcher: an app that writes files next to itself, one that spawns subprocesses, one that
+  needs a display, one whose import has side effects. None of the current cases do, and
+  writing them means a different kind of persona than the seven here.
+
+Recording the negative result rather than the run count, because "575/575 passed" reads like
+25× the assurance and is not.
