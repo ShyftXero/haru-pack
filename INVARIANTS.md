@@ -115,6 +115,42 @@ Territory: src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_tiers_offlin
 
 ---
 
+## CHAOS — the harness remembers what happened
+
+### INV-CHAOS-01
+Status: active
+Statement: A busybody run's results survive the run being killed, an interrupted run is
+reported AS interrupted, and repeated findings group under one fingerprint.
+Actors: whoever reads the output — days later, on a run they did not start, with no AI to
+summarise it for them.
+Assets: the ability to act on a chaos run at all. A harness whose long run loses everything
+on Ctrl-C, or that cannot tell a new crash from one that has been there for weeks, produces
+noise rather than evidence.
+Red-path: Buffer the journal and write it at the end — an interrupted run then loses every
+completed case. Or drop the `finished` record and the heartbeat, and a run that died halfway
+becomes indistinguishable from one with no results. Or remove the volatile-token
+normalisation from `fingerprint()`, and one root cause splits into a fresh group per run.
+Each has a claiming test.
+Source: Adopted from lotek's BusyBody (`tests/busybody/journal.py`, `ledger.py`) on
+2026-09-09, after this harness was built without any of it and the gap was pointed out.
+lotek's journals are line-buffered and flushed per record specifically so "a wedged or
+SIGKILLed process must leave its journal readable up to the last thing it did".
+Note: The exit-code contract is lotek's and encodes a judgement worth keeping — 0 clean, 1
+findings, 130 interrupted, and **an interrupt beats findings**: a run the operator killed did
+not finish, and reporting its partial findings as a completed verdict is the same lie facing
+the other way.
+Note: The findings ledger lives OUTSIDE the repository. lotek's reasoning applies with force
+here: a file inside the tree is caught by `git stash`, worktree switches and branch changes,
+losing history exactly when you are moving between branches to investigate. haru-pack is
+developed in worktrees. Override with `HARUPACK_BUSYBODY_LEDGER`.
+Note: Severity is a closed three-value vocabulary — critical / warning / note — also lotek's.
+A `CASE-ERROR` (busybody's own bug) is a `note`, never a finding about haru-pack. Two of
+those turned up on the first real run, and conflating them with product defects is precisely
+what the split prevents.
+Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_ledger.py
+
+---
+
 ## FLEX — the harness that decides what haru-pack is tested against
 
 ### INV-FLEX-01

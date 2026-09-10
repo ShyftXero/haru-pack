@@ -5,6 +5,8 @@
     python tools/busybody.py --persona forger     # one persona
     python tools/busybody.py --list               # what would run, and why
     python tools/busybody.py --keep               # leave the wreckage for inspection
+    python tools/busybody.py --triage             # past findings, grouped by fingerprint
+    python tools/busybody.py --history            # every run, including interrupted ones
 
 THE POINT IS NOT "DOES IT BREAK"
 
@@ -43,7 +45,32 @@ Each is a mindset that generates a family of faults, not a single test:
                    and is EXPECTED to get through, because the docs say those checks are
                    advisory. A pass here would mean the docs are wrong.
 
+THE JOURNAL, THE HEARTBEAT AND THE LEDGER  (adopted from lotek's BusyBody)
+
+Every case result is appended and flushed the moment it finishes, so an interrupted run —
+Ctrl-C, timeout, machine gone — keeps everything up to the case in flight. A heartbeat file
+is rewritten as the run proceeds, so `--history` can tell a run that DIED from one that is
+still going and from one that finished: an interrupted run shows up AS interrupted rather
+than simply being absent.
+
+Findings are also appended to a ledger kept OUTSIDE the repository (lotek's reasoning: a
+file inside the tree is caught by git stash, worktree switches and branch changes, losing
+history exactly when you are moving between branches to investigate). `--triage` rolls that
+ledger up by fingerprint, so three cases failing for one reason read as one problem with a
+count and a first-seen date instead of three unrelated failures.
+
+EXIT CODES are a contract, also lotek's:
+
+    0    every case behaved as expected
+    1    findings
+    130  interrupted
+
+An interrupt wins over findings. A run the operator killed did not finish, and reporting
+its partial findings as a completed verdict is the same lie facing the other way.
+
 NO AI REQUIRED. Cases are ordinary Python functions; read one and you know what it does.
+The journal and ledger are JSON Lines — greppable, and `--triage` needs nothing but the
+file itself.
 """
 from __future__ import annotations
 
@@ -61,10 +88,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from haru_pack import overlay  # noqa: E402
 
+from busybody_ledger import (  # noqa: E402
+    Journal, fingerprint, ledger_append, ledger_path, ledger_rollup, scan_runs)
+
 OUT = REPO / "busybody" / "out"
+RUNS = OUT / "runs"
 MARKER = "BUSYBODY_OK"
 
 # Outcomes that are never acceptable, in any case.
@@ -620,7 +652,8 @@ OUTCOME_MEANING = {
 }
 
 
-def write_report(results: list, exe_name: str, path: Path) -> None:
+def write_report(results: list, exe_name: str, path: Path, run_id: str = "",
+                 interrupted: bool = False) -> None:
     """A report a human reads on its own. No JSON, no cross-referencing, no AI.
 
     Every finding carries: what was done, what happened, what should have happened, why the
@@ -634,10 +667,16 @@ def write_report(results: list, exe_name: str, path: Path) -> None:
     L.append("busybody report — haru-pack chaos testing")
     L.append("=" * W)
     L.append("")
+    L.append(f"run          : {run_id or '(unrecorded)'}")
     L.append(f"fixture      : {exe_name}")
     L.append(f"cases run    : {len(results)}")
     L.append(f"as expected  : {len(results) - len(bad)}")
     L.append(f"findings     : {len(bad)}")
+    if interrupted:
+        L.append("")
+        L.append("  *** THIS RUN WAS INTERRUPTED ***")
+        L.append("  The cases below are what completed before it stopped, not the whole")
+        L.append("  suite. Do not read the counts above as a result.")
     L.append("")
     L.append("WHAT THIS TOOL CHECKS")
     L.append("")
@@ -657,11 +696,11 @@ def write_report(results: list, exe_name: str, path: Path) -> None:
     L.append("SUMMARY")
     L.append("-" * W)
     L.append("")
-    L.append(f"  {'persona':14} {'case':42} {'outcome':9} verdict")
-    L.append(f"  {'-' * 14} {'-' * 42} {'-' * 9} -------")
+    L.append(f"  {'persona':14} {'case':42} {'outcome':9} {'severity':8} verdict")
+    L.append(f"  {'-' * 14} {'-' * 42} {'-' * 9} {'-' * 8} -------")
     for r in results:
         L.append(f"  {r['persona']:14} {r['name']:42} {r['outcome']:9} "
-                 f"{'ok' if r['ok'] else 'FINDING'}")
+                 f"{r.get('severity', ''):8} {'ok' if r['ok'] else 'FINDING'}")
     L.append("")
 
     if not bad:
@@ -687,6 +726,11 @@ def write_report(results: list, exe_name: str, path: Path) -> None:
                 L.append("    SEVERITY  always a finding, regardless of what was expected")
             if r.get("inv"):
                 L.append(f"    INVARIANT {r['inv']}  (see INVARIANTS.md)")
+            if r.get("fingerprint"):
+                L.append(f"    FINGERPRINT {r['fingerprint']}  "
+                         f"(`--triage` groups repeats of this)")
+            if r.get("artifacts"):
+                L.append(f"    ARTIFACTS {r['artifacts']}")
             L.append(f"    EXIT      {r['rc']}")
             L.append("")
             L.append("    WHAT THIS CASE SIMULATES")
@@ -730,6 +774,121 @@ def _wrap(text: str, width: int) -> list:
     return lines or [""]
 
 
+
+# ---------------------------------------------------------------- severity, artifacts
+
+def severity_for(c: dict, r: dict, ok: bool) -> str:
+    """Closed vocabulary — critical / warning / note. Never "error", never "info".
+
+    A fixed set means a reader learns three words once, and a report cannot quietly grow a
+    fourth level nobody has calibrated. Taken from lotek, which uses the same three.
+    """
+    if ok:
+        return "note"
+    if r["outcome"] in ("CRASHED", "SILENT", "HUNG"):
+        return "critical"      # a traceback at the user, the wrong code running, or a wedge
+    if r["outcome"] == "CASE-ERROR":
+        return "note"          # busybody's own bug, not haru-pack's — say so, do not inflate
+    return "warning"           # refused where it should have run, or the reverse
+
+
+def preserve(run_dir: Path, case_name: str, work: Path) -> str:
+    """Copy a failing case's wreckage somewhere it will still exist tomorrow.
+
+    Unconditional for findings: `--keep` is a flag people remember only after the
+    interesting run, and you cannot triage a crash you threw away.
+    """
+    dest = run_dir / "findings" / case_name
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    kept = []
+    for child in sorted(work.iterdir()):
+        try:
+            if child.is_file() and child.stat().st_size < 300 * 1024 * 1024:
+                shutil.copy2(child, dest / child.name)
+                kept.append(child.name)
+            elif child.is_dir():
+                shutil.copytree(child, dest / child.name, symlinks=True,
+                                ignore=shutil.ignore_patterns("*.tar.gz", "*.whl", "*.so"),
+                                dirs_exist_ok=True)
+                kept.append(child.name + "/")
+        except (OSError, shutil.Error):
+            continue
+    (dest / "WHAT-IS-THIS.txt").write_text(
+        f"Preserved automatically because case {case_name!r} produced a finding.\n"
+        f"--keep is a flag people remember only after the interesting run, so preserving a\n"
+        f"finding's artifacts is unconditional.\n\n"
+        f"Contents: {', '.join(kept) or '(nothing copyable)'}\n\n"
+        f"Re-run just this case:\n"
+        f"    python tools/busybody.py --case {case_name} --keep\n")
+    return str(dest.relative_to(REPO))
+
+
+# ---------------------------------------------------------------- history and triage
+
+def print_history() -> int:
+    runs = scan_runs(RUNS)
+    if not runs:
+        print("no runs yet")
+        return 0
+    print(f"{'run':22} {'state':12} {'cases':>5} {'findings':>8}  planned")
+    print(f"{'-' * 22} {'-' * 12} {'-' * 5:>5} {'-' * 8:>8}  -------")
+    for r in runs:
+        planned = len(r["planned"] or []) if r["planned"] else "?"
+        print(f"{r['run']:22} {r['state']:12} {r['cases']:>5} {r['findings']:>8}  {planned}")
+    interrupted = [r for r in runs if r["state"] == "INTERRUPTED"]
+    if interrupted:
+        print()
+        print("INTERRUPTED means the run started, never wrote a finish record, and its")
+        print("heartbeat has gone stale. The case count is what completed before it stopped,")
+        print("NOT the whole suite — do not read those numbers as a result.")
+        for r in interrupted:
+            planned = len(r["planned"] or [])
+            print(f"  {r['run']}: {r['cases']} of {planned} case(s) completed")
+    return 0
+
+
+def print_triage() -> int:
+    groups = ledger_rollup()
+    path = ledger_path()
+    if not groups:
+        print(f"no findings recorded in {path}")
+        return 0
+    print("=" * 78)
+    print(f"busybody triage — {sum(g['count'] for g in groups)} finding(s), "
+          f"{len(groups)} distinct")
+    print(f"ledger: {path}")
+    print("=" * 78)
+    print()
+    print("Grouped by fingerprint: paths, timestamps, hex and bare numbers are normalised")
+    print("out, so repeats of one root cause appear as ONE group with a count and a")
+    print("first-seen date. Fix the group, not the occurrences. Biggest group first.")
+    print()
+    for i, g in enumerate(groups, 1):
+        print("-" * 78)
+        print(f"[{i}] {g['count']} occurrence(s)   severity: {g['severity']}   "
+              f"outcome: {g['outcome']}")
+        print(f"    fingerprint : {g['fingerprint']}")
+        print(f"    cases       : {', '.join(g['cases'])}")
+        print(f"    personas    : {', '.join(g['personas'])}")
+        shown = g["runs"][:6]
+        print(f"    seen in runs: {', '.join(shown)}"
+              + (f"  (+{len(g['runs']) - 6} more)" if len(g["runs"]) > 6 else ""))
+        if g.get("inv"):
+            print(f"    invariant   : {g['inv']}")
+        if g.get("sample"):
+            print("    sample message:")
+            for line in g["sample"].splitlines()[:4]:
+                print(f"        {line[:70]}")
+        if g.get("remedy"):
+            print("    what to do:")
+            for line in _wrap(" ".join(g["remedy"].split()), 68):
+                print(f"        {line}")
+    print("-" * 78)
+    return 0
+
+
 # ================================================================ fixture + driver
 
 APP = '''# /// script
@@ -768,7 +927,16 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--keep", action="store_true", help="keep each case's wreckage")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--triage", action="store_true",
+                    help="group past findings by fingerprint and stop")
+    ap.add_argument("--history", action="store_true",
+                    help="list runs, marking any that were interrupted")
     a = ap.parse_args()
+
+    if a.history:
+        return print_history()
+    if a.triage:
+        return print_triage()
 
     picked = CASES
     if a.persona:
@@ -792,48 +960,95 @@ def main() -> int:
         print(f"\n{len(picked)} case(s); nothing was run.")
         return 0
 
-    exe = build_fixture(a.tier)
-    print(f"\nbusybody: {len(picked)} case(s) against {exe.name}\n")
+    # A run id from the wall clock, so run directories sort chronologically and a human
+    # can say "the 14:05 run" without consulting anything.
+    run_id = "bb" + time.strftime("%Y%m%d-%H%M%S")
+    run_dir = RUNS / run_id
+    jr = Journal(run_dir, run_id)
+
+    try:
+        exe = build_fixture(a.tier)
+    except SystemExit as e:
+        # lotek calls this a SETUP FAILURE: the harness could not get to the starting line,
+        # so there are no results — reporting zero findings here would be a lie.
+        jr.write("setup_failure", detail=str(e)[:400])
+        jr.close()
+        print(f"SETUP FAILURE: {e}", file=sys.stderr)
+        print(f"no cases ran; journal at {run_dir.relative_to(REPO)}", file=sys.stderr)
+        return 2
+
+    jr.write("started", planned=[c["name"] for c in picked], tier=a.tier,
+             fixture=exe.name, cases=len(picked))
+    jr.beat()
+    print(f"\nbusybody: {len(picked)} case(s) against {exe.name}   run {run_id}\n")
 
     results = []
-    for c in picked:
-        # OUTSIDE the repository, deliberately. uv walks up from its working directory
-        # looking for a project, so a work dir under busybody/out/ makes it discover
-        # haru-pack's own pyproject.toml and adopt this checkout's .venv — which it then
-        # rebuilt against the staged interpreter, leaving .venv/bin/python a dangling
-        # symlink. A chaos harness must not be able to damage the tree it is testing.
-        work = Path(tempfile.mkdtemp(prefix=f"bb-{c['name']}-"))
-        try:
-            r = c["fn"](exe, work)
-        except Exception as e:                      # a case that explodes is a case bug
-            r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0,
-                 "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
-        ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
-        rec = {**{k: c[k] for k in ("name", "persona", "expect", "why", "inv", "remedy")},
-               **r, "ok": ok}
-        rec["expect"] = list(c["expect"])
-        results.append(rec)
-        flag = "  " if ok else "<-"
-        print(f"  {'ok ' if ok else 'BAD'} {c['persona']:14} {c['name']:42} "
-              f"{r['outcome']:9}{flag}")
-        if not a.keep:
-            shutil.rmtree(work, ignore_errors=True)
+    interrupted = False
+    try:
+        for c in picked:
+            work = Path(tempfile.mkdtemp(prefix=f"bb-{c['name']}-"))
+            try:
+                r = c["fn"](exe, work)
+            except Exception as e:
+                r = {"outcome": "CASE-ERROR", "rc": None, "seconds": 0,
+                     "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+            ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
+            msg = (r.get("stderr") or r.get("stdout") or "").strip()
+            rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
+                   **r, "ok": ok, "expect": list(c["expect"]),
+                   "severity": severity_for(c, r, ok),
+                   "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
 
-    (OUT / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    report = OUT / "report.txt"
-    write_report(results, exe.name, report)
+            if not ok:
+                rec["artifacts"] = preserve(run_dir, c["name"], work)
+            elif not a.keep:
+                shutil.rmtree(work, ignore_errors=True)
+            if a.keep and ok:
+                rec["artifacts"] = str(work)
+
+            results.append(rec)
+            jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
+            jr.beat()
+            print(f"  {'ok ' if ok else 'BAD'} {c['persona']:14} {c['name']:42} "
+                  f"{r['outcome']:9}{'  ' if ok else '<-'}")
+    except KeyboardInterrupt:
+        interrupted = True
+        jr.write("interrupted", completed=len(results), planned=len(picked))
+        print("\n^C — interrupted. Everything completed so far is in the journal.",
+              file=sys.stderr)
 
     bad = [r for r in results if not r["ok"]]
-    print(f"\n{len(results) - len(bad)}/{len(results)} behaved as expected")
-    print(f"report : {report.relative_to(REPO)}   <- read this; it explains every finding")
-    print(f"raw    : {(OUT / 'results.json').relative_to(REPO)}")
     if bad:
+        ledger_append([{k: v for k, v in r.items()
+                        if k in ("name", "persona", "outcome", "severity", "fingerprint",
+                                 "inv", "remedy", "artifacts")}
+                       | {"run": run_id, "at": time.time(),
+                          "message": (r.get("stderr") or r.get("stdout") or "")[:500]}
+                       for r in bad])
+
+    (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+    report = run_dir / "report.txt"
+    write_report(results, exe.name, report, run_id=run_id, interrupted=interrupted)
+    if not interrupted:
+        jr.write("finished", cases=len(results), findings=len(bad))
+    jr.close()
+
+    print(f"\n{len(results) - len(bad)}/{len(results)} behaved as expected"
+          + ("  (RUN INTERRUPTED — this is not the whole suite)" if interrupted else ""))
+    print(f"report : {report.relative_to(REPO)}   <- read this; it explains every finding")
+    print(f"journal: {(run_dir / 'journal.jsonl').relative_to(REPO)}")
+    if bad:
+        print(f"ledger : {ledger_path()}   (--triage to group by fingerprint)")
         print(f"\n{len(bad)} finding(s):")
         for r in bad:
-            print(f"  [{r['outcome']}] {r['persona']}/{r['name']} "
-                  f"(expected {' or '.join(r['expect'])})"
+            print(f"  [{r['severity']}] {r['outcome']:9} {r['persona']}/{r['name']}"
                   + (f"  {r['inv']}" if r.get("inv") else ""))
-        print("\nEach one is explained in full in the report above.")
+
+    # lotek's exit-code contract. An interrupt wins over findings: a run the operator
+    # killed did not finish, and reporting its partial findings as a completed verdict is
+    # the same lie facing the other way.
+    if interrupted:
+        return 130
     return 1 if bad else 0
 
 

@@ -7,7 +7,17 @@ python tools/busybody.py --list               # every case and why it exists
 python tools/busybody.py --keep               # leave the wreckage to inspect
 ```
 
-Output: `busybody/out/report.txt` (written to be read on its own) and `results.json`.
+Output per run: `busybody/out/runs/<run-id>/` containing `report.txt` (written to be read on
+its own), `journal.jsonl`, `results.json`, and preserved artifacts for any finding.
+
+```sh
+python tools/busybody.py --history     # every run; interrupted ones say so
+python tools/busybody.py --triage      # findings grouped by fingerprint, across all runs
+```
+
+Exit codes are a contract: `0` clean, `1` findings, `130` interrupted. **An interrupt beats
+findings** — a run you killed did not finish, and reporting its partial findings as a
+completed verdict is the same lie facing the other way.
 
 ## The point is not "does it break"
 
@@ -141,6 +151,48 @@ hit real users.
 Fixed with `uv run --no-project` on the script path (`INV-LAUNCH-07`), verified both
 directions by hand, and busybody's own work directories moved outside the repository so the
 harness cannot damage the tree it is testing.
+
+## The journal, the heartbeat and the ledger
+
+Adopted from lotek's BusyBody, which had already solved this.
+
+**Every result is written the moment it happens**, line-buffered and fsynced, not serialised
+at the end. A long run that gets Ctrl-C'd, times out, or has the machine taken away keeps
+everything up to the case in flight. lotek's reasoning: a wedged or SIGKILLed process must
+leave its journal readable up to the last thing it did.
+
+**A heartbeat file** is rewritten as the run proceeds. That is what lets `--history`
+distinguish three states which otherwise look identical:
+
+| state | meaning |
+|---|---|
+| `complete` | wrote a `finished` record |
+| `live` | heartbeat is fresh; still going |
+| `INTERRUPTED` | started, no finish record, heartbeat stale |
+
+An interrupted run showing up **as interrupted** is the point. "No results file" and "the run
+died halfway through" are very different facts, and only one of them is interesting.
+
+**The findings ledger lives outside the repository** — beside the checkout, or wherever
+`HARUPACK_BUSYBODY_LEDGER` points. lotek keeps its ledger outside the tree because a file
+inside is caught by `git stash`, worktree switches and branch changes, losing history exactly
+when you are hopping branches to investigate. haru-pack is developed in worktrees, so this
+applies here too.
+
+**Findings are fingerprinted.** Paths, timestamps, hex, ports and bare numbers are normalised
+out before hashing, so several cases failing for one reason collapse into one group with a
+count and a first-seen date. `--triage` prints those groups largest-first with the remedy
+attached. Without normalisation every run produces a fresh set of apparently-unrelated
+failures and any trend is invisible.
+
+**Severity is a closed vocabulary**: `critical` / `warning` / `note`. Not "error", not
+"info" — three words, learned once. A `CASE-ERROR` (busybody's own bug) is always a `note`,
+never a finding about haru-pack. Two of those turned up on the first real run; keeping them
+separate from product defects is the whole reason the split exists.
+
+**Artifacts for a finding are preserved unconditionally** under the run's `findings/`
+directory — the mutated binary and the cache it produced — whether or not `--keep` was
+passed. `--keep` is a flag people remember only after the interesting run.
 
 ## Reading the report without any help
 
