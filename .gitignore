@@ -14,9 +14,6 @@ vendor/python*
 .DS_Store
 Thumbs.db
 
-# build-fuzzer run artifacts
-.haru-pack-fuzz/
-
 # python packaging
 dist/
 *.egg-info/

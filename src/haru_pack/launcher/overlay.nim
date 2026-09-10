@@ -49,9 +49,37 @@ proc findFooter*(exePath: string): (bool, Footer, int) =
   var empty: Footer
   return (false, empty, -1)
 
-proc readPayload*(exePath: string, ft: Footer): string =
-  ## read the raw payload bytes described by the footer
+proc footerFault*(ft: Footer, fileSize, footerAt: int): string =
+  ## "" when the footer's declared payload extent is representable and actually lies
+  ## inside the file, ahead of the footer. Anything else is a diagnostic string.
+  ##
+  ## payloadOff/payloadLen come off disk, i.e. from whoever last wrote to the binary.
+  ## Casting them straight to `int` and handing them to setPosition/readStr asks the
+  ## runtime to allocate an attacker-chosen length; -d:release keeps Nim's bounds and
+  ## range checks so the result is a crash or an OOM rather than memory corruption,
+  ## but a launcher that aborts on a hostile footer with a raw Nim error is still
+  ## doing input validation by accident. Do it on purpose.
+  if fileSize <= 0: return "cannot determine the size of the executable"
+  if footerAt < 0 or footerAt > fileSize: return "footer offset is outside the file"
+  let fs = uint64(fileSize)
+  if ft.payloadLen == 0'u64: return "footer declares a zero-length payload"
+  # Compare each term against the file size BEFORE adding them, so the sum cannot wrap.
+  if ft.payloadOff > fs: return "payload offset lies past the end of the file"
+  if ft.payloadLen > fs: return "payload length exceeds the size of the file"
+  if ft.payloadOff + ft.payloadLen > fs:
+    return "payload extends past the end of the file"
+  if ft.payloadOff + ft.payloadLen > uint64(footerAt):
+    return "payload overlaps its own footer"
+  return ""
+
+proc readPayload*(exePath: string, ft: Footer, footerAt: int): string =
+  ## Read the raw payload bytes described by the footer, refusing a footer whose
+  ## extent does not fit inside this file (see footerFault).
+  let fault = footerFault(ft, getFileSize(exePath).int, footerAt)
+  if fault.len > 0: raise newException(ValueError, "corrupt payload footer: " & fault)
   var f = newFileStream(exePath, fmRead)
   defer: f.close()
   f.setPosition(int(ft.payloadOff))
   result = f.readStr(int(ft.payloadLen))
+  if result.len != int(ft.payloadLen):
+    raise newException(ValueError, "payload is shorter than its footer declares")

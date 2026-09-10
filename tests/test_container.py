@@ -20,7 +20,7 @@ from haru_pack import crypto
 
 NIM_CRYPTBOX = Path(__file__).resolve().parent.parent / "src/haru_pack/launcher/cryptbox.nim"
 
-# The layout crypto.encrypt() writes:
+# The layout crypto.encrypt() writes (container v2 — same offsets as v1, different AAD):
 #   0  magic[8] | 8 ver u16 | 10 flags u16 | 12 iters u32 |
 #   16 salt[16] | 32 nonce[12] | 44 tag[16] | 60 esecret_len u16 | 62 esecret | ct
 OFFSETS = {"flags": 10, "iters": 12, "salt": 16, "nonce": 32, "tag": 44, "esecret_len": 60}
@@ -63,7 +63,7 @@ def test_policy_is_recoverable_only_after_authenticated_decryption(container):
     ct = container[62 + eslen:]
 
     key = crypto.derive_key(b"s3cret", salt, iters, POLICY["machine"], POLICY["user"])
-    plain = AESGCM(key).decrypt(nonce, ct + tag, crypto.MAGIC)   # AAD is the fixed magic
+    plain = AESGCM(key).decrypt(nonce, ct + tag, crypto.container_aad(container))
     plen = struct.unpack_from("<I", plain, 0)[0]
     policy = plain[4:4 + plen]
     for field in (POLICY["expires"], POLICY["machine"], POLICY["user"]):
@@ -75,8 +75,9 @@ def _open_like_nim(blob: bytes, secret: bytes, machine: str, user: str) -> bytes
     """Decrypt the way cryptbox.nim does — honouring the flags field when deriving the key.
 
     Modelling the reader faithfully matters here: a test that ignores `flags` would report
-    the flags region as unprotected, and a test that ignores the header entirely would
-    report it as protected. Neither is true. See test_header_is_unauthenticated_but_fail_closed.
+    the flags region as unprotected. Since INV-CRYPTO-04 the whole header is also the AAD,
+    so the reader must reconstruct it from the (possibly mutated) blob in front of it —
+    exactly as cryptbox.nim does. See test_header_edits_are_detected_by_the_tag.
     """
     flags = struct.unpack_from("<H", blob, OFFSETS["flags"])[0]
     iters = struct.unpack_from("<I", blob, OFFSETS["iters"])[0]
@@ -88,7 +89,7 @@ def _open_like_nim(blob: bytes, secret: bytes, machine: str, user: str) -> bytes
         machine if flags & crypto.BIND_MACHINE else None,
         user if flags & crypto.BIND_USER else None,
     )
-    return AESGCM(key).decrypt(nonce, ct + tag, crypto.MAGIC)
+    return AESGCM(key).decrypt(nonce, ct + tag, crypto.container_aad(blob))
 
 
 @pytest.mark.invariant("INV-CRYPTO-03")
@@ -106,27 +107,39 @@ def test_tampering_with_any_region_breaks_the_open(container, region, offset):
 
 
 @pytest.mark.invariant("INV-CRYPTO-03")
-def test_header_is_unauthenticated_but_fail_closed(container):
-    """Pin the actual property, which is narrower than "the container is authenticated".
+def test_header_edits_are_detected_by_the_tag(container):
+    """The inversion of what this file asserted before INV-CRYPTO-04.
 
-    The AAD is the fixed magic, so `ver`, `flags`, `iters`, `salt`, `nonce` and
-    `esecret_len` are NOT covered by the GCM tag. Editing them is not *detected*; it
-    changes key derivation and the open fails anyway. That is fail-closed, not
-    tamper-evident, and the distinction is the difference between "an attacker cannot
-    change this" and "an attacker gains nothing by changing this".
+    This test used to be named `test_header_is_unauthenticated_but_fail_closed` and it
+    documented the *gap*: the AAD was the fixed magic, so `ver`, `flags`, `iters`, `salt`,
+    `nonce` and `esecret_len` were outside the tag. Editing them was not detected; it
+    changed key derivation and the open failed anyway — fail-closed, not tamper-evident.
 
-    INV-CRYPTO-04 (proposed) is the fix: put the whole header in the AAD.
+    Now the AAD is the whole header. The bound container here still fails for BOTH reasons
+    at once, so the assertion below alone does not prove tag-attribution; the attribution
+    proof needs an UNBOUND container, where the edited byte provably does not touch the
+    key. That is `test_flags_edit_is_detected_by_the_tag_not_by_a_key_mismatch` in
+    tests/test_crypto_hardening.py, and the same edit is run through the real Nim reader
+    there too.
     """
     mutated = bytearray(container)
     mutated[OFFSETS["flags"]] ^= crypto.BIND_MACHINE      # clear machine binding
-
-    # the tag still matches its own (unchanged) ciphertext — the header was never covered
     flags = struct.unpack_from("<H", mutated, OFFSETS["flags"])[0]
     assert not flags & crypto.BIND_MACHINE, "precondition: the flag really was flipped"
 
-    # ...but the reader now derives a different key, so the open still fails
     with pytest.raises(InvalidTag):
         _open_like_nim(bytes(mutated), b"s3cret", POLICY["machine"], POLICY["user"])
+
+    # The header edit is now visible to the AEAD itself: keep the key that the ORIGINAL
+    # header derives (so no key mismatch is in play) and the tag still rejects it.
+    iters = struct.unpack_from("<I", container, OFFSETS["iters"])[0]
+    key = crypto.derive_key(b"s3cret", container[16:32], iters,
+                            POLICY["machine"], POLICY["user"])
+    eslen = struct.unpack_from("<H", mutated, OFFSETS["esecret_len"])[0]
+    with pytest.raises(InvalidTag):
+        AESGCM(key).decrypt(bytes(mutated[32:44]),
+                            bytes(mutated[62 + eslen:]) + bytes(mutated[44:60]),
+                            crypto.container_aad(bytes(mutated)))
 
 
 @pytest.mark.invariant("INV-CRYPTO-03")
@@ -137,7 +150,7 @@ def test_wrong_machine_cannot_derive_the_key(container):
     ct = container[62 + eslen:]
     key = crypto.derive_key(b"s3cret", salt, iters, "SOME-OTHER-MACHINE", POLICY["user"])
     with pytest.raises(InvalidTag):
-        AESGCM(key).decrypt(nonce, ct + tag, crypto.MAGIC)
+        AESGCM(key).decrypt(nonce, ct + tag, crypto.container_aad(container))
 
 
 def _nim_offsets() -> dict[str, int]:

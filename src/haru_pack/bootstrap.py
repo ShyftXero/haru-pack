@@ -1,10 +1,27 @@
 from __future__ import annotations
-import platform, shutil, subprocess, sys, tempfile, urllib.request
+import platform, shutil, subprocess, sys, tempfile
 from pathlib import Path
 from .paths import nim_dir
-from .archives import safe_extract_tar
+from .archives import safe_extract_tar, fetch_verified, UnpinnedArtifact
 
 NIM_VERSION = "2.2.6"  # pinned; bump deliberately
+
+# INV-SUPPLY-01. sha256 of each published Nim archive for NIM_VERSION, keyed by the
+# archive filename. Captured 2026-09-09 from nim-lang.org's own `<archive>.sha256`
+# sidecars. Bump these in the same commit as NIM_VERSION: the keys embed the version,
+# so a stale table means "no pin", and no pin means install_nim refuses rather than
+# trusting TLS alone.
+#
+# linux_arm64 is deliberately absent. nim-lang.org publishes no aarch64 build for
+# 2.2.6 -- both nim-2.2.6-linux_arm64.tar.xz and its .sha256 return 404 -- so there is
+# no real digest to record. A fabricated one would be worse than the gap: install_nim
+# raises UnpinnedArtifact on that platform and the operator installs Nim via choosenim.
+NIM_SHA256 = {
+    f"nim-{NIM_VERSION}-linux_x64.tar.xz":
+        "38b8407f87d78bd207390051e4c76f38a45d0a26983cb262017c899b56ad8d06",
+    f"nim-{NIM_VERSION}_x64.zip":
+        "557eed9a9193a3bc812245a997d678fd6dc2c2dec6cfa9ba664a16b310115584",
+}
 
 # ---------- Nim ----------
 def find_nim() -> str | None:
@@ -38,13 +55,20 @@ def install_nim(force: bool = False) -> str:
     if existing and not force:
         return existing
     url, kind = _nim_archive_url()
+    name = url.rsplit("/", 1)[-1]
+    digest = NIM_SHA256.get(name)
+    if not digest:                                                  # INV-SUPPLY-01
+        raise UnpinnedArtifact(       # refuse before removing the toolchain we already have
+            f"no pinned sha256 for {name}; haru-pack will not install an unverified Nim "
+            f"toolchain. Record the publisher's digest in bootstrap.NIM_SHA256 "
+            f"(nim-lang.org serves {name}.sha256), or install Nim yourself via choosenim.")
     dest = nim_dir()
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         arc = Path(td) / f"nim.{kind}"
-        urllib.request.urlretrieve(url, arc)
+        fetch_verified(url, arc, digest, what=f"Nim {NIM_VERSION} ({name})")   # INV-SUPPLY-01
         extract_to = Path(td) / "x"
         if kind == "tar.xz":
             safe_extract_tar(arc, extract_to)       # INV-SUPPLY-03
@@ -59,17 +83,31 @@ def install_nim(force: bool = False) -> str:
         raise RuntimeError("Nim install failed (binary not found after extract)")
     return nim
 
-NIM_DEPS = ("zippy", "puppy", "parsetoml", "nimcrypto")   # launcher imports these (puppy pulls webby)
+# INV-SUPPLY-02. The launcher imports these (puppy pulls webby in turn). Pinned to
+# exact versions, because `nimble install zippy` resolves to whatever was newest that
+# day: nimcrypto is the AES-256-GCM implementation linked into every shipped launcher,
+# and unpinned deps mean two builds of the same commit are two different binaries.
+# These are the versions this repo builds and tests against; bump deliberately.
+NIM_DEPS = {
+    "zippy": "0.10.12",
+    "puppy": "2.1.2",
+    "parsetoml": "0.7.2",
+    "nimcrypto": "0.7.3",
+}
+
+def nim_dep_specs() -> list:
+    """`nimble install` arguments. `pkg@version` is nimble's exact-version syntax."""
+    return [f"{pkg}@{ver}" for pkg, ver in NIM_DEPS.items()]
 
 def ensure_nim_deps(nim: str) -> bool:
-    """The launcher imports zippy + puppy; make sure nimble has them."""
+    """The launcher imports zippy + puppy; make sure nimble has them, at pinned versions."""
     nimble = str(Path(nim).with_name("nimble" + (".exe" if sys.platform == "win32" else "")))
     if not Path(nimble).exists():
         nimble = shutil.which("nimble") or "nimble"
     ok = True
-    for pkg in NIM_DEPS:
+    for spec in nim_dep_specs():                                    # INV-SUPPLY-02
         try:
-            r = subprocess.run([nimble, "install", "-y", pkg], capture_output=True, text=True, timeout=600)
+            r = subprocess.run([nimble, "install", "-y", spec], capture_output=True, text=True, timeout=600)
             ok = ok and r.returncode == 0
         except Exception:
             ok = False

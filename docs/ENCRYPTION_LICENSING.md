@@ -14,14 +14,20 @@ policy can't be edited without breaking decryption). For hard enforcement add a 
 - Payload encrypted with **AES-256-GCM**. The license **policy JSON is inside the GCM
   plaintext**, prefixed by its length, ahead of the payload zip — so a reverse-engineer
   sees no expiry/geo/machine/user in the clear, and cannot edit them without the key.
-  The AAD is the fixed container magic. (`INV-CRYPTO-01`, `INV-CRYPTO-03`.)
+  (`INV-CRYPTO-01`, `INV-CRYPTO-03`.)
   Earlier revisions of this document, and the header comment in `cryptbox.nim`, said the
   policy *was* the AAD. It never was. The tamper-evidence is real but comes from the
   policy being inside the ciphertext, not from the AAD — and a maintainer "correcting"
   the code to match the old wording would have moved the policy into the clear.
-- The container **header** (version, flags, KDF iterations, salt, nonce) is *not* covered
-  by the AEAD. Editing it is not detected; it changes key derivation, so the open fails
-  anyway. Fail-closed, not tamper-evident — see `INV-CRYPTO-04` (proposed).
+- **Container v2:** the AAD is every header byte before the ciphertext *except* the 16-byte
+  tag field — `blob[0:44] + blob[60:62+esecret_len]`. Version, flags, KDF iterations, salt,
+  nonce, `esecret_len` and the embedded secret are therefore **tamper-evident**: editing one
+  is detected by the tag, not merely unproductive. The tag is elided because a GCM tag cannot
+  authenticate itself. (`INV-CRYPTO-04`.)
+  In **v1** the AAD was the bare magic, leaving the header outside the AEAD — fail-closed
+  (a header edit changed key derivation, so the open failed) but not tamper-evident. A v2
+  launcher **rejects a v1 container by version**, before prompting for a secret, so binaries
+  built before this change must be rebuilt.
 - Key = **PBKDF2-HMAC-SHA256(secret [+ machine-id][+ user], random-per-build salt, 200k)**.
   The per-build salt makes the key **ephemeral**; machine/user binding is folded into the
   KDF so an unauthorized machine simply can't derive the key.
