@@ -1,0 +1,24 @@
+[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.12"
+# pandas is the point of the example, not decoration: the wheel is ~60 MB unpacked and
+# drags in numpy, and this app uses one function out of it. That is the shape --shake
+# exists for, at a size that downloads in a few seconds instead of a few minutes.
+dependencies = ["pandas>=2.2", "requests>=2.32"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+demo = "demo:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/demo"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

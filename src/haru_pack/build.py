@@ -11,11 +11,13 @@ from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier, bundles_uv
 from .sources import Sources
 from .targets import Target
-from .entrypoints import resolve_entrypoint
+from .entrypoints import (resolve_entrypoint, verify_object_ref, verify_script_file,
+                          verify_console_script, is_object_ref, EntryPointError)
 from .obfuscate import ObfuscationError, get_engine
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
-                     warm_cache_for_script)
+                     warm_cache_for_script, install_dev_tools, compress_uv)
+from . import shake as shake_mod
 
 class BuildError(RuntimeError): ...
 
@@ -124,9 +126,47 @@ def compile_launcher(nim: str, target, workdir: Path) -> Path:
         raise BuildError("nim compile failed:\n" + (r.stderr or r.stdout)[-2000:])
     return out
 
+def _declarations(decl_dir: Path) -> dict:
+    """Merge the project's build directives from both places it may declare them.
+
+    Precedence, lowest first — the same shape `discovery`'s docstring already described:
+
+        discovery  <  [tool.haru-pack] in pyproject.toml  <  haru_pack.toml  <  CLI flags
+
+    `[tool.haru-pack]` exists because a project that is already a package has one obvious
+    home for its own build configuration, and asking for a second file to say "this is how
+    I am bundled" is friction for no gain. `haru_pack.toml` stays, wins where both speak,
+    and remains what `haru-pack init` writes — it is the sidecar for a tree that has no
+    pyproject.toml at all (a bare script, a folder of `.py` files), and the local override
+    for one that does.
+
+    The merge is per top-level key, not deep: a `[[bundle]]` list in `haru_pack.toml`
+    REPLACES the one in pyproject.toml rather than appending to it. Concatenating would
+    mean an operator could not remove an inherited step, only add to it, and "why is this
+    build still running a step I deleted" is a bad afternoon.
+    """
+    merged: dict = {}
+    pp = decl_dir / "pyproject.toml"
+    if pp.exists():
+        tool = (tomlio.load(pp).get("tool") or {})
+        if "haru-pack" not in tool and "haru_pack" in tool:
+            # Refuse rather than silently ignore. A config table that is read by nobody is
+            # worse than a missing one: the operator believes it took effect.
+            raise BuildError(
+                f"{pp} has a [tool.haru_pack] table; haru-pack reads [tool.haru-pack] "
+                f"(hyphen, matching the distribution name). Rename the table — it is "
+                f"being ignored, and silently honouring both spellings would mean two "
+                f"places to look when a directive does not apply.")
+        merged.update(tool.get("haru-pack") or {})
+    side = decl_dir / "haru_pack.toml"
+    if side.exists():
+        merged.update(tomlio.load(side))
+    return merged
+
+
 def _resolve(project: Path, tier: str, python_cli: str,
              expires, geo, machine, user, embed_secret, encrypt: bool = False,
-             entry_point: str = ""):
+             entry_point: str = "", log=None):
     """Discover + merge haru_pack.toml + CLI. Returns (manifest, enc, python_version)."""
     # The declaration is read FIRST. Discovery only has to succeed when nothing else says
     # what to run: refusing to guess (INV-BUILD-03) must never become refusing to obey.
@@ -134,10 +174,7 @@ def _resolve(project: Path, tier: str, python_cli: str,
     # `entrypoint` in haru_pack.toml was rejected with advice telling the operator to set
     # `entrypoint` in haru_pack.toml.
     decl_dir = project if project.is_dir() else project.parent
-    decl = {}
-    p = decl_dir / "haru_pack.toml"
-    if p.exists():
-        decl = tomlio.load(p)
+    decl = _declarations(decl_dir)
     explicit_ep = entry_point or decl.get("entrypoint")
     try:
         disc = discovery.discover(project)
@@ -152,6 +189,24 @@ def _resolve(project: Path, tier: str, python_cli: str,
     # console-script name, or a `module:callable` object reference in the same spelling
     # [project.scripts] uses — resolved to argv here so the launcher never parses it.
     ep = entry_point or decl.get("entrypoint") or disc["entrypoint"]
+    # A `module:callable` becomes a `python -c "from module import attr"` argv and nothing
+    # used to check that the import resolves, so a typo built cleanly, exited 0, and failed
+    # on the customer's machine at first run (INV-BUILD-04). Checked statically — parsing
+    # the module rather than importing it, so nothing of the project executes on the build
+    # host and the check works for cross-compiled targets too. Silent unless it is certain.
+    if isinstance(ep, str):
+        problem = verify_object_ref(ep, decl_dir) or verify_script_file(ep, decl_dir)
+        if problem:
+            raise EntryPointError(problem)
+        # A bare console-script name cannot be checked for certain without an environment —
+        # the launcher runs `uv run <name>`, which also resolves scripts provided by
+        # DEPENDENCIES. So say what could not be verified rather than refusing a build that
+        # is probably fine; `assemble_payload` upgrades this to a refusal at thick, where
+        # there is a real environment to look in.
+        if not is_object_ref(ep) and not ep.endswith(".py"):
+            level, msg = verify_console_script(ep, decl_dir)
+            if level == "warn" and log:
+                log(f"WARNING: {msg}")
     ep = resolve_entrypoint(ep, name=decl.get("name", disc["name"]),
                             kind=decl.get("kind", disc["kind"]))
     manifest = {
@@ -163,6 +218,10 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "verbose_uv": decl.get("verbose_uv", False),
         # PEP 723 inline dependencies, so the thick tier can stage them (INV-TIER-01).
         "script_dependencies": list(disc.get("dependencies") or []),
+        # `[shake]` — how to OBSERVE this project, and what to keep regardless. Carried
+        # here (and popped before the manifest is written) for the same reason
+        # script_dependencies is: it is build-time input, not something the launcher reads.
+        "shake_declared": dict(decl.get("shake") or {}),
     }
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:
@@ -204,9 +263,31 @@ def _entry_relpath(manifest: dict) -> str:
 def assemble_payload(source: Path, manifest: dict, tier: str, target,
                      python: str, workdir: Path, wine: bool = False,
                      sources: Sources | None = None, eager_deps: bool = False,
-                     log=None) -> Path:
+                     log=None, shake: bool = False, shake_keep=(),
+                     shake_report: dict | None = None) -> Path:
     sources = sources or Sources()
     tgt = target if isinstance(target, Target) else Target.parse(target)
+    # --shake's preconditions are checked BEFORE anything is downloaded. Discovering that a
+    # shake was impossible after staging a 90 MB interpreter wastes the operator's time,
+    # and — worse — the tempting fix at that point is to carry on and emit an unshaken
+    # binary, which is precisely the "asked for small, silently got fat" outcome the flag
+    # exists to prevent. Refuse early and say what to do instead.
+    if shake:
+        if tier != "thick":
+            raise BuildError(
+                f"--shake needs --thick (got tier '{tier}'). At thin/default the "
+                "dependencies are not in the payload — uv fetches them on the target — so "
+                "there is nothing to prune and no size to save.")
+        if not tgt.is_host:
+            raise BuildError(
+                f"--shake cannot build for --target {tgt} from here. Observing which files "
+                "a program touches means RUNNING its test suite, and this host cannot run "
+                f"{tgt} binaries. Shake on a {tgt} machine, or build for {tgt} without it.")
+        if manifest.get("kind") != "project":
+            raise BuildError(
+                "--shake needs a project (a pyproject.toml with a dependency group to run "
+                "the suite from), not a single PEP 723 script. A script's payload is its "
+                "inline dependencies and there is no declared test command to observe.")
     payload = workdir / "payload"
     app = payload / manifest["app_subdir"]
     if source.is_file():
@@ -245,7 +326,13 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
     # tiers.bundles_uv is the single statement of which tiers ship a uv (main's
     # INV-TIER work); tgt/sources carry the arch and mirror plumbing.
     if bundles_uv(tier):
-        bundle_uv(tgt, vendor, sources=sources)
+        uv_exe = bundle_uv(tgt, vendor, sources=sources)
+        # INV-PAYLOAD-04. uv is the biggest thing in a non-thin payload and the payload zip
+        # is DEFLATE-only, so it ships XZ-compressed and the launcher expands it during
+        # staging. Guarded on the return value because `conftest.stub_toolchain` replaces
+        # bundle_uv with a stub that stages no binary at all.
+        if uv_exe and Path(uv_exe).is_file():
+            compress_uv(uv_exe, log=log)
     if tier == "thick":
         steps = manifest.get("bundle") or []
         if steps and not tgt.is_host and not wine:
@@ -261,8 +348,39 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
                 tmp_env = Path(tempfile.mkdtemp(prefix="haru-warm-"))
                 try:
                     warm_cache_and_lock(app_dir, py, cache, tmp_env, sources=sources)
+                    # The bundled cache above is runtime-only (INV-PAYLOAD-03). Dev tools
+                    # go into the throwaway env only, so a [[bundle]] step or a --shake
+                    # observation can still run them without the payload carrying them.
+                    if steps or shake:
+                        install_dev_tools(app_dir, tmp_env, sources=sources, log=log)
+                    # At thick there IS an environment, so a console-script entrypoint can
+                    # be checked for certain instead of warned about (INV-BUILD-08). This
+                    # is the strongest form of the check and the only one that can see a
+                    # script provided by a dependency rather than by the project.
+                    ep_argv = manifest.get("entrypoint") or []
+                    if len(ep_argv) == 1 and not ep_argv[0].endswith(".py"):
+                        level, msg = verify_console_script(ep_argv[0], app_dir,
+                                                           env_dir=tmp_env)
+                        if level == "error":
+                            raise BuildError(msg)
                     for step in steps:
                         run_bundle_step(step, payload, tmp_env, app_dir)
+                    if shake:
+                        # `tmp_env` is the right place to observe from and the reason the
+                        # shake happens here rather than after the payload is assembled:
+                        # it was built by uv FROM THE BUNDLED CACHE with the BUNDLED
+                        # interpreter, so every path the tracer sees maps onto a file that
+                        # is actually in the payload. Observing a project's own `.venv`
+                        # instead would trace a different resolution against a different
+                        # Python and produce a keep set for a payload that does not exist.
+                        cfg = shake_mod.resolve_config(
+                            app_dir, {"shake": manifest.get("shake_declared") or {}},
+                            cli_keep=shake_keep)
+                        rep = shake_mod.shake(payload, app_dir, cache, py, tmp_env, cfg,
+                                              workdir, sources=sources, log=log)
+                        if shake_report is not None:
+                            shake_report.update(rep)
+                        manifest.update(shake_mod.manifest_summary(rep))
                 finally:
                     shutil.rmtree(tmp_env, ignore_errors=True)
             else:
@@ -307,6 +425,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
             say(f"  post_install: {' '.join(run) if isinstance(run, list) else run}")
 
     manifest.pop("script_dependencies", None)   # build-time only; not for the launcher
+    manifest.pop("shake_declared", None)        # ditto — the launcher never re-shakes
     tomlio.dump(manifest, payload / "manifest.toml")
     return payload
 
@@ -324,7 +443,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           machine: str = "", user: str = "", embed_secret: bool = False,
           obfuscate: str = "none", obfuscate_args=(),
           python: str = "", wine: bool = False, encrypt: bool = False,
-          entry_point: str = "", log=None) -> dict:
+          entry_point: str = "", shake: bool = False, shake_keep=(),
+          log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -335,7 +455,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         raise BuildError(f"C toolchain missing for target '{tgt}':\n{tc['advice']}")
     manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
                                                      machine, user, embed_secret, encrypt,
-                                                     entry_point)
+                                                     entry_point, log=log)
     # Record the requested engine on the manifest so assemble_payload can apply it. Validated
     # here, at the front of the build, so an unknown engine or a missing pyarmor fails before
     # any work — never after producing a binary the user believes is obfuscated.
@@ -364,10 +484,20 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
+    shake_report: dict = {}
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        payload_dir = assemble_payload(source, manifest, tier, tgt, pyver, tdp / "asm",
-                                       wine, sources=sources, log=log)
+        try:
+            payload_dir = assemble_payload(source, manifest, tier, tgt, pyver, tdp / "asm",
+                                           wine, sources=sources, log=log, shake=shake,
+                                           shake_keep=shake_keep,
+                                           shake_report=shake_report)
+        except shake_mod.ShakeError as e:
+            # A shake that cannot be PROVEN safe is a failed build, not a smaller one. The
+            # alternative — warn and ship the unshaken payload — hands the operator a
+            # binary that is nothing like the one they asked for, and they find out from
+            # its size or not at all.
+            raise BuildError(f"--shake refused to ship: {e}") from e
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:
@@ -395,4 +525,9 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver,
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
+    if shake_report:
+        info["shake"] = {k: shake_report[k] for k in
+                         ("tracer", "dropped_files", "freed_bytes",
+                          "payload_bytes_before", "payload_bytes_after")}
+        info["shake"]["report"] = str(shake_mod.write_report(shake_report, out))
     return info

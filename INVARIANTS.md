@@ -563,21 +563,41 @@ luck; a project with `serve` and `migrate` got a coin flip and no warning.
 Note: Root-level `.py` files stop being candidates once `[project.scripts]` exists. In a real
 tree they are helpers, plugins, and one-off utilities that the console script invokes or takes
 as arguments — lotek's root has a dozen, and the only correct answer is the declared `lotek`.
-Note: `python -m <package>` is only offered when that package actually exists in the tree.
-Otherwise it is a guess dressed as a default.
+Note: `python -m <package>` is only offered when that package is actually **executable** —
+i.e. `<pkg>/__main__.py` exists. Otherwise it is a guess dressed as a default. This checked
+only `__init__.py` until 2026-09-10, so a library-shaped package (importable, nothing to
+execute) yielded the entrypoint `python -m <pkg>`, which builds cleanly and then fails on the
+target with "'<pkg>' is a package and cannot be directly executed". Verified against a
+synthetic package that day. Red-path for that half: change the `__main__.py` test in
+`discovery.discover` back to `__init__.py` and
+`test_an_importable_but_unexecutable_package_is_refused` goes red.
 Territory: src/haru_pack/discovery.py, src/haru_pack/cli.py, tests/test_entrypoints.py
 
 ### INV-BUILD-04
 Status: active
 Statement: An entrypoint may be given as a script filename, a console-script name, or a
-`module:callable` object reference; a malformed one is rejected at build time, never deferred
-to a runtime "command not found" on a customer machine.
-Actors: an operator typing `--entry-point`, or editing `entrypoint` in haru_pack.toml.
+`module:callable` object reference. A malformed one is rejected at build time — and so is a
+well-formed one whose module is present in the project tree but does not define the named
+attribute. Neither is ever deferred to a runtime "command not found" or `ImportError` on a
+customer machine.
+Actors: an operator typing `--entry-point`, or editing `entrypoint` in haru_pack.toml or
+`[tool.haru-pack]`.
 Assets: build-time feedback. Every spelling accepted here is resolved to plain argv before it
 reaches the payload.
 Red-path: Delete the `if ":" in spec: raise` branch in `entrypoints.resolve_entrypoint`. Four
 parametrizations of `test_malformed_entry_points_are_rejected` go red — `mod:`, `:func`,
 `mod::func` and `not a ref!` all fall through to being treated as console-script names.
+Separately, delete the `verify_object_ref(...)` call from `build._resolve`:
+`test_a_reference_to_a_missing_callable_is_refused` goes red, and `-e app:mian` builds
+cleanly again and dies on the target.
+Note: The reference check is STATIC — the module is parsed, never imported. Importing would
+execute the project's code on the build host and could not work at all for a cross-compiled
+target. The cost is that dynamically-created attributes are invisible, so the rule is to
+refuse only when certain: module not found in the tree (it may come from a dependency),
+unparseable, or providing the name via `import *` all pass silently. Added 2026-09-10 after
+`app:main` was found to build cleanly against a module whose logic lived in an
+`if __name__ == "__main__":` block — the guard is not importable, and the error message now
+says so specifically, because that is the misconception that produces the mistake.
 Source: Added 2026-09-09 with `--entry-point`. The first implementation had exactly that bug:
 anything failing the object-reference pattern was silently treated as a command name, so a
 typo'd `app.cli:` became a search for a console script of that literal name.
@@ -632,6 +652,32 @@ crashed on `OptionInfo.encode()`.
 Note: Both entry points call one plain `_run_build()` with ordinary keyword defaults, rather
 than `ctx.invoke`, which is what produced the sentinel bug. One implementation, two doors.
 Territory: src/haru_pack/cli.py, tests/test_targets.py
+
+### INV-BUILD-07
+Status: active
+Statement: Build directives are read from `[tool.haru-pack]` in `pyproject.toml` as well as
+from `haru_pack.toml`, in that order of increasing precedence; a table haru-pack does not
+read is never silently ignored.
+Actors: a developer who wants their project to declare how it is bundled, in the file that
+already declares everything else about it; and the same developer three months later
+wondering why a directive did nothing.
+Assets: whether configuration means what it appears to mean. A config table read by nobody is
+worse than a missing one, because the operator believes it took effect — the same failure
+shape as the five documented-but-unimplemented security claims this file exists because of.
+Red-path: Delete the `[tool.haru_pack]` (underscore) refusal in `build._declarations` and
+`test_an_underscored_tool_table_is_refused_not_ignored` goes red. Delete the pyproject read
+entirely and `test_directives_can_live_in_pyproject` goes red.
+Source: Asked for 2026-09-10 — "the developer could choose how to bundle the tool and define
+it inside of their own project". `haru_pack.toml` stays: it is the only option for a tree with
+no pyproject.toml (a bare script, a folder of `.py` files) and the local override for one that
+has it. The precedence ladder is the one `discovery`'s docstring already described, with the
+new table slotted at the pyproject level.
+Note: The merge is per top-level key, not deep. A `[[bundle]]` list in `haru_pack.toml`
+replaces rather than extends the one in `pyproject.toml`; concatenating would let an operator
+add steps but never remove an inherited one.
+Note: PEP 723 permits `[tool]` tables inside a script's inline metadata block. That is NOT
+read yet — a script's directives still go in `haru_pack.toml` beside it.
+Territory: src/haru_pack/build.py, tests/test_entrypoints.py
 
 ---
 
@@ -774,6 +820,34 @@ Note: This invariant covers the **build-time** check only. The **runtime** launc
 perform it at all — see `INV-LAUNCH-01`, which is `proposed` for exactly that reason. Do not
 read this entry as evidence that shipped binaries self-verify. They do not.
 Territory: src/haru_pack/overlay.py
+
+### INV-PAYLOAD-03
+Status: active
+Statement: A payload's bundled dependency cache contains only the project's **runtime**
+resolution. The dev dependency group — its test runner, linters and build backend — is
+never downloaded into the payload, on either the host or the cross path.
+Actors: not an attacker; the operator, who pays for it in bytes, and the auditor of a
+signed artifact, who has to explain why a customer-facing binary contains a test framework.
+Assets: the size of every thick binary, and the accuracy of the claim that a payload
+contains what the program needs. `uv sync` installs the *default* dependency groups and
+`dev` is one of them, so `warm_cache_and_lock` warmed the bundled cache with the project's
+own tooling and shipped it. Measured on `examples/shake-demo` (2026-09-10): 11 dists and
+6.5 MB of unpacked wheel trees — pytest, pluggy, iniconfig, pygments, hatchling, editables,
+pathspec, tomlkit, trove-classifiers, packaging — none of which a launcher can reach,
+because it runs the project's entrypoint and never its suite.
+Note: the tools themselves are still needed at *build* time — a `[[bundle]]` step or a
+`--shake` observation run executes them — so `install_dev_tools` puts them in the throwaway
+build env from the BUILD HOST's cache. The build environment is unchanged; only the payload
+got smaller. That split is the invariant: `UV_CACHE_DIR` points into the payload for the
+runtime sync and nowhere near it for the dev install.
+Red-path: Drop `--no-dev` from the `uv sync` in `bundle.warm_cache_and_lock`, or let
+`warm_cache_windows` call `_export_reqs(app_dir)` with the default `dev=True`. The claiming
+test asserts on the argv of both and goes red.
+Source: Found 2026-09-10 while building `--shake` — the tree-shaker's "dists outside the
+`--no-dev` resolution" rule was dropping eleven trees that had no business being in the
+payload in the first place. Fixed on its own rather than left as a `--shake` side effect,
+since a plain `--thick` build should not ship a test framework either.
+Territory: src/haru_pack/bundle.py, src/haru_pack/build.py
 
 ---
 
@@ -1347,3 +1421,233 @@ its body. The claiming test goes red.
 Source: CRIT C2, adversarial review 2026-09-09. This is the control aimed squarely at the
 hallucinated-security-feature failure mode.
 Territory: docs/, tests/test_invariants_enforced.py
+
+---
+
+## SHAKE — a file is only deleted from a payload on evidence, and only shipped on proof
+
+`--shake` prunes a `--thick` payload down to the files the project's own test suite was
+observed to touch. It is the one feature in haru-pack that makes a signed artifact *smaller
+by deleting things*, which means its failure mode is unique: an `ImportError` on a customer
+machine, on first run, for a file nobody remembers removing. Everything below exists to
+keep that from being possible to reach by accident.
+
+The honest limit, stated once so no entry below has to over-claim: **a passing test suite is
+evidence about the suite, not about the program.** A code path the suite never exercises is
+invisible to observation. `--shake` is therefore opt-in, refuses to run without a declared
+test command, keeps the static closure of every lazy import inside a kept module, and writes
+down every file it removed. It does not claim that a shaken payload is safe; it claims that
+a shaken payload was *observed running and re-proven afterwards*, and that the operator can
+see exactly what changed.
+
+### INV-SHAKE-01
+Status: active
+Statement: A shaken payload is never emitted unless, after pruning, the project's declared
+test command passes against a fresh environment installed offline from the pruned payload;
+if it does not, the build fails rather than falling back to an unshaken binary.
+Actors: not an attacker — the operator who asked for a small binary, and their customer, who
+runs it first on a machine with no network and no Python.
+Assets: the meaning of a build that exits 0. haru-pack's stated design rule is that a wrong
+guess "compiles cleanly, exits 0, and fails on the customer's machine — which is the worst
+place to find out". Pruning on an unverified trace is that failure with the file already
+deleted, and the *other* tempting fallback — warn and ship the unshaken payload — hands back
+a binary many times the requested size, which the operator learns from `ls -l` or not at all.
+Red-path: Wrap the `_verify(...)` call in `shake.shake()` in `try/except ShakeError: pass`,
+or change `build()`'s `except ShakeError` to log a warning and continue. Either makes
+`test_a_failed_verification_raises_instead_of_returning_a_report` or
+`test_a_shake_error_fails_the_build_rather_than_shipping_unshaken` go red.
+Source: Written with the feature, 2026-09-10, from the tier's own precedent: INV-TIER-01
+exists because `--thick` once quietly needed the network. `--shake` can quietly need a file.
+Territory: src/haru_pack/shake.py, src/haru_pack/build.py, tests/test_shake.py
+
+### INV-SHAKE-02
+Status: active
+Statement: The verification runs against a tree that is genuinely missing the pruned files;
+if any pruned path reappears in the verification environment, the build fails instead of
+reporting a pass.
+Actors: a dev-group dependency that pins a different version of a runtime dist, so `uv`
+reinstalls that dist whole — un-pruned — into the environment the suite is about to run in.
+Assets: the difference between "we checked and it was fine" and "we did not check". A false
+green here is worse than no verification at all, because it is the thing an operator would
+point to when the field failure arrives.
+Red-path: Delete the `_resurrected(...)` check from `shake._verify`, or move it after the
+suite loop. `test_verification_checks_the_pruned_files_are_still_absent` goes red. To watch
+it fail for real: add a dev dependency pinning an older version of a runtime dist, shake, and
+observe the suite pass against files the payload no longer contains.
+Source: Found while designing the verification step, 2026-09-10 — the first draft installed
+the dev group into the verification env and would have verified the wrong tree.
+Territory: src/haru_pack/shake.py, tests/test_shake.py
+
+### INV-SHAKE-03
+Status: active
+Statement: `--shake` deletes nothing without an observation to justify it: no declared or
+discoverable test command is a hard refusal, and an observation run that exits non-zero
+prunes nothing.
+Actors: an operator reaching for `--shake` because the binary is too big, on a project with
+no suite; and an AI agent "fixing" the refusal by adding a default rulepack.
+Assets: the evidence requirement itself. A red suite is the worst possible input — every
+test after the first failure went unexecuted, so the files it would have exercised look
+prunable — and it is exactly the state in which a build would appear to save the most.
+Red-path: Give `shake.resolve_config` a fallback (`test = test or ["pytest"]`), or drop the
+non-zero-exit check in `shake._observe`. `test_shake_refuses_a_project_with_no_test_command`
+or `test_a_failing_observation_run_prunes_nothing` goes red.
+Source: Written with the feature, 2026-09-10. The repo's standing rule — "it refuses instead
+of guessing" — applied to deletion, where guessing is least recoverable.
+Territory: src/haru_pack/shake.py, tests/test_shake.py
+
+### INV-SHAKE-04
+Status: proposed
+Statement: A binary built with `--shake` fails at *startup* with a message naming the shake
+receipt when an import resolves to a file the shake removed, rather than surfacing a bare
+`ModuleNotFoundError` from wherever the program happened to reach for it.
+Actors: the customer hitting the residual risk this feature cannot design away, and the
+support engineer reading their screenshot.
+Assets: diagnosability of the one failure mode `--shake` adds. The sidecar
+`<out>.shake.json` receipt makes this answerable *if the operator still has the build*;
+nothing in the shipped binary points at it.
+Red-path: Not yet implemented — there is no launcher-side hook, so there is no test to go
+red. Would require the stager to install an import hook that consults a pruned-path list
+shipped in the manifest.
+Source: Named as a known gap when `--shake` landed, 2026-09-10, rather than left implicit.
+
+---
+
+## The uv binary is compressed in the payload and byte-identical in the stage
+
+### INV-PAYLOAD-04
+Status: active
+Statement: When `uv` is bundled it is stored XZ-compressed in the payload and expanded
+during staging to a binary **byte-identical to the publisher's release**, before the stage
+manifest is recorded — so the file the launcher executes is covered by stage verification
+exactly as an uncompressed one was.
+Actors: the operator shipping over a metered or slow link; the recipient's AV and
+application-allowlisting stack; the auditor asking what `uv` is inside a signed artifact.
+Assets: ~8 MB of every non-thin binary, and the integrity chain around the one file the
+launcher runs first. Measured on uv 0.10.4 linux-x86_64 (2026-09-10): 55.59 MB raw,
+22.25 MB as the payload's DEFLATE, **14.17 MB** as XZ/LZMA2. A default-tier `hello`
+went 23 MB to 15.0 MB.
+Note — why not UPX, which was the original proposal: packing *modifies the executable*.
+That destroys uv's own Authenticode signature, makes the payload bytes match no publisher
+digest (so `INV-SUPPLY-01`'s verification becomes unrepeatable by a third party), trips the
+packer heuristics that AV engines apply to UPX above all others — on exactly the enterprise
+Windows targets this project exists to serve — and pays decompression on *every* launch
+rather than once. Compressing the payload *member* instead gets the same bytes back:
+verified 2026-09-10, staged `vendor/uv` sha256 `ae65ed04fee535f3ab8d31da7c2f9fde156dc5afdd6b5b5125e535ccc49bba34`,
+identical to the release tarball's, and present in `.stage-files` under that digest.
+Red-path: three, and each was a real failure caught while building this:
+(1) move the `expandCompressedMembers(root)` call in `stage.stageZip` to after
+`recordTree(root)` — the executed binary drops out of the recorded set;
+(2) add a BCJ filter (`lzma.FILTER_X86`) to `bundle.compress_uv`'s chain — Python still
+round-trips it, but `xz_dec_bcj.c` is deliberately not vendored, so the *launcher* rejects
+the stream on the target;
+(3) build `xzdec.nim`'s include path with `parentDir()` and `/` instead of explicit forward
+slashes — those use the TARGET's separator, so `--target windows-x86_64` emits
+`-I\home\...` and mingw cannot find `xz.h`. Walked all three 2026-09-10.
+Source: Eli asked whether haru-pack could UPX the uv binary before storing it, 2026-09-10.
+The answer was that the size win is real but belongs to LZMA rather than to packing, and is
+obtainable without modifying a signed third-party executable.
+Territory: src/haru_pack/bundle.py, src/haru_pack/launcher/xzdec.nim,
+src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/xz/
+
+### INV-PAYLOAD-05
+Status: active
+Statement: The vendored XZ decoder in `src/haru_pack/launcher/xz/` matches, file for file,
+the SHA-256 digests recorded in its own `PROVENANCE.md`, and no undeclared C or header file
+sits alongside it.
+Actors: whoever updates the vendored decoder; whoever audits third-party C that is compiled
+into a binary they Authenticode-sign.
+Assets: the audit trail for ~3 400 lines of third-party C in every launcher. This repo pins
+every *binary* it executes (`INV-SUPPLY-01`); vendored source that nothing checks would be
+the same trust gap with a friendlier appearance.
+Red-path: change one byte of `xz/xz_dec_lzma2.c`, or drop a new `.c` into `xz/`, without
+updating `PROVENANCE.md`. The claiming test goes red.
+Source: Written with `INV-PAYLOAD-04`, 2026-09-10 — the decoder was vendored rather than
+fetched precisely so it would be reviewable in a diff, which is only true if drift is
+detectable.
+Territory: src/haru_pack/launcher/xz/, tests/test_uv_compression.py
+
+### INV-BUILD-08
+Status: active
+Statement: A bare console-script entrypoint is checked as far as the tier allows: refused
+when an environment exists and neither the project nor any dependency provides it, warned
+about when there is no environment to check against, and silent when the project declares
+it. A `.py` entrypoint that is not in the project tree is always refused.
+Actors: an operator passing `--entry-point serve` for a script that was renamed, or typing
+`--entry-point app.py` for a file that lives in a subdirectory.
+Assets: `docs/PRINCIPLES.md`'s third user — the recipient of the executable, who sees only
+"it worked" or "it didn't". An unresolvable console script fails as a `command not found`
+from uv on *their* machine, after a build that exited 0.
+Red-path: Delete the `verify_console_script(...)` call from `assemble_payload` and
+`test_a_console_script_nothing_provides_is_refused_at_thick` goes red. Delete the
+`verify_script_file(...)` call in `build._resolve` and
+`test_a_missing_script_file_is_refused` goes red.
+Note: The graded response is the point, not timidity. The launcher runs `uv run <name>`,
+which resolves console scripts from the project environment — so `gunicorn`, `flask`,
+`celery` and `uvicorn` are correct answers that appear nowhere in `[project.scripts]`.
+Refusing on absence from that table would reject working builds, which is its own
+ergonomic failure. Certainty comes from an environment, and only `--thick` has one at build
+time; at thin/default the honest output is a warning that names what could not be checked
+and says `--thick` would check it.
+Note: A script declared in `[project.scripts]` is trusted without looking in the
+environment, because a `[tool.uv] package = false` project does not install its own scripts
+and would otherwise be refused wrongly.
+Source: Asked for 2026-09-10 — "fix both of those issues. user ergonomics is paramount" —
+after `-e serve` with no such script was found to build cleanly.
+Territory: src/haru_pack/entrypoints.py, src/haru_pack/build.py, tests/test_entrypoints.py
+
+### INV-BUILD-09
+Status: active
+Statement: When haru-pack refuses to choose an entrypoint, it names concrete candidates and
+prints a command the operator can copy — it never refuses without saying what to do next.
+Actors: a developer meeting the tool for the first time, on a project it cannot read a
+single obvious answer out of.
+Assets: whether "it refuses instead of guessing" is a feature or an obstacle. Refusing is
+correct (INV-BUILD-03); refusing with a wall of prose and no next step converts a good
+decision into a bad experience, and `docs/PRINCIPLES.md` ranks that as a failure.
+Red-path: Make `discovery.discover` raise `AmbiguousProject` with an empty candidate list
+for an importable-but-not-executable package — i.e. drop the `suggest_object_refs` call.
+`test_a_non_executable_package_suggests_its_own_callables` goes red, and the operator is
+back to reading a paragraph and guessing.
+Note: Suggesting is not picking. The candidates are ordered by `PREFERRED_CALLABLES` so the
+first one printed is usually right, and the build still refuses until a human chooses.
+Verified 2026-09-10 against a package defining `main` and `helper`: the refusal listed
+`demo:main` and `demo:helper` and printed
+`haru-pack build <path> --entry-point demo:main`.
+Source: Asked for 2026-09-10 with INV-BUILD-08.
+Territory: src/haru_pack/discovery.py, src/haru_pack/entrypoints.py, src/haru_pack/cli.py,
+tests/test_entrypoints.py
+
+---
+
+## UI — what haru-pack prints is what it meant to print
+
+### INV-UI-01
+Status: active
+Statement: No text haru-pack prints is lost to terminal markup. Rich markup is opt-in per
+call, never the default, and the `name: value` shape of `haru-pack verify`'s output is
+preserved so it stays machine-readable.
+Actors: `docs/PRINCIPLES.md`'s second user — the developer reading a refusal — and a CI job
+grepping `haru-pack verify`.
+Assets: the actionable half of every error message. Measured 2026-09-10 with rich 15.0.0:
+`from rich import print` renders `[project.scripts]` as **nothing at all** and `[[bundle]]`
+as `[]`, because rich reads `[...]` as a style tag and drops unrecognised ones silently
+rather than raising. Those exact strings are what the entrypoint and config refusals exist
+to tell the operator — `[project.scripts]`, `[tool.haru-pack]`, `[shake]`, `[sources]`,
+`[[bundle]]`, `[[post_install]]`. A refusal that names no fix is worse than the bug it
+reports.
+Red-path: Change `ui.print`'s `markup` default to `True`, or `from rich import print`
+directly in `cli.py`. Ten parametrizations of
+`test_bracketed_text_survives_printing` go red. Separately, render `ui.fields` as a
+`rich.Table` again — it drops the `:` separator and
+`test_fields_keeps_the_colon_separator` goes red, which is what would have broken
+`haru-pack verify app | grep 'sha_ok: True'`.
+Source: Asked for 2026-09-10 — "haru should use rich to print things nicely… `from rich
+import print` to make the change as small as possible". The change is that small at every
+call site; it just routes through `haru_pack.ui` so the brackets survive. The first draft
+of `ui.fields` did render a table and did drop the colon, which is why that half is an
+invariant too.
+Note: `NO_COLOR=1` and a non-tty stdout are honoured by rich, so piped output is plain —
+verified. Colour is never the carrier of meaning: every state that is coloured is also
+stated in words (`payload integrity: OK`, `nim deps: FAILED`), because a colour is invisible
+to anyone reading a log file.
+Territory: src/haru_pack/ui.py, src/haru_pack/cli.py, tests/test_ui.py

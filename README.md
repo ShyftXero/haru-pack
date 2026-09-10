@@ -58,6 +58,13 @@ haru-pack bootstrap --target linux-aarch64      # also gets the ARM cross-compil
 
 Short version of why this works the way it does.
 
+**User ergonomics is of the utmost importance — and "user" means three people.** Whoever
+works on haru-pack; the developer running `haru-pack build`; and the person who receives the
+packed executable and has never heard of uv, Python, or this tool. The third is the one who
+gets no error message — only "it worked" or "it didn't" — and they are why every decision
+below leans on refusing at build time rather than failing on their machine. When the three
+conflict, the last one wins. Full statement: [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md).
+
 **uv does the Python part.** Interpreters, dependency resolution, and virtualenvs are
 solved problems. haru-pack stages a `uv` binary and gets out of the way, rather than
 reimplementing an installer.
@@ -99,6 +106,26 @@ rewritten, so a hostile mirror gets you a failed build, not a compromised one.
 you build Pi binaries on an x86_64 machine with `--target linux-aarch64`. You never need a
 toolchain on the Pi.
 
+**The bundled uv is compressed, not packed.** `uv` is the biggest thing in any non-thin
+payload and the payload zip only has DEFLATE, so uv ships XZ-compressed (55.59 → 14.17 MB
+vs 22.25 MB deflated) and the launcher expands it during staging — about 8 MB off every
+default and thick binary. It is expanded **byte-identically to the publisher's release** and
+recorded in the stage manifest like everything else, which is precisely why this is not UPX:
+packing modifies the executable, destroying uv's own signature, matching no publisher digest,
+tripping AV packer heuristics, and paying the cost on every launch instead of once. The
+decoder is decoder-only vendored C from xz-embedded, no target-side library.
+[`docs/TIERS.md`](docs/TIERS.md).
+
+**Thick can be shaken, on evidence, never on a guess.** `--shake` runs the project's own
+test suite under a file-access tracer, keeps the bundled files it touched, then rebuilds the
+environment from the pruned payload and re-runs the suite — and fails the build if that
+does not pass. The observation is syscall-level rather than line coverage, because the
+megabytes are in shared libraries `dlopen`ed from C extensions and in data files, neither of
+which coverage can see. It refuses to run without a declared test command, keeps the static
+closure of every lazy import, and writes down every file it removed. A passing suite is
+evidence about the suite, not the program, so this is opt-in and the receipt is the point.
+[`docs/SHAKE.md`](docs/SHAKE.md).
+
 **It refuses instead of guessing.** Ambiguous entrypoint, missing digest, unknown target,
 malformed `--entry-point`: all of these stop the build. A wrong guess here compiles
 cleanly, exits 0, and fails on the customer's machine — which is the worst place to find
@@ -132,6 +159,8 @@ in this repo that were never implemented.
 | `--tier thin\|default\|thick` | `default` | bundling tier (below) |
 | `--thin` | | shortcut for `--tier thin` |
 | `--thick` / `--chonky` | | shortcut for `--tier thick` |
+| `--shake` | off | thick only: run the project's tests under a file tracer, drop bundled files nothing touched, and refuse to ship if the suite then fails ([`docs/SHAKE.md`](docs/SHAKE.md)) |
+| `--shake-keep GLOB` | | never prune paths matching `GLOB` (repeatable) |
 | `--encrypt` | off | AES-256-GCM encrypt the payload |
 | `--secret TEXT` | | secret (key material) literal |
 | `--secret-env VAR` | | read the secret from env var `VAR` at build |

@@ -13,6 +13,17 @@ def toolchain_dir() -> Path:
 def nim_dir() -> Path:
     return toolchain_dir() / "nim"
 
+def cache_dir() -> Path:
+    """Build-time scratch that is safe to delete and expensive to recompute.
+
+    Currently just the XZ-compressed `uv` binaries: compressing uv at preset 9 takes ~100 s
+    and the result is a pure function of (uv version, asset, preset), so paying it on every
+    build would be a gratuitous regression in build time.
+    """
+    from platformdirs import user_cache_dir
+    return Path(user_cache_dir(APP, appauthor=False))
+
+
 def launcher_src_dir() -> Path:
     """Nim launcher source shipped inside the wheel."""
     return Path(__file__).resolve().parent / "launcher"
