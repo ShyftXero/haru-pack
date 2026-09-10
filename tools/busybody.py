@@ -45,6 +45,18 @@ Each is a mindset that generates a family of faults, not a single test:
                    and is EXPECTED to get through, because the docs say those checks are
                    advisory. A pass here would mean the docs are wrong.
 
+  APP-LEVEL personas. The seven above attack the launcher, which is byte-identical in every
+  binary — so they answer the same regardless of what was packed. These attack the packaged
+  APPLICATION, and are expected to diverge by package under `--fixtures top25`:
+
+    cartographer   Messes with WHERE. Awkward cwd, symlinked invocation, read-only working
+                   directory, hostile argv. Tests the run-in-place contract.
+    polyglot       Locale and encoding. The C locale, legacy codecs, unicode in paths.
+    mute           I/O shape. Closed stdin, a slammed-shut stdout pipe.
+    impatient      Signals to the APP, after staging — Ctrl-C and SIGTERM mid-run.
+    hoarder        Resource ceilings. Few file descriptors, tight address space, a
+                   read-only TMPDIR. The most package-dependent of the lot.
+
 THE JOURNAL, THE HEARTBEAT AND THE LEDGER  (adopted from lotek's BusyBody)
 
 Every case result is appended and flushed the moment it finishes, so an interrupted run —
@@ -100,7 +112,12 @@ OUT = REPO / "busybody" / "out"
 RUNS = OUT / "runs"
 MARKER = "BUSYBODY_OK"
 
-# Outcomes that are never acceptable, in any case.
+# Never acceptable, in any case, whatever it declared.
+#   CRASHED  the LAUNCHER dumped a traceback on the user
+#   HUNG     nothing exited
+#   SILENT   exit 0 and the app never ran
+# APP-CRASHED is deliberately NOT here: an application that raises under a limit a persona
+# imposed on purpose is behaving correctly, and a case must opt into accepting it.
 FATAL = ("CRASHED", "HUNG", "SILENT")
 
 CASES = []
@@ -133,22 +150,71 @@ TRACEBACK_MARKERS = (
 )
 
 
+def blame(out: str, err: str) -> str:
+    """Who failed: the launcher, the packaged app, or the OS?
+
+    An app-level case makes this distinction load-bearing. "haru-pack refused to run" and
+    "the application started and then died" are different facts, and a run under a tiny
+    memory limit is SUPPOSED to produce the second. Without the split, a persona that
+    stresses the application reads as a launcher defect.
+
+    The launcher prefixes every diagnostic with "haru-pack:", which is what makes this
+    cheap. An app traceback has no such prefix.
+    """
+    blob = (out or "") + (err or "")
+    if "haru-pack:" in blob:
+        return "launcher"
+    if any(m in blob for m in TRACEBACK_MARKERS) or blob.strip():
+        return "app"
+    return "unknown"
+
+
 def classify(rc, out: str, err: str, timed_out: bool) -> str:
+    """Map a process outcome onto the vocabulary.
+
+    CRASHED vs APP-CRASHED is the distinction that makes app-level personas usable. A Nim
+    traceback out of the launcher is always a defect. A Python traceback out of the PACKAGED
+    APPLICATION, when a case deliberately starved it, is the application declining to run in
+    the box it was given — the correct answer, not a bug in haru-pack.
+
+    Measured 2026-09-10: numpy under a 768 MB address-space ceiling raises during
+    `import numpy._core.multiarray`. Calling that CRASHED made a working, calibrated case
+    look like a product defect.
+    """
     blob = (out or "") + (err or "")
     if timed_out:
         return "HUNG"
     if any(m in blob for m in TRACEBACK_MARKERS):
-        return "CRASHED"
+        return "CRASHED" if blame(out, err) == "launcher" else "APP-CRASHED"
     if rc == 0:
         return "RAN" if MARKER in out else "SILENT"
     return "REFUSED"
 
 
-def run_exe(exe: Path, cwd: Path, env=None, timeout: int = 120, args=()) -> dict:
+def run_exe(exe: Path, cwd: Path, env=None, timeout: int = 120, args=(),
+            rlimits=None, argv0=None) -> dict:
+    """Run a packed binary and classify what happened.
+
+    `rlimits` applies resource limits in the child ({resource.RLIMIT_AS: (soft, hard)}),
+    which is how the app-level personas starve an application without touching the host.
+    `argv0` overrides argv[0] without renaming the file.
+    """
+    pre = None
+    if rlimits:
+        import resource
+
+        def pre():          # noqa: E306 - runs in the child, after fork, before exec
+            for what, limits in rlimits.items():
+                try:
+                    resource.setrlimit(what, limits)
+                except (ValueError, OSError):
+                    pass
+
     t0 = time.monotonic()
     try:
-        r = subprocess.run([str(exe), *args], capture_output=True, text=True,
-                           timeout=timeout, cwd=cwd, env=env)
+        argv = [argv0 or str(exe), *args]
+        r = subprocess.run(argv, capture_output=True, text=True, executable=str(exe),
+                           timeout=timeout, cwd=cwd, env=env, preexec_fn=pre)
         rc, out, err, to = r.returncode, r.stdout, r.stderr, False
     except subprocess.TimeoutExpired as e:
         rc, out, err, to = None, (e.stdout or b"").decode("utf8", "replace"), \
@@ -160,6 +226,7 @@ def run_exe(exe: Path, cwd: Path, env=None, timeout: int = 120, args=()) -> dict
                 "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
     outcome = classify(rc, out, err, to)
     return {"outcome": outcome, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
+            "blame": blame(out, err) if outcome != "RAN" else "none",
             "stdout": (out or "").strip()[-400:], "stderr": (err or "").strip()[-400:]}
 
 
@@ -685,6 +752,7 @@ OUTCOME_MEANING = {
     "CRASHED": "a raw language-level traceback reached the user",
     "HUNG": "no exit within the timeout",
     "SILENT": "exit 0, but the app never ran",
+    "APP-CRASHED": "the packaged application raised; the launcher was not at fault",
     "CASE-ERROR": "the chaos case itself failed; this is a bug in busybody, not in haru-pack",
 }
 
@@ -824,6 +892,8 @@ def severity_for(c: dict, r: dict, ok: bool) -> str:
         return "note"
     if r["outcome"] in ("CRASHED", "SILENT", "HUNG"):
         return "critical"      # a traceback at the user, the wrong code running, or a wedge
+    if r["outcome"] == "APP-CRASHED":
+        return "note"          # the app declined the box it was given; not haru-pack's doing
     if r["outcome"] == "CASE-ERROR":
         return "note"          # busybody's own bug, not haru-pack's — say so, do not inflate
     return "warning"           # refused where it should have run, or the reverse
@@ -924,6 +994,284 @@ def print_triage() -> int:
                 print(f"        {line}")
     print("-" * 78)
     return 0
+
+
+
+# ================================================================================
+# APP-LEVEL PERSONAS
+#
+# Everything above this line attacks the LAUNCHER, and the launcher is byte-identical in
+# every binary haru-pack produces. That is why the 2026-09-10 top-25 sweep produced 575
+# runs and only 23 distinct fingerprints: each case answered the same 25 times.
+#
+# These personas attack the PACKAGED APPLICATION instead — how the thing inside meets a
+# hostile environment. That genuinely differs per package: numpy dlopens a BLAS, click
+# inspects whether stdout is a terminal, pygments cares about the locale, torch wants
+# address space, and iniconfig does none of it. Run these with `--fixtures top25` and the
+# fingerprints should actually diverge.
+#
+# The expectation for most of them is "RAN or REFUSED, never CRASHED / HUNG / SILENT" —
+# an application legitimately cannot start under a 64 MB address-space limit, and failing
+# cleanly there is correct. What must never happen is a wedge, a raw traceback from the
+# launcher, or a silent exit 0. The `blame` field records whether a non-zero exit came
+# from the launcher or from the app, which is the distinction these personas turn on.
+# ================================================================================
+
+# ---------------------------------------------------------------- cartographer
+
+@case("cartographer", ("RAN",),
+      "Run the binary from a directory whose name contains spaces, unicode and a quote. "
+      "haru-pack's headline claim is that a binary behaves like a compiled program in the "
+      "folder it was launched from, and cwd is passed to the child — so a path the shell "
+      "would need to quote is exactly where naive path handling breaks.",
+      inv="INV-LAUNCH-07",
+      remedy="A CRASHED or SILENT here means a path is being interpolated into a command "
+             "string somewhere instead of passed as argv. Find it; nothing in the launcher "
+             "should build a shell command from a path.")
+def launched_from_an_awkward_directory(exe: Path, work: Path) -> dict:
+    odd = work / "a dir with spaces 'and' quotes \u00e9\u00fc\u4f60\u597d"
+    odd.mkdir(parents=True, exist_ok=True)
+    return run_exe(exe, odd, env=clean_env(work / "c"))
+
+
+@case("cartographer", ("RAN",),
+      "Invoke through a symlink rather than the real path. Packaging tools that locate "
+      "their own payload by argv[0] break here; haru-pack uses getAppFilename(), so this "
+      "should be a non-event — and the case exists to keep it one.",
+      inv="INV-LAUNCH-01",
+      remedy="A refusal means self-location followed the symlink to somewhere without the "
+             "payload. getAppFilename() must resolve the real executable.")
+def invoked_through_a_symlink(exe: Path, work: Path) -> dict:
+    link = work / "via-symlink"
+    link.symlink_to(exe)
+    return run_exe(link, work, env=clean_env(work / "c"))
+
+
+@case("cartographer", ("RAN", "REFUSED", "APP-CRASHED"),
+      "Run from a read-only working directory. An application that writes beside itself "
+      "fails; one that does not, does not — which is precisely the kind of per-package "
+      "difference the launcher-level cases cannot show.",
+      remedy="Either outcome is acceptable, but the blame field must say `app` when it "
+             "fails: the launcher has no business writing to cwd.")
+def read_only_working_directory(exe: Path, work: Path) -> dict:
+    ro = work / "readonly"
+    ro.mkdir(parents=True, exist_ok=True)
+    os.chmod(ro, 0o555)
+    try:
+        return run_exe(exe, ro, env=clean_env(work / "c"))
+    finally:
+        os.chmod(ro, 0o755)
+
+
+@case("cartographer", ("RAN",),
+      "argv passthrough: extra arguments, ones that look like flags, and shell "
+      "metacharacters. README promises args reach the program 'like python' with no "
+      "injected `--`, so this is a documented contract.",
+      remedy="If the app never sees these, the launcher is swallowing or reordering argv. "
+             "If the shell interprets them, something is building a command string.")
+def hostile_argv_passthrough(exe: Path, work: Path) -> dict:
+    return run_exe(exe, work, env=clean_env(work / "c"),
+                   args=["--not-a-haru-flag", "-x", "a b c", "$(echo pwned)", "a;b|c", "--"])
+
+
+# ---------------------------------------------------------------- polyglot
+
+@case("polyglot", ("RAN", "APP-CRASHED"),
+      "The C locale, no LANG, and legacy encoding forced on. Packages that decode text "
+      "diverge sharply here — pygments, pyyaml and charset-normalizer all care, iniconfig "
+      "does not.",
+      remedy="A UnicodeDecodeError blamed on the app is a per-package fact worth "
+             "recording. One blamed on the launcher means the launcher is decoding "
+             "something it should be passing through as bytes.")
+def c_locale_and_legacy_encoding(exe: Path, work: Path) -> dict:
+    return run_exe(exe, work, env=clean_env(work / "c", LC_ALL="C", LANG="C",
+                                            PYTHONUTF8="0", PYTHONIOENCODING="ascii"))
+
+
+@case("polyglot", ("RAN",),
+      "A stage path containing non-ASCII. The cache directory carries the payload digest, "
+      "but its parent is the user's — and users have unicode in their home directory.",
+      inv="INV-STAGE-01",
+      remedy="A failure here means a path is being encoded with the wrong codec, most "
+             "likely where the stage token is written or compared.")
+def unicode_in_the_cache_path(exe: Path, work: Path) -> dict:
+    cache = work / "caché-\u4f60\u597d"
+    cache.mkdir(parents=True, exist_ok=True)
+    return run_exe(exe, work, env=clean_env(cache))
+
+
+# ---------------------------------------------------------------- mute
+
+@case("mute", ("RAN",),
+      "stdin closed outright. Anything that prompts, or that checks whether it can, has "
+      "to cope — including the launcher's own licence prompt, which is guarded on isatty.",
+      inv="INV-SECRET-01",
+      remedy="A HUNG here is the serious one: something is waiting on input that will "
+             "never arrive. The secret prompt must be reached only when stdin is a tty.")
+def stdin_is_closed(exe: Path, work: Path) -> dict:
+    t0 = time.monotonic()
+    try:
+        r = subprocess.run([str(exe)], stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=120, cwd=work, env=clean_env(work / "c"))
+        rc, out, err, to = r.returncode, r.stdout, r.stderr, False
+    except subprocess.TimeoutExpired as e:
+        rc, out, err, to = None, (e.stdout or b"").decode("utf8", "replace"), \
+            (e.stderr or b"").decode("utf8", "replace"), True
+    return {"outcome": classify(rc, out, err, to), "rc": rc,
+            "seconds": round(time.monotonic() - t0, 1), "blame": blame(out, err),
+            "stdout": (out or "").strip()[-400:], "stderr": (err or "").strip()[-400:]}
+
+
+@case("mute", ("RAN", "REFUSED", "APP-CRASHED"),
+      "stdout closed while the app is writing to it — the `| head -1` case. A program that "
+      "ignores SIGPIPE and keeps writing dies on EPIPE; one that does not, exits 0. Varies "
+      "by how much the packaged app prints.",
+      remedy="A raw BrokenPipeError traceback is the finding: exiting quietly on a closed "
+             "pipe is normal behaviour for a command-line program.")
+def stdout_closed_early(exe: Path, work: Path) -> dict:
+    t0 = time.monotonic()
+    p1 = subprocess.Popen([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          cwd=work, env=clean_env(work / "c"), text=True)
+    try:
+        p1.stdout.close()          # slam the read end shut
+        err = p1.stderr.read()
+        rc = p1.wait(timeout=120)
+        to = False
+    except subprocess.TimeoutExpired:
+        p1.kill()
+        rc, err, to = None, "", True
+    # No marker is reachable — stdout is gone — so judge on rc and stderr alone.
+    outcome = ("HUNG" if to else
+               classify(rc, "", err, False) if any(m in err for m in TRACEBACK_MARKERS)
+               else "RAN" if rc == 0 else "REFUSED")
+    return {"outcome": outcome, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
+            "blame": blame("", err), "stdout": "(closed by the test)",
+            "stderr": (err or "").strip()[-400:]}
+
+
+# ---------------------------------------------------------------- impatient
+
+@case("impatient", ("RAN", "REFUSED"),
+      "Ctrl-C while the APPLICATION is running, not while staging. main.nim installs a "
+      "custom SIGINT handler specifically so the child owns Ctrl-C and the launcher does "
+      "not die first — a comment in the source says so, and nothing tested it until now. "
+      "TIMING-SENSITIVE, and honestly so: the signal goes 0.7s in, so whether it lands "
+      "mid-run depends on how long the app takes to start. Measured 2026-09-10 — numpy "
+      "(slow import) REFUSED, iniconfig (finishes first) RAN. That divergence is a fact "
+      "about import speed on this box, not a stable property of either package; do not "
+      "read a change here as a regression without checking the machine.",
+      inv="INV-LAUNCH-06",
+      remedy="A HUNG means the signal reached neither process and the run is wedged. A "
+             "launcher traceback means the parent took the signal instead of the child.")
+def interrupted_while_the_app_runs(exe: Path, work: Path) -> dict:
+    cache, first = warm(exe, work)       # stage first, so the interrupt lands on the app
+    if first["outcome"] != "RAN":
+        return {**first, "stderr": "SKIPPED: first run did not succeed, nothing to interrupt"}
+    t0 = time.monotonic()
+    p1 = subprocess.Popen([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          cwd=work, env=clean_env(cache), text=True)
+    time.sleep(0.7)
+    p1.send_signal(signal.SIGINT)
+    try:
+        out, err = p1.communicate(timeout=60)
+        rc, to = p1.returncode, False
+    except subprocess.TimeoutExpired:
+        p1.kill()
+        out, err, rc, to = "", "", None, True
+    outcome = ("HUNG" if to else
+               "CRASHED" if any(m in (out + err) for m in TRACEBACK_MARKERS) else
+               "RAN" if (rc == 0 and MARKER in out) else "REFUSED")
+    return {"outcome": outcome, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
+            "blame": blame(out, err), "stdout": (out or "").strip()[-400:],
+            "stderr": (err or "").strip()[-400:]}
+
+
+@case("impatient", ("REFUSED", "RAN"),
+      "SIGTERM instead of SIGINT — what a process supervisor or `docker stop` sends. The "
+      "launcher must not leave the child orphaned and running.",
+      remedy="Check for a stray child process afterwards. An orphan holding the stage is "
+             "how a later run finds a directory being written to.")
+def terminated_mid_run(exe: Path, work: Path) -> dict:
+    cache, _ = warm(exe, work)
+    t0 = time.monotonic()
+    p1 = subprocess.Popen([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          cwd=work, env=clean_env(cache), text=True)
+    time.sleep(0.7)
+    p1.terminate()
+    try:
+        out, err = p1.communicate(timeout=60)
+        rc, to = p1.returncode, False
+    except subprocess.TimeoutExpired:
+        p1.kill()
+        out, err, rc, to = "", "", None, True
+    outcome = ("HUNG" if to else
+               "CRASHED" if any(m in (out + err) for m in TRACEBACK_MARKERS) else
+               "RAN" if (rc == 0 and MARKER in out) else "REFUSED")
+    return {"outcome": outcome, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
+            "blame": blame(out, err), "stdout": (out or "").strip()[-400:],
+            "stderr": (err or "").strip()[-400:]}
+
+
+# ---------------------------------------------------------------- hoarder
+
+@case("hoarder", ("RAN", "REFUSED", "APP-CRASHED"),
+      "A 64-file descriptor limit. Staging opens a lot of files and a package with many "
+      "shared objects opens more — torch and numpy will feel this, iniconfig will not. The "
+      "single most package-dependent case in the suite.",
+      remedy="Failing is acceptable; the blame field should say which side ran out. A "
+             "launcher-blamed failure with no message is the bad shape — it means an fd "
+             "error was swallowed.")
+def few_file_descriptors(exe: Path, work: Path) -> dict:
+    import resource
+    return run_exe(exe, work, env=clean_env(work / "c"),
+                   rlimits={resource.RLIMIT_NOFILE: (64, 64)})
+
+
+#: Calibrated, not guessed. A resource ceiling only discriminates between packages if it
+#: sits BETWEEN their requirements. Measured 2026-09-10 on this box, after a warm stage:
+#:   iniconfig  ok at 512 MB
+#:   numpy      FAILS at 512 and 768 MB, ok at 1024 MB
+#: 768 MB therefore separates them. The first version used 256 MB, which was below BOTH —
+#: every package failed identically and the case discriminated nothing. If this stops
+#: diverging, re-run tools/busybody.py --calibrate rather than nudging the number.
+ADDRESS_SPACE_MB = 768
+
+
+@case("hoarder", ("RAN", "REFUSED", "APP-CRASHED"),
+      f"A {ADDRESS_SPACE_MB} MB address-space ceiling, calibrated to sit BETWEEN a config "
+      "parser and a numeric stack: iniconfig runs in 512 MB, numpy needs 1024 MB. This is "
+      "the case that actually diverges by package — and the reason it does is that the "
+      "threshold was measured rather than chosen. Failing cleanly is correct on the heavy "
+      "side; the finding would be a crash or a wedge.",
+      remedy="A clean non-zero exit blamed on the app is the expected result for a heavy "
+             "package. CRASHED with a Nim traceback means an allocation failure inside the "
+             "launcher is unhandled. If EVERY package now behaves the same, the threshold "
+             "has drifted out of the band — recalibrate, do not just raise it.")
+def tight_address_space(exe: Path, work: Path) -> dict:
+    import resource
+    # Warm the stage first with no limit: otherwise this measures whether STAGING fits in
+    # the ceiling, which is the same answer for every package and not the question.
+    cache, first = warm(exe, work)
+    if first["outcome"] != "RAN":
+        return {**first, "stderr": "SKIPPED: could not stage before applying the limit"}
+    return run_exe(exe, work, env=clean_env(cache),
+                   rlimits={resource.RLIMIT_AS: (ADDRESS_SPACE_MB * 1024 * 1024,) * 2})
+
+
+@case("hoarder", ("RAN", "REFUSED", "APP-CRASHED"),
+      "TMPDIR pointing at a read-only directory. Packages that write temporary files fail; "
+      "ones that do not, do not. Staging itself must not depend on TMPDIR being writable, "
+      "because the stage lives in the cache directory.",
+      remedy="If the LAUNCHER fails here, staging is using TMPDIR when it should be using "
+             "the cache directory it already chose.")
+def read_only_tmpdir(exe: Path, work: Path) -> dict:
+    ro = work / "ro-tmp"
+    ro.mkdir(parents=True, exist_ok=True)
+    os.chmod(ro, 0o555)
+    try:
+        return run_exe(exe, work, env=clean_env(work / "c", TMPDIR=str(ro)))
+    finally:
+        os.chmod(ro, 0o755)
 
 
 # ================================================================ fixture + driver

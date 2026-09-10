@@ -293,3 +293,66 @@ def test_pruning_keeps_the_most_recent_runs_and_never_a_live_one(tmp_path):
     left = sorted(d.name for d in runs.iterdir())
     assert "bb20260100-000000" in left, "a live run was pruned"
     assert len(left) == 3, f"expected 2 kept + 1 live, got {left}"
+
+
+# ---------------------------------------------------------------- blame + APP-CRASHED
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_launcher_and_app_failures_are_told_apart():
+    """The distinction that makes app-level personas usable.
+
+    A Nim traceback out of the launcher is always a defect. A Python traceback out of the
+    packaged application, when a case deliberately starved it, is the application declining
+    the box it was given. Calling both CRASHED made a working, calibrated case
+    (`tight_address_space` at 768 MB against numpy) look like a product defect.
+    """
+    bb = _load_busybody()
+    assert bb.blame("", "haru-pack: no payload appended") == "launcher"
+    assert bb.blame("", "Traceback (most recent call last):\nMemoryError") == "app"
+    assert bb.blame("", "") == "unknown"
+
+    assert bb.classify(1, "", "haru-pack: x\nError: unhandled exception [ValueError]",
+                       False) == "CRASHED"
+    assert bb.classify(1, "", "Traceback (most recent call last):\nMemoryError",
+                       False) == "APP-CRASHED"
+
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_app_crashed_is_not_automatically_fatal_but_launcher_crashed_is():
+    """Red-path: add APP-CRASHED to FATAL. Every resource-limit case then reports a finding
+    on any heavy package, which is the outcome those cases exist to produce."""
+    bb = _load_busybody()
+    assert "CRASHED" in bb.FATAL and "HUNG" in bb.FATAL and "SILENT" in bb.FATAL
+    assert "APP-CRASHED" not in bb.FATAL, (
+        "an application declining an imposed resource limit is not a haru-pack defect"
+    )
+    assert bb.severity_for({}, {"outcome": "APP-CRASHED"}, ok=False) == "note"
+    assert bb.severity_for({}, {"outcome": "CRASHED"}, ok=False) == "critical"
+
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_resource_thresholds_are_calibrated_not_guessed():
+    """A ceiling only discriminates between packages if it sits BETWEEN their needs.
+
+    The first version used 256 MB, below every package — so all failed identically and the
+    case discriminated nothing. Measured band on this box: iniconfig ok at 512 MB, numpy
+    needs 1024 MB, so 768 MB separates them.
+    """
+    bb = _load_busybody()
+    assert 512 < bb.ADDRESS_SPACE_MB < 1024, (
+        f"ADDRESS_SPACE_MB={bb.ADDRESS_SPACE_MB} is outside the measured band "
+        f"(iniconfig ok at 512, numpy needs 1024); it will not discriminate"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_there_are_app_level_personas_distinct_from_launcher_ones():
+    """Launcher-level cases are payload-invariant by construction: the launcher is
+    byte-identical in every binary. The 2026-09-10 sweep proved it — 575 runs, 23
+    fingerprints. App-level personas exist so `--fixtures top25` can tell packages apart."""
+    bb = _load_busybody()
+    personas = {c["persona"] for c in bb.CASES}
+    app_level = {"cartographer", "polyglot", "mute", "impatient", "hoarder"}
+    assert app_level <= personas, f"missing app-level personas: {app_level - personas}"
+    for name in app_level:
+        assert any(c["persona"] == name for c in bb.CASES), f"{name} has no cases"
