@@ -240,7 +240,7 @@ def test_bundle_uv_refuses_an_unpinned_version(monkeypatch, tmp_path, no_network
 @pytest.mark.invariant("INV-SUPPLY-01")
 def test_bundle_python_refuses_a_tampered_interpreter(monkeypatch, tmp_path, pbs_tarball):
     url = _file_url(pbs_tarball)
-    monkeypatch.setattr(bundle, "_find_python_url", lambda os_, v: url)
+    monkeypatch.setattr(bundle, "_find_python_url", lambda os_, v, arch="x86_64": url)
     monkeypatch.setattr(bundle, "PBS_SHA256", {url: _sha(b"the interpreter upstream published")})
 
     with pytest.raises(DigestMismatch):
@@ -253,7 +253,7 @@ def test_bundle_python_refuses_a_tampered_interpreter(monkeypatch, tmp_path, pbs
 @pytest.mark.invariant("INV-SUPPLY-01")
 def test_bundle_python_accepts_the_pinned_interpreter(monkeypatch, tmp_path, pbs_tarball):
     url = _file_url(pbs_tarball)
-    monkeypatch.setattr(bundle, "_find_python_url", lambda os_, v: url)
+    monkeypatch.setattr(bundle, "_find_python_url", lambda os_, v, arch="x86_64": url)
     monkeypatch.setattr(bundle, "PBS_SHA256", {url: sha256_file(pbs_tarball)})
 
     out = bundle.bundle_python("windows", tmp_path / "vendor", version="3.12")
@@ -263,7 +263,7 @@ def test_bundle_python_accepts_the_pinned_interpreter(monkeypatch, tmp_path, pbs
 @pytest.mark.invariant("INV-SUPPLY-01")
 def test_bundle_python_refuses_an_url_with_no_pin(monkeypatch, tmp_path, no_network):
     monkeypatch.setattr(bundle, "_find_python_url",
-                        lambda os_, v: "https://example.invalid/cpython-9.9.9.tar.gz")
+                        lambda os_, v, arch="x86_64": "https://example.invalid/cpython-9.9.9.tar.gz")
     with pytest.raises(UnpinnedArtifact):
         bundle.bundle_python("windows", tmp_path / "vendor", version="9.9")
 

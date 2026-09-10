@@ -64,14 +64,14 @@ def test_every_documented_trigger_enables_encryption(script_project, trigger):
     `--encrypt` alone was the one that did not, for the whole life of the feature.
     """
     args = _TRIGGERS[trigger]
-    _, enc, _, _ = _resolve(script_project, "thin", "", *args)
+    _, enc, _, _, _ = _resolve(script_project, "thin", "", *args)
     assert enc["enabled"] is True, f"--{trigger} does not enable encryption"
 
 
 @pytest.mark.invariant("INV-BUILD-02")
 def test_no_trigger_means_no_encryption(script_project):
     """The converse: a build that asked for nothing must not silently encrypt."""
-    _, enc, _, _ = _resolve(script_project, "thin", "", "", [], "", "", False, False)
+    _, enc, _, _, _ = _resolve(script_project, "thin", "", "", [], "", "", False, False)
     assert enc["enabled"] is False
 
 

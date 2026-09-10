@@ -7,6 +7,7 @@ from .payload import build_payload_zip
 from .overlay import attach
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier
+from .sources import Sources
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine)
 
@@ -78,10 +79,12 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "user": user or e.get("user", ""),
         "embed_secret": embed_secret or bool(e.get("embed_secret")),
     }
-    return manifest, enc, pyver, disc["source"]
+    return manifest, enc, pyver, disc["source"], Sources.resolve(decl)
 
 def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
-                     python: str, workdir: Path, wine: bool = False) -> Path:
+                     python: str, workdir: Path, wine: bool = False,
+                     sources: Sources | None = None) -> Path:
+    sources = sources or Sources()
     payload = workdir / "payload"
     app = payload / manifest["app_subdir"]
     if source.is_file():
@@ -92,7 +95,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
     manifest = apply_tier(dict(manifest), tier)
     vendor = payload / "vendor"
     if tier in ("default", "thick"):
-        bundle_uv(target, vendor)
+        bundle_uv(target, vendor, sources=sources)
     if tier == "thick":
         steps = manifest.get("bundle") or []
         if steps and target != "host" and not wine:
@@ -100,20 +103,20 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target: str,
                 f"bundle steps run target-native code and can't be produced for --target "
                 f"{target} from here. Re-run with --wine, build --thick on the target OS, or "
                 f"fetch by URL.")
-        py = bundle_python(target, vendor, version=python)
+        py = bundle_python(target, vendor, version=python, sources=sources)
         if manifest.get("kind") == "project" or steps:
             app_dir = payload / manifest["app_subdir"]
             cache = vendor / "cache"; cache.mkdir(parents=True, exist_ok=True)
             if target == "host":
                 tmp_env = Path(tempfile.mkdtemp(prefix="haru-warm-"))
                 try:
-                    warm_cache_and_lock(app_dir, py, cache, tmp_env)
+                    warm_cache_and_lock(app_dir, py, cache, tmp_env, sources=sources)
                     for step in steps:
                         run_bundle_step(step, payload, tmp_env, app_dir)
                 finally:
                     shutil.rmtree(tmp_env, ignore_errors=True)
             else:
-                warm_cache_windows(app_dir, cache, python)
+                warm_cache_windows(app_dir, cache, python, sources=sources)
                 if steps and wine:
                     run_bundle_steps_wine(steps, payload, py, app_dir)
             manifest["cache_dir"] = "vendor/cache"
@@ -131,14 +134,15 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     tc = detect_c_toolchain(target)
     if not tc["ok"]:
         raise BuildError(f"C toolchain missing for target '{target}':\n{tc['advice']}")
-    manifest, enc, pyver, source = _resolve(project, tier, python, expires, geo,
-                                            machine, user, embed_secret, encrypt)
+    manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
+                                                     machine, user, embed_secret, encrypt)
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        payload_dir = assemble_payload(source, manifest, tier, target, pyver, tdp / "asm", wine)
+        payload_dir = assemble_payload(source, manifest, tier, target, pyver, tdp / "asm",
+                                       wine, sources=sources)
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:
@@ -159,6 +163,9 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         out.chmod(0o755)
     except Exception:
         pass
-    info.update(tier=tier, target=target, nim=nim, compiler=tc["compiler"], out=str(out),
+    # The receipt records WHERE this build's third-party bytes came from. An operator
+    # auditing a signed artifact should not have to guess whether a mirror was in play.
+    info.update(sources=sources.describe(),
+                tier=tier, target=target, nim=nim, compiler=tc["compiler"], out=str(out),
                 encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver)
     return info

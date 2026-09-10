@@ -1,7 +1,8 @@
 from __future__ import annotations
-import json, os, shutil, subprocess, sys, tempfile, zipfile
+import json, os, platform, shutil, subprocess, sys, tempfile, zipfile
 from pathlib import Path
 from .archives import safe_extract_tar, fetch_verified, UnpinnedArtifact
+from .sources import Sources
 
 UV_VERSION = "0.10.4"
 
@@ -59,10 +60,20 @@ def _run(cmd, **kw):
 def _export_reqs(app_dir: Path) -> list:
     """Locked requirements for a project, minus uv export's ANSI-colored comment lines."""
     env = dict(os.environ, NO_COLOR="1")
-    exp = _run(["uv", "export", "--project", str(app_dir), "--no-hashes", "--no-header",
+    # Hashes are KEPT (INV-SUPPLY-08). uv emits them by default; this used to pass
+    # --no-hashes and then fed the hashless result to `uv pip install`, discarding
+    # integrity data the lockfile already had. The continuation lines of a hashed
+    # requirement (`    --hash=sha256:...`) must survive, so only comments and
+    # -e/-r/-c directives are dropped and indentation is preserved.
+    exp = _run(["uv", "export", "--project", str(app_dir), "--no-header",
                 "--format", "requirements-txt"], env=env).stdout
-    return [l.strip() for l in exp.splitlines()
-            if l.strip() and not l.strip().startswith(("#", "-e", "-r", "-c"))]
+    out = []
+    for line in exp.splitlines():
+        st = line.strip()
+        if not st or st.startswith(("#", "-e ", "-r ", "-c ")):
+            continue
+        out.append(line.rstrip())
+    return out
 
 _UV_ASSET = {
     "windows": "uv-x86_64-pc-windows-msvc.zip",
@@ -90,19 +101,25 @@ def _extract_find(archive: Path, name: str, dest: Path) -> None:
                 return
     raise RuntimeError(f"{name} not found inside {archive.name}")
 
-def bundle_uv(target: str, vendor_dir: Path, version: str = UV_VERSION) -> Path:
-    """Place a uv binary for the target OS into vendor_dir. Host: copy local uv if present,
-    else download; cross: download the target-OS release."""
+def bundle_uv(target: str, vendor_dir: Path, version: str = UV_VERSION,
+              sources: Sources | None = None) -> Path:
+    """Place a verified uv binary for the target OS into vendor_dir — ONE path, host or cross.
+
+    The host branch used to `shutil.which("uv")` and copy whatever it found straight into the
+    payload, where it gets zipped, shipped and signed. That meant the binary a customer
+    executes was whatever happened to be first on the build operator's PATH: no digest, no
+    version guarantee, and a trivial supply-chain foothold on a developer workstation
+    (INV-SUPPLY-06). It also made host builds non-reproducible — two machines produced
+    different payloads from the same commit.
+
+    Everything is downloaded from a pinned, verified source now. `sources` decides *where*
+    from; the digest decides *whether we keep it*.
+    """
+    sources = sources or Sources()
     vendor_dir.mkdir(parents=True, exist_ok=True)
     tos = _target_os(target)
     exe = "uv.exe" if tos == "windows" else "uv"
     dest = vendor_dir / exe
-    if target == "host":
-        local = shutil.which("uv")
-        if local:
-            shutil.copy2(local, dest)
-            if tos != "windows": dest.chmod(0o755)
-            return dest
     asset = _UV_ASSET[tos]
     digest = UV_SHA256.get(version, {}).get(asset)
     if not digest:                                                  # INV-SUPPLY-01
@@ -110,7 +127,7 @@ def bundle_uv(target: str, vendor_dir: Path, version: str = UV_VERSION) -> Path:
             f"no pinned sha256 for uv {version} asset {asset}; haru-pack will not bundle an "
             f"unverified uv. Record the publisher's digest in bundle.UV_SHA256 (the release "
             f"publishes {asset}.sha256) before bumping UV_VERSION.")
-    url = f"https://github.com/astral-sh/uv/releases/download/{version}/{asset}"
+    url = sources.uv_url(version, asset)          # mirror-aware; the pin above is not
     with tempfile.TemporaryDirectory() as td:
         arc = Path(td) / asset
         fetch_verified(url, arc, digest, what=f"uv {version} ({asset})")       # INV-SUPPLY-01
@@ -118,13 +135,27 @@ def bundle_uv(target: str, vendor_dir: Path, version: str = UV_VERSION) -> Path:
     if tos != "windows": dest.chmod(0o755)
     return dest
 
-def _find_python_url(target_os: str, version: str) -> str:
-    """Use uv's python-build-standalone catalog to find a download URL for another OS."""
+def _host_arch() -> str:
+    m = platform.machine().lower()
+    return {"amd64": "x86_64", "x86_64": "x86_64",
+            "arm64": "aarch64", "aarch64": "aarch64"}.get(m, m)
+
+
+def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
+    """Find the UPSTREAM python-build-standalone URL for an (os, arch, version).
+
+    Returns the upstream URL even when a mirror is configured: it is the key the digest is
+    pinned under. `Sources.python_url()` rewrites it to the download point afterwards, so a
+    mirror can never dodge the pin (INV-SUPPLY-10).
+
+    Note for whoever maintains this: uv's catalog carries no `sha256` field (checked against
+    uv 0.10.4), so digests come from the release, not from here.
+    """
     out = subprocess.run(["uv", "python", "list", "--all-platforms", "--all-versions",
                           "--output-format", "json"], capture_output=True, text=True, check=True)
     best = None
     for e in json.loads(out.stdout):
-        if e.get("os") != target_os or e.get("arch") != "x86_64": continue
+        if e.get("os") != target_os or e.get("arch") != arch: continue
         if e.get("implementation") != "cpython" or e.get("variant") != "default": continue
         if not e.get("version", "").startswith(version): continue
         url = e.get("url") or ""
@@ -132,36 +163,45 @@ def _find_python_url(target_os: str, version: str) -> str:
         if best is None or e["version"] > best[0]:
             best = (e["version"], url)
     if not best:
-        raise RuntimeError(f"no python-build-standalone {version} for {target_os}/x86_64")
+        raise RuntimeError(
+            f"no python-build-standalone {version} for {target_os}/{arch} in uv's catalog. "
+            f"`uv python list --all-platforms --all-versions` shows what is available.")
     return best[1]
 
-def bundle_python(target: str, vendor_dir: Path, version: str = "3.12") -> Path:
-    """thick: stage a standalone Python into vendor/python. host: uv python install.
-    cross (windows): download python-build-standalone (install_only, relocatable)."""
+def bundle_python(target: str, vendor_dir: Path, version: str = "3.12",
+                  sources: Sources | None = None) -> Path:
+    """Stage a standalone Python into vendor/python — ONE path for host and cross.
+
+    This used to fork: cross downloaded and verified the archive, while `host` — the DEFAULT
+    — shelled out to `uv python install` with the operator's whole environment forwarded, so
+    the interpreter that ends up inside a signed customer binary was fetched by a subprocess
+    haru-pack never inspected. Two code paths meant one of them was unverified, and it was
+    the one almost everybody uses (INV-SUPPLY-07).
+
+    Now both go through the same three steps: resolve the upstream URL, look the pinned
+    digest up by that URL, download it (from a mirror if one is configured) and verify.
+    """
+    sources = sources or Sources()
     pydir = vendor_dir / "python"
     pydir.mkdir(parents=True, exist_ok=True)
-    if target == "host":
-        # uv performs its own sha256 check against the metadata compiled into it; this
-        # path never hands us the archive, so INV-SUPPLY-01 is delegated to uv here.
-        env = dict(os.environ, UV_PYTHON_INSTALL_DIR=str(pydir))
-        subprocess.run(["uv", "python", "install", version], env=env, check=True,
-                       capture_output=True, text=True)
-    else:
-        target_os = _target_os(target)  # "windows"
-        url = _find_python_url(target_os, version)
-        digest = PBS_SHA256.get(url)
-        if not digest:                                              # INV-SUPPLY-01
-            raise UnpinnedArtifact(
-                f"no pinned sha256 for {url}; haru-pack will not stage an unverified "
-                "interpreter into a binary you are about to sign. Record the digest in "
-                "bundle.PBS_SHA256 (the python-build-standalone release publishes a "
-                "<asset>.sha256 sidecar, and the release API carries a per-asset digest).")
-        with tempfile.TemporaryDirectory() as td:
-            arc = Path(td) / "py.tar.gz"
-            fetch_verified(url, arc, digest,
-                           what=f"python-build-standalone {version} ({target_os})")  # INV-SUPPLY-01
-            # install_only extracts to pydir/python/...
-            safe_extract_tar(arc, pydir)               # INV-SUPPLY-03
+    target_os = _target_os(target)
+    arch = _host_arch() if target == "host" else "x86_64"
+
+    upstream = _find_python_url(target_os, version, arch)
+    digest = PBS_SHA256.get(upstream)
+    if not digest:                                                  # INV-SUPPLY-01
+        raise UnpinnedArtifact(
+            f"no pinned sha256 for {upstream}; haru-pack will not stage an unverified "
+            "interpreter into a binary you are about to sign. Record the digest in "
+            "bundle.PBS_SHA256 (the python-build-standalone release publishes a "
+            "<asset>.sha256 sidecar, and the release API carries a per-asset digest). "
+            "Do not remove this check, and do not invent a digest to satisfy it.")
+    url = sources.python_url(upstream)                              # mirror, pin unchanged
+    with tempfile.TemporaryDirectory() as td:
+        arc = Path(td) / "py.tar.gz"
+        fetch_verified(url, arc, digest,
+                       what=f"python-build-standalone {version} ({target_os}/{arch})")
+        safe_extract_tar(arc, pydir)                   # INV-SUPPLY-03
     exe = "python.exe" if _target_os(target) == "windows" else "python3"
     cands = [c for c in {c.resolve() for c in pydir.rglob(exe)}
              if c.is_file() and "venv" not in (q.lower() for q in c.parts)]
@@ -170,13 +210,17 @@ def bundle_python(target: str, vendor_dir: Path, version: str = "3.12") -> Path:
     return min(cands, key=lambda c: len(c.parts))   # top-level interpreter, not a template
 
 
-def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path) -> None:
+def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path,
+                        sources: Sources | None = None) -> None:
     """Populate a bundled uv cache with the project's deps (+ write uv.lock) using a
     THROWAWAY env outside the payload, so the runtime can build its venv offline."""
     env = dict(os.environ, UV_CACHE_DIR=str(cache_dir), UV_PYTHON=str(py),
                UV_PYTHON_DOWNLOADS="never", UV_PROJECT_ENVIRONMENT=str(tmp_env))
-    subprocess.run(["uv", "sync", "--project", str(app_dir)], env=env, check=True,
-                   capture_output=True, text=True)
+    # `uv sync` resolves from uv.lock, which carries per-wheel hashes that uv verifies,
+    # so this path is hash-checked by uv itself (INV-SUPPLY-08).
+    subprocess.run(["uv", "sync", "--project", str(app_dir),
+                    *(sources or Sources()).uv_index_args()],
+                   env=env, check=True, capture_output=True, text=True)
 
 
 def run_bundle_step(step: dict, payload: Path, tmp_env: Path, app_dir: Path) -> None:
@@ -194,7 +238,8 @@ def run_bundle_step(step: dict, payload: Path, tmp_env: Path, app_dir: Path) -> 
                    capture_output=True, text=True)
 
 
-def warm_cache_windows(app_dir: Path, cache_dir: Path, version: str) -> None:
+def warm_cache_windows(app_dir: Path, cache_dir: Path, version: str,
+                       sources: Sources | None = None) -> None:
     """Cross: lock (host) then download WINDOWS wheels into the bundled uv cache so the
     venv builds offline at first run on Windows. Wheel-only (no target execution)."""
     _run(["uv", "lock", "--project", str(app_dir)])
@@ -204,8 +249,11 @@ def warm_cache_windows(app_dir: Path, cache_dir: Path, version: str) -> None:
     with tempfile.TemporaryDirectory() as td:
         rf = Path(td) / "r.txt"; rf.write_text("\n".join(reqs))
         env = dict(os.environ, UV_CACHE_DIR=str(cache_dir))
+        # --require-hashes (INV-SUPPLY-08): _export_reqs now keeps the lockfile's hashes,
+        # so a substituted wheel fails here instead of being cached into the payload.
         _run(["uv", "pip", "install", "--python-platform", "windows",
-              "--python-version", version, "--only-binary", ":all:",
+              "--python-version", version, "--only-binary", ":all:", "--require-hashes",
+              *(sources or Sources()).uv_index_args(),
               "--target", str(Path(td) / "t"), "-r", str(rf)], env=env)
 
 

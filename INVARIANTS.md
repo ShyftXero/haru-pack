@@ -37,8 +37,7 @@ way to distinguish a test that would go red along the red-path from one that cou
 That is why the Red-path field is mandatory and why neutralize-then-observe-red is the
 expected workflow before marking an invariant `active`.
 
-`INV-LAUNCH-03`, `INV-SUPPLY-01`, `INV-SUPPLY-02`, `INV-SUPPLY-06`, `INV-SUPPLY-07` and
-`INV-SUPPLY-08` are deliberately `proposed`. The behavior is **not implemented**, or is only
+`INV-LAUNCH-03` and `INV-SUPPLY-02` are deliberately `proposed`. The behavior is **not implemented**, or is only
 partly implemented and the entry says which part. They are written down so the gap is
 legible, not so it looks covered.
 
@@ -354,15 +353,21 @@ digest and require `DigestMismatch`; then remove the pin entirely and require `U
 *before* any network call. Walked 2026-09-09.
 Source: Adversarial review 2026-09-09, finding W6. Four download sites, zero checks:
 `bootstrap.install_nim`, `bundle.bundle_uv`, `bundle.bundle_python`, `uvfetch.ensureUv`.
-`uv python list --output-format json` returns a `sha256` per entry that `_find_python_url`
-read past and discarded; it is now used.
+**Correction:** an earlier revision of this entry said `uv python list --output-format json`
+returns a `sha256` per entry that `_find_python_url` "read past and discarded". That is false —
+checked against uv 0.10.4, the entry keys are exactly {arch, implementation, key, libc, os, path,
+symlink, url, variant, version, version_parts} and there is no digest field. The pins come from
+the release instead: the `<asset>.sha256` sidecar where one is published, and the release API's
+per-asset digest where it is not. One pin was spot-checked against the live artifact on
+2026-09-09 and matched.
 Note: **Statement narrowed on promotion, from "every artifact haru-pack downloads and then
 executes" to "downloads directly".** The original wording was false and an adversarial verifier
-proved it: `bundle_python(target="host")` — the DEFAULT path — shells out to `uv python install`,
-and `warm_cache_windows` runs `uv export --no-hashes` feeding a hashless requirements file to
-`uv pip install`. Both download and both end up in the payload, and neither goes through
-`fetch_verified`. Those are tracked as `INV-SUPPLY-07`, `proposed`. Do not read this entry as
-covering them.
+proved it. The two gaps it found — `bundle_python(target="host")` shelling out to
+`uv python install`, and `warm_cache_windows` discarding the lockfile's hashes — have since been
+closed by `INV-SUPPLY-07` and `INV-SUPPLY-08`, and `bundle_uv`'s PATH shortcut by
+`INV-SUPPLY-06`. The narrow wording is kept anyway: it says what THIS entry proves, and the
+distinction between a direct download and a delegated one is exactly what went unnoticed the
+first time.
 Note: No digest is pinned for Nim `linux_arm64` — upstream publishes no such artifact for 2.2.6.
 The table entry is deliberately absent and `install_nim` raises `UnpinnedArtifact` on that
 platform. No value was invented to make the check pass.
@@ -428,54 +433,66 @@ compressed archive, so a zip bomb under it is not caught; TLS is the OS's, unpin
 Territory: src/haru_pack/launcher/uvfetch.nim
 
 ### INV-SUPPLY-06
-Status: proposed
-Statement: The `uv` binary copied into a payload on a host-target build is verified before it
-ships, rather than being whatever `uv` happened to be first on the build host's PATH.
+Status: active
+Statement: The `uv` binary placed into a payload is always the pinned, digest-verified release
+asset; no build ships whatever `uv` happened to be first on the build host's PATH.
 Actors: anyone who can write a file named `uv` earlier in the build operator's PATH; a
 compromised developer workstation.
-Assets: the customer deliverable. `bundle_uv(target="host")` calls `shutil.which("uv")` and
-copies that binary straight into `vendor/`, where it is zipped into the payload and signed.
-Red-path: Once implemented — put a fake `uv` first on PATH, run a host build, and observe the
-build refuse or fall back to the pinned download instead of shipping it.
-Source: Noticed 2026-09-09 while implementing INV-SUPPLY-01. `bundle_uv` returns the copied
-local binary before any digest logic is reached, so INV-SUPPLY-01 does not cover it — nothing
+Assets: the customer deliverable. The copied binary is zipped into the payload and signed, and
+it is the first thing the launcher executes.
+Red-path: Restore the `local = shutil.which("uv")` copy shortcut at the top of `bundle_uv`.
+`tests/test_sources.py::test_bundle_uv_never_ships_a_binary_off_the_build_hosts_path` goes red.
+Source: Noticed 2026-09-09 while implementing INV-SUPPLY-01. `bundle_uv` returned the copied
+local binary before any digest logic was reached, so INV-SUPPLY-01 did not cover it — nothing
 was downloaded.
-Note: The pinned `UV_SHA256` table cannot be reused as-is; a locally installed uv is legitimately
-a different build than the release asset. The likely fix is to prefer the pinned download for
-anything that ships and keep the PATH copy for local iteration only.
-Territory: src/haru_pack/bundle.py
+Note: The earlier plan was to keep the PATH copy "for local iteration only". That was dropped:
+a second code path is a second thing to get wrong, and it was the unverified one that ran by
+default. Host and cross now share one path. The cost is a download on a host build that
+previously reused a local binary; the artifact cache makes that a one-off per version.
+Note: This also makes host builds reproducible. Two machines with different local uv versions
+used to produce different payloads from the same commit.
+Territory: src/haru_pack/bundle.py, tests/test_sources.py
 
 ### INV-SUPPLY-07
-Status: proposed
-Statement: Artifacts that haru-pack downloads *indirectly*, by shelling out to `uv`, are
-verified before they enter a payload.
-Actors: as INV-SUPPLY-01 — anyone who can serve or tamper with an upstream artifact.
-Assets: the customer deliverable. These artifacts are staged into the payload and signed.
-Red-path: Once implemented — point one of these fetches at a modified artifact with valid TLS
-and observe the build refuse.
+Status: active
+Statement: The standalone interpreter staged into a payload is downloaded and digest-verified by
+haru-pack itself on every target, host included; no interpreter reaches a payload via a
+subprocess whose bytes haru-pack never inspected.
+Actors: anyone who can serve or tamper with an upstream artifact; a compromised upstream account.
+Assets: the customer deliverable. The staged interpreter is signed with the vendor's certificate
+and executed on every customer machine.
+Red-path: Restore the `if target == "host": subprocess.run(["uv", "python", "install", ...])`
+branch in `bundle_python`. Two tests go red: the shape test that forbids a host-specific branch,
+and `test_bundle_python_verifies_on_the_host_target`, which requires a `DigestMismatch` when the
+fetched interpreter is not the pinned one.
 Source: Found by the adversarial verifier for INV-SUPPLY-01 on 2026-09-09, which is why that
-invariant's Statement had to be narrowed to *direct* downloads. Two sites, both reachable on the
-DEFAULT path: `bundle_python(target="host")` runs `uv python install` with the operator's whole
-environment forwarded, and `warm_cache_and_lock` resolves and downloads the project's wheels.
-Neither goes through `archives.fetch_verified`.
-Note: `archives.py`'s module docstring says `fetch_verified` "is the only download entry point
-the rest of the package may use". That is aspirational, not true, until this lands.
-Territory: src/haru_pack/bundle.py
+invariant's Statement had to be narrowed to *direct* downloads. `bundle_python(target="host")`
+was the DEFAULT path and it forwarded the operator's whole environment to `uv python install`.
+Note: Host and cross now share one code path, differing only in the `(os, arch)` they resolve.
+That is the point: the old fork meant one of the two was unverified, and it was the one almost
+everybody used. `_host_arch()` maps the machine so a host build is no longer x86_64-only.
+Territory: src/haru_pack/bundle.py, tests/test_sources.py
 
 ### INV-SUPPLY-08
-Status: proposed
+Status: active
 Statement: The application's own dependency wheels are installed into a bundled payload with
 hash verification, so a compromised index cannot substitute a wheel.
 Actors: a compromised or hostile package index; an attacker with a network position during a
 cross-build.
 Assets: the customer deliverable — these wheels ARE the application.
-Red-path: Once implemented — serve a wheel whose hash does not match the lockfile and observe
-the build refuse.
+Red-path: Put `--no-hashes` back into `_export_reqs`, or drop `--require-hashes` from
+`warm_cache_windows`. One test goes red for each.
 Source: Found by the adversarial verifier for INV-SUPPLY-01 on 2026-09-09. `warm_cache_windows`
-runs `uv export --no-hashes`, then feeds that hashless requirements file to
-`uv pip install --only-binary :all:` with no `--require-hashes`. The lockfile has the hashes;
-they are explicitly discarded.
-Territory: src/haru_pack/bundle.py
+ran `uv export --no-hashes` and fed the hashless requirements file to
+`uv pip install --only-binary :all:` with no `--require-hashes`. The lockfile had the hashes;
+they were explicitly discarded.
+Note: uv emits hashes by DEFAULT — `--no-hashes` was an opt-out. Because a hashed requirement
+spans multiple lines (`    --hash=sha256:...` continuations), `_export_reqs` must not strip
+indentation; a third test covers that, since silently dropping continuations would produce a
+hashless file and `--require-hashes` would then reject everything.
+Note: The `warm_cache_and_lock` path (host thick builds) resolves from `uv.lock`, whose per-wheel
+hashes uv verifies itself. That is delegated verification, not our check.
+Territory: src/haru_pack/bundle.py, tests/test_sources.py
 
 ### INV-SUPPLY-09
 Status: active
@@ -498,6 +515,28 @@ Note: `test_every_third_party_nim_import_is_pinned` scans only direct `import` l
 `launcher/*.nim`. Transitive dependencies — `webby` and `libcurl`, pulled in by puppy — are not
 covered and are not claimed.
 Territory: src/haru_pack/bootstrap.py
+
+### INV-SUPPLY-10
+Status: active
+Statement: A configured mirror changes only *where* an artifact is fetched from, never *whether*
+it is verified: the pinned digest is selected by the artifact's upstream identity, so a hostile
+mirror produces a `DigestMismatch` rather than a compromised build.
+Actors: whoever operates the mirror; anyone who can point a build at one (an env var is enough).
+Assets: everything INV-SUPPLY-01/06/07 protect. A mirror that could choose its own pin would
+silently undo all of them.
+Red-path: In `bundle_python`, move the `PBS_SHA256.get(...)` lookup below the
+`sources.python_url(...)` rewrite so the pin is keyed by the mirrored URL. The source-order test
+goes red; so does `test_a_hostile_mirror_cannot_substitute_an_artifact`, which serves different
+bytes from a mirror and requires the build to fail.
+Source: Added 2026-09-09 alongside mirror support. Environments that cannot reach github.com need
+an alternate origin; the risk is that "configurable origin" quietly becomes "configurable trust".
+Note: The refusal in `Sources.python_url` to rewrite a URL that does not start with the known
+upstream base is part of this. Guessing a mirror path for an unrecognised host would fetch an
+unrelated file, and the digest check would then be the only thing standing between that and the
+payload — a check should not be the last line of defence when refusing is available.
+Note: Mirrors are for availability and policy. If a mismatch appears after pointing at a mirror,
+the mirror is wrong or stale. Do not edit the pin to make it pass.
+Territory: src/haru_pack/sources.py, src/haru_pack/bundle.py, tests/test_sources.py
 
 ### INV-SUPPLY-03
 Status: active

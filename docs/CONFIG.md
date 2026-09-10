@@ -56,6 +56,53 @@ user = "alice"                   # cryptographic bind
 embed_secret = false
 ```
 
+## `[sources]` — where third-party artifacts are downloaded from
+
+haru-pack downloads three things while building: the `uv` binary, a standalone Python
+interpreter, and your project's wheels. By default all three come from their upstream
+publishers on github.com and PyPI. If your environment can't reach those — an air-gapped
+build host, a corporate proxy, a mandated mirror — point them somewhere else:
+
+```toml
+[sources]
+uv_base     = "https://mirror.example/uv/releases/download"
+python_base = "https://mirror.example/python-build-standalone/releases/download"
+index_url   = "https://pypi.example/simple"
+```
+
+Or per-invocation, which is usually what CI wants:
+
+```sh
+HARUPACK_UV_BASE=... HARUPACK_PYTHON_BASE=... HARUPACK_INDEX_URL=... haru-pack build ./app
+```
+
+`haru_pack.toml` wins over the environment; the environment wins over the defaults.
+
+**A mirror must be a path-preserving reverse proxy.** Everything after the base URL is
+reused verbatim, so `<uv_base>/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz` has to resolve.
+That's the same shape `uv python install --mirror` expects, so a mirror that works for uv
+works here.
+
+### Changing where bytes come from does not change whether they're checked
+
+Every downloaded artifact is verified against a SHA-256 pinned **in this repository**
+(`bundle.UV_SHA256`, `bundle.PBS_SHA256`), and the pin is chosen by the artifact's
+*upstream* identity before the download point is rewritten. So:
+
+- Pointing at a hostile or stale mirror gives you a `DigestMismatch` and a failed build,
+  not a compromised binary.
+- An artifact with **no pin is refused rather than downloaded** — haru-pack will not stage
+  something unverified into a binary you're about to sign.
+
+If a mirror produces a digest mismatch, the mirror is wrong or out of date. **Do not edit
+the pin to make it pass.** Fix the mirror, or set the base back to upstream. Bumping a
+pinned version means recording the publisher's real digest — from the release's
+`<asset>.sha256` sidecar or the release API — never a value you computed from whatever the
+mirror happened to serve.
+
+The build receipt records which sources were used, so `haru-pack build` output tells you
+whether a mirror was in play for that artifact.
+
 ## Generated `manifest.toml`
 `haru-pack build` writes a resolved `manifest.toml` **into the payload** (kind, entrypoint,
 cwd_policy, tier, offline, cache_dir, bundle, pre/post_install). That's what the launcher
