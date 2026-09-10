@@ -200,6 +200,7 @@ user data — the code lives in the stage dir.
 - [docs/SIGNING.md](docs/SIGNING.md) — Windows Authenticode code signing (cross-platform)
 - [docs/ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) — `--encrypt` + license checks
 - [docs/FLEX.md](docs/FLEX.md) — the flex harness: top-25 breadth + hard targets
+- [docs/BUSYBODY.md](docs/BUSYBODY.md) — chaos testing: the personas and how to read a report
 - [docs/RELEASING.md](docs/RELEASING.md) — cutting a release (`./scripts/cut-release.sh`)
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — publishing to PyPI
 - [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)

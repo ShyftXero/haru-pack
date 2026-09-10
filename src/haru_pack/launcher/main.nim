@@ -203,6 +203,16 @@ proc launch(): int =
   if m.offline and "--offline" notin m.uvRunArgs: a.add "--offline"
   case m.kind
   of akScript:
+    # --no-project is NOT optional. cwd is the launch directory (run-in-place), and uv walks
+    # UP from there looking for a project. Run a packed binary from inside any Python project
+    # — which is the normal case, since people run tools in their own repos — and uv adopts
+    # that project, rebuilding ITS .venv against our staged interpreter.
+    #
+    # Found by busybody 2026-09-09, the hard way: a chaos case running from a work directory
+    # inside this repository left haru-pack's own .venv/bin/python a dangling symlink into a
+    # staged tree that was then deleted. A packaged application must not be able to damage
+    # the environment of the directory it happens to be run from.
+    a.add "--no-project"
     a.add "--script"
     a.add appDir / m.entrypoint[0]
   of akProject:

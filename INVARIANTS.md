@@ -539,6 +539,31 @@ Note: Narrowing the handler to `except ValueError` is NOT a valid neutralization
 `TomlError` derives from `ValueError`, so the test stays green. Use the deletion above.
 Territory: src/haru_pack/launcher/main.nim
 
+### INV-LAUNCH-07
+Status: active
+Statement: A packed binary never modifies the Python environment of the directory it is run
+from; `uv` is prevented from discovering and adopting an enclosing project.
+Actors: not an attacker — an ordinary user running a packed tool inside their own repository,
+which is the normal way people use tools.
+Assets: the user's project. Adopting their project means rebuilding their `.venv` against our
+staged interpreter, leaving their environment broken in a way that has nothing to do with
+what they ran.
+Red-path: Delete `a.add "--no-project"` from the `akScript` branch of `main.nim`. Build any
+script binary, run it from inside a directory containing a `pyproject.toml`, and watch that
+project's `.venv/bin/python` get repointed at the staged interpreter. Walked both directions
+by hand on 2026-09-09: broken without the flag, byte-identical with it.
+Source: Found by busybody, destructively. A chaos case whose working directory happened to
+sit inside this checkout left haru-pack's own `.venv/bin/python` a dangling symlink into a
+staged tree that was then deleted. The harness broke the repository it was testing, which is
+the only reason the launcher bug was noticed.
+Note: This is a direct consequence of the run-in-place design. cwd is deliberately the user's
+launch directory, and uv walks UP from cwd looking for a project — so the feature and the bug
+come from the same decision. The project path was already safe because it passes `--project`
+explicitly; only the script path was exposed.
+Note: busybody's own work directories now live outside the repository for the same reason. A
+chaos harness that can damage the tree it is testing is worse than no harness.
+Territory: src/haru_pack/launcher/main.nim, tools/busybody.py, tests/test_launcher_isolation.py
+
 ---
 
 ## SUPPLY — what we execute that we did not write
