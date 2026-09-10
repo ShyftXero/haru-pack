@@ -129,6 +129,82 @@ those checks do, which is its own kind of finding.
 A persona whose passing result confirms a documented weakness is worth having. It keeps the
 docs honest in the direction they are most likely to drift.
 
+## App-level personas — the ones that vary by package
+
+The seven personas above attack the **launcher**, which is byte-identical in every binary
+haru-pack produces. That is why sweeping them across 25 packages produced 575 runs and only
+23 fingerprints. These five attack the **packaged application** instead.
+
+### cartographer — messes with *where*
+
+Awkward cwd (spaces, quotes, unicode), invocation through a symlink, a read-only working
+directory, hostile argv. Tests the run-in-place contract: haru-pack promises a binary behaves
+like a compiled program in the folder it was launched from, and passes args through "like
+python" with no injected `--`.
+
+### polyglot — locale and encoding
+
+The C locale with no `LANG` and legacy codecs forced on; unicode in the cache path. Packages
+that decode text diverge sharply here; ones that do not, do not.
+
+### mute — I/O shape
+
+Closed stdin, and stdout slammed shut mid-write (the `| head -1` case). The stdin case also
+covers the licence prompt, which is guarded on `isatty` — a hang there would be the serious
+outcome.
+
+### impatient — signals to the *app*
+
+Ctrl-C and SIGTERM after staging, so the signal lands on the application rather than on
+staging. `main.nim` installs a custom SIGINT handler specifically so the child owns Ctrl-C;
+a comment said so and nothing tested it until now.
+
+### hoarder — resource ceilings
+
+Few file descriptors, a tight address space, a read-only `TMPDIR`. The most
+package-dependent of the lot, and the one that required real work to make so.
+
+## Two things this taught, both worth keeping
+
+**A threshold only discriminates if it sits between the packages.** The first
+`tight_address_space` used 256 MB — below what a bare interpreter needs — so every package
+failed identically and the case discriminated nothing while looking thorough. Calibrated on
+this box:
+
+| package | 512 MB | 768 MB | 1024 MB |
+|---|---|---|---|
+| iniconfig | ok | ok | ok |
+| numpy | fail | fail | ok |
+
+768 MB separates them, and that number is in the source with the measurement beside it. If it
+stops diverging, recalibrate — do not nudge it.
+
+**"The launcher crashed" and "the app crashed" are different findings.** Once calibrated, the
+case diverged and then reported the divergence as `CRASHED` — a haru-pack defect — because the
+classifier could not tell a numpy `MemoryError` from a Nim traceback. There is now an
+`APP-CRASHED` outcome and a `blame` field (`launcher` / `app` / `unknown`), split cheaply on
+the fact that the launcher prefixes every diagnostic with `haru-pack:`. `APP-CRASHED` is
+deliberately **not** fatal: an application declining a limit a persona imposed on purpose is
+behaving correctly, and a case has to opt into accepting it.
+
+### Measured divergence
+
+Across `iniconfig` (pure Python, 60 MB) and `numpy` (native BLAS, 77 MB):
+
+| level | cases | diverged by package |
+|---|---|---|
+| launcher (7 personas) | 24 | **0** |
+| app (5 personas) | 13 | **2** |
+
+The two: `tight_address_space` (RAN vs APP-CRASHED — a real, stable property) and
+`interrupted_while_the_app_runs` (RAN vs REFUSED — but that one turns on *import speed*, so
+it is a fact about this machine, and the case says so).
+
+2 of 13 is a modest result and worth stating plainly: the bundled interpreter absorbs most
+environmental hostility, so most app-level cases still answer identically regardless of what
+was packed. Cases that discriminate have to target something the package genuinely changes —
+its resource envelope, its native libraries, its startup cost.
+
 ## What busybody found on its first real run
 
 Two bugs in busybody itself, and one in haru-pack.

@@ -174,6 +174,37 @@ missing or unreadable heartbeat means not live, and both are safe to reap, becau
 always has a fresh one.
 Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_ledger.py
 
+### INV-CHAOS-03
+Status: active
+Statement: A chaos finding distinguishes the launcher failing from the packaged application
+failing, and any resource threshold used to tell packages apart is calibrated to sit between
+their actual requirements rather than chosen by eye.
+Actors: whoever triages the report. Also the next person to add an app-level case.
+Assets: whether a chaos run means anything. A harness that calls "numpy will not start in
+768 MB" a product defect trains people to ignore its findings; one whose thresholds sit below
+every package discriminates nothing while looking thorough.
+Red-path: Add `APP-CRASHED` to `FATAL`, and every resource-limit case reports a finding on
+any heavy package — the exact outcome those cases exist to produce. Or set
+`ADDRESS_SPACE_MB` outside the measured band (512 < n < 1024) and the case stops telling
+`iniconfig` and `numpy` apart. Each has a claiming test.
+Source: Both learned on 2026-09-10 while building the app-level personas. The first
+`tight_address_space` used 256 MB, which is below what a bare interpreter needs — so every
+package failed identically and the case discriminated nothing. Once calibrated to 768 MB it
+diverged, and then reported the divergence as `CRASHED`, i.e. as a haru-pack bug, because the
+classifier could not tell a numpy `MemoryError` from a Nim traceback.
+Note: The split is cheap because the launcher prefixes every diagnostic with `haru-pack:`.
+That convention is now load-bearing for triage, not only for readability.
+Note: `interrupted_while_the_app_runs` also diverges by package, but on IMPORT SPEED — the
+signal goes 0.7 s in, and numpy is still importing while iniconfig has finished. That is a
+fact about this machine, not a stable property of either package, and the case says so. Do
+not read a change there as a regression without checking the box it ran on.
+Note: Launcher-level personas are payload-invariant by construction and no threshold will
+change that. Measured 2026-09-10: 575 runs across 25 packages produced 23 fingerprints, one
+per case. App-level personas are the only ones for which `--fixtures top25` buys anything,
+and even then only 2 of 13 diverged — the bundled interpreter absorbs most environmental
+difference.
+Territory: tools/busybody.py, tests/test_busybody_ledger.py
+
 ---
 
 ## FLEX — the harness that decides what haru-pack is tested against
