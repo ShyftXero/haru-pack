@@ -21,7 +21,7 @@ def stub_toolchain(monkeypatch, tmp_path):
     """
     from haru_pack import build as build_mod
 
-    def fake_compile(nim, target, workdir):
+    def fake_compile(nim, target, workdir, **kw):
         out = Path(workdir) / "launcher"
         out.write_bytes(b"\x7fELF" + b"\x00" * 512)     # plausible stub, not a real ELF
         return out

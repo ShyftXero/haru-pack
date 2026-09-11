@@ -78,7 +78,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
                reap=False, ram_only=False, base_path="",
-               env_append=None) -> None:
+               env_append=None, cc="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -116,7 +116,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          obfuscate=obfuscate,
                          obfuscate_args=[a for a in obfuscate_args.split() if a],
                          entry_point=entry_point, shake=shake,
-                         shake_keep=list(shake_keep or []),
+                         shake_keep=list(shake_keep or []), cc=cc,
                          env_canary=env_canary, env_canary_random=env_canary_random,
                          stub_env_secret_canary=stub_env_secret_canary,
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
@@ -210,9 +210,10 @@ def _report_capabilities(selected=()) -> None:
         line.append(r[4])
         ui_console.print(line)
     print("")
-    print("the host C compiler and Nim are not listed: they are not optional, and a "
-          "haru-pack that cannot build for its own machine is not a working install.",
-          style="detail")
+    print("Nim is not listed because it is not optional. The host C compiler is not "
+          "listed either, and since `zig` became the default compiler it is no longer "
+          "required at all — it is needed only for `--cc system` (and for a macOS target, "
+          "which zig cannot build).", style="detail")
     no_pkg = [t for t in KNOWN_TARGETS
               if t not in {c.name for c in toolchain.capabilities()}]
     if no_pkg:
@@ -365,7 +366,20 @@ def bootstrap(target: List[str] = typer.Option(None, "--target",
     else:
         print("system packages: nothing needed ✓", style="ok")
 
-    # 2. Nim, via choosenim, with no sudo at all.
+    # 2. zig, if selected: a pinned download into haru-pack's own directory, no sudo. Done
+    #    before Nim so that a host with no system compiler at all still ends up able to
+    #    build — which is the whole point of zig being the default (INV-TOOL-02).
+    if any(c.name == "zig" for c in caps):
+        try:
+            zig = toolchain.install_zig(log=lambda m: print(f"  {m}"))
+            print(f"zig: {zig}", style="ok")
+        except Exception as e:
+            print(f"zig install failed: {e}", style="error")
+            print("You can still build with `--cc system` if you have a C toolchain.",
+                  style="warn")
+            raise typer.Exit(1)
+
+    # 3. Nim, via choosenim, with no sudo at all.
     try:
         nim = toolchain.install_nim(force=force, log=lambda m: print(f"  {m}"))
     except ToolchainError as e:
@@ -380,7 +394,7 @@ def bootstrap(target: List[str] = typer.Option(None, "--target",
     if not ok:
         raise typer.Exit(1)
 
-    # 4. report the toolchain per target that was actually selected. Derived from the
+    # 5. report the toolchain per target that was actually selected. Derived from the
     #    capabilities rather than a separate `targets` list, so the summary cannot claim a
     #    target the install never covered.
     chosen_targets = [c.name for c in caps if c.name in KNOWN_TARGETS]

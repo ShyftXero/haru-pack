@@ -1,8 +1,9 @@
-# Prototype: one bundled `zig cc` instead of four system cross-compilers
+# The default compiler: one bundled `zig cc` instead of four system cross-compilers
 
-> **Status: PROTOTYPE, validated, not adopted.** Everything below was run on 2026-09-11. No
-> code in haru-pack uses zig; this document is the evidence and the design, so the decision
-> can be made on measurements rather than on vibes. Decide before implementing.
+> **Status: ADOPTED — zig is the default C compiler (`INV-TOOL-02`).** The measurements below
+> were run on 2026-09-11 and are what the decision was made on; they are kept so it can be
+> re-checked rather than re-argued. `resolve_cc()` chooses zig unless `--cc system` /
+> `HARUPACK_CC=system` is given, or the target is macOS (which needs the Apple SDK).
 
 ## Why bother
 
@@ -50,7 +51,7 @@ already impossible here and remains so.
 
 zig's clang reads `-march=` as a CPU name for aarch64 and rejects it with
 `unknown CPU: 'armv8'`, listing the CPUs it does know. A provider therefore has to translate
-GCC-only flags. The prototype shim:
+GCC-only flags. The shim haru-pack generates per build (`toolchain.zig_cc_shim`):
 
 ```sh
 #!/bin/sh
@@ -73,19 +74,24 @@ isolated translation unit using `vsha256su0q_u32` still fails with *"requires ta
 launcher re-hashes the staged tree on every run, so on ARM this is a real if modest startup
 cost. Finding the correct zig feature flags would remove it.
 
-## What adopting it would take
+## How it is built
 
-1. **Pin it.** A `zig` entry in `pins.toml` with the release digest, downloaded and verified
-   exactly like `uv` and choosenim (`INV-SUPPLY-01`). Unpinned means refuse.
-2. **Install it without sudo**, into haru-pack's own directory — a `toolchain.install_zig()`
-   mirroring `install_nim()`.
-3. **A provider seam.** `Target` needs to answer "which compiler, and what does it want
-   called" for both the system-GCC and zig cases, and `compile_launcher` needs to pass the
-   right per-target Nim cfg keys (`--<cpu>.<os>.gcc.exe`, which is what the generic
-   `--gcc.exe` does *not* cover — that cost an hour to discover).
-4. **The flag shim**, generated rather than checked in, so it can be per-target.
-5. **A capability** so it is selectable: `bootstrap --with zig`, and a decision about whether
-   it joins the kitchen sink.
+Each item below shipped; this is the map from the design to the code.
+
+1. **Pinned.** `pins.toml` carries a `zig` entry per build host with the ziglang.org release
+   digest, downloaded and verified exactly like `uv` and choosenim (`INV-SUPPLY-01`); an
+   unpinned zig is refused (`toolchain.install_zig`, `test_an_unpinned_zig_is_refused`).
+2. **Installed without sudo**, into haru-pack's own directory —
+   `toolchain.install_zig()`, mirroring the Nim install.
+3. **A provider seam.** `Target.zig_triple()` / `nim_cpu` / `nim_os` answer "which compiler
+   and what does it want called"; `build.resolve_cc()` picks the provider and
+   `compile_launcher` passes the per-target Nim cfg keys `--<cpu>.<os>.gcc.exe`, which the
+   generic `--gcc.exe` does *not* cover for a cross target (that cost an hour to discover).
+4. **The flag shim**, generated per build rather than checked in — `toolchain.zig_cc_shim()`,
+   driven by `_ZIG_FLAG_MAP`.
+5. **A capability**, so it is visible and declinable in `bootstrap --list` — but with no
+   system package, so it adds nothing to the sudo prompt. It **joins the kitchen sink** and is
+   the default provider; `--cc system` opts out.
 
 ## The decision, and the honest costs
 
@@ -99,7 +105,7 @@ cost. Finding the correct zig feature flags would remove it.
 - **Authenticode is unaffected**: signing is a property of the produced PE, not of what
   compiled it.
 
-The ergonomic case is strong and consistent with how this project already treats Nim and uv:
-one verified download, no sudo, all targets. The engineering case is a provider seam plus a
-flag shim, and the price is one more pinned artifact and losing accelerated SHA on ARM until
-someone gets the feature flags right.
+The ergonomic case decided it, and it is consistent with how this project already treats Nim
+and uv: one verified download, no sudo, all targets. The engineering cost was a provider seam
+plus a flag shim; the standing price is one more pinned artifact and reference-speed SHA on
+ARM until someone finds the right zig feature spelling.

@@ -44,6 +44,7 @@ import stat
 import subprocess
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,7 +56,8 @@ from .targets import Target, host_arch, host_os
 __all__ = ["ToolchainError", "NIM_VERSION", "CHOOSENIM_VERSION", "install_nim",
            "choosenim_asset", "find_managed_nim", "system_packages", "sudo_command",
            "SUPPORTED_BUILD_HOSTS", "Capability", "capabilities", "select_capabilities",
-           "missing_packages", "install_weight"]
+           "missing_packages", "install_weight", "ZIG_VERSION", "install_zig",
+           "find_managed_zig", "zig_dir", "zig_cc_shim"]
 
 NIM_VERSION = "2.2.6"
 CHOOSENIM_VERSION = "0.8.16"
@@ -137,6 +139,13 @@ class Capability:
 
     @property
     def present(self) -> bool:
+        """Is it already installed?
+
+        zig is special-cased because it does not live on PATH: haru-pack installs it into
+        its own directory precisely so it cannot collide with, or depend on, a system one.
+        """
+        if self.probe == "__managed_zig__":
+            return find_managed_zig() is not None
         return bool(shutil.which(self.probe))
 
 
@@ -161,6 +170,14 @@ def capabilities() -> list:
         name="wine", packages=("wine",), probe="wine",
         unlocks="run execute-required [[bundle]] steps for a Windows target on this host "
                 "(`--wine`)"))
+    # zig is listed so it is visible and selectable, but with NO packages: it is a pinned
+    # download into haru-pack's own directory, not a system package, so it contributes
+    # nothing to the sudo prompt (INV-TOOL-02). This is why the kitchen sink can be large
+    # and still ask for very little from the package manager.
+    out.append(Capability(
+        name="zig", packages=(), probe="__managed_zig__",
+        unlocks="the default C compiler — one pinned download, no sudo, covers every "
+                "target haru-pack builds for"))
     return out
 
 
@@ -235,6 +252,115 @@ def install_weight(packages) -> str:
         return ""
     n = int(m.group(1))
     return f"{n} pkg" if n == 1 else f"{n} pkgs"
+
+
+# ───────────────────────────────────────────────────────── zig: one compiler, no sudo
+ZIG_VERSION = "0.16.0"
+
+
+def zig_dir() -> Path:
+    return toolchain_dir() / "zig"
+
+
+def find_managed_zig() -> Path | None:
+    """The zig haru-pack installed for itself, if it is there."""
+    for name in ("zig", "zig.exe"):
+        for cand in zig_dir().rglob(name):
+            if cand.is_file():
+                return cand
+    return None
+
+
+def install_zig(force: bool = False, log=print, sources=None) -> str:
+    """Download, VERIFY and unpack zig into haru-pack's own directory. No sudo, ever.
+
+    This is the whole ergonomic argument for zig: one pinned artifact replaces
+    `build-essential`, `mingw-w64`, `gcc-aarch64-linux-gnu` and
+    `gcc-arm-linux-gnueabihf`, so a first-time user never types a package-manager command.
+    It follows the same shape as `install_nim`: pinned digest, verified before unpacking,
+    installed beside haru-pack rather than into the system (INV-SUPPLY-01, INV-TOOL-02).
+
+    zig is a BUILD-HOST tool. It never enters a payload, so only the host's own asset is
+    ever fetched, and a host with no pin is refused rather than served something unverified.
+    """
+    from . import pins
+    from .archives import fetch_verified, safe_extract_tar, UnpinnedArtifact
+
+    existing = find_managed_zig()
+    if existing and not force:
+        return str(existing)
+
+    host = f"{host_os()}-{host_arch()}"
+    entry = (pins.zig_digests().get(ZIG_VERSION) or {}).get(host)
+    if not entry:
+        raise UnpinnedArtifact(
+            f"no pinned zig {ZIG_VERSION} for build host {host}; haru-pack will not download "
+            f"an unverified compiler. Add it with:\n"
+            f"    python tools/add-pin.py zig {ZIG_VERSION} {host}\n"
+            f"or build with the system compiler instead: `--cc system`.")
+
+    url = entry["url"]
+    log(f"zig {ZIG_VERSION} for {host} …")
+    zig_dir().mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as td:
+        arc = Path(td) / url.rsplit("/", 1)[-1]
+        fetch_verified(url, arc, entry["sha256"], what=f"zig {ZIG_VERSION} ({host})")
+        if arc.suffix == ".zip":
+            import zipfile
+            with zipfile.ZipFile(arc) as z:
+                z.extractall(zig_dir())
+        else:
+            safe_extract_tar(arc, zig_dir())      # INV-SUPPLY-03
+    got = find_managed_zig()
+    if not got:
+        raise ToolchainError(f"zig unpacked into {zig_dir()} but no zig binary was found")
+    if host_os() != "windows":
+        got.chmod(0o755)
+    log(f"  {got}")
+    return str(got)
+
+
+# GCC-only flags that zig's clang driver rejects, and what to do with them. `-march=` is the
+# one that actually bites: `nimcrypto`'s sha2_neon.nim passes `-march=armv8-a+crypto`, and
+# zig reads `-march` as a CPU NAME for aarch64 and dies with `unknown CPU: 'armv8'`.
+#
+# Measured 2026-09-11: translating it lets the build succeed and SHA-256 stays CORRECT (the
+# known-answer test matches a GCC build byte for byte on real aarch64 hardware), but the NEON
+# path is not actually enabled — nimcrypto falls back to its reference implementation. That
+# is a speed regression on ARM, not a correctness one, and it is recorded in
+# docs/ZIG_TOOLCHAIN.md rather than left for someone to discover.
+_ZIG_FLAG_MAP = {"-march=armv8-a+crypto": "-mcpu=baseline+aes+sha2"}
+
+
+def zig_cc_shim(zig: str, triple: str, dest: Path) -> Path:
+    """Write a tiny cc wrapper that runs `zig cc -target <triple>` and fixes GCC-only flags.
+
+    A wrapper rather than a Nim cfg entry because Nim wants ONE executable for
+    `--<cpu>.<os>.gcc.exe`, and the flag translation has to happen per invocation.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        lines = ["@echo off", f'"{zig}" cc -target {triple} %*']
+        dest = dest.with_suffix(".bat")
+        dest.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        return dest
+    cases = "\n".join(
+        f'    {k}) args="$args {v}" ;;' for k, v in _ZIG_FLAG_MAP.items())
+    dest.write_text(
+        "#!/bin/sh\n"
+        "# generated by haru-pack; see toolchain.zig_cc_shim\n"
+        'args=""\n'
+        'for a in "$@"; do\n'
+        "  case \"$a\" in\n"
+        f"{cases}\n"
+        "    -march=*) ;;\n"
+        '    *) args="$args $a" ;;\n'
+        "  esac\n"
+        "done\n"
+        f'exec "{zig}" cc -target {triple} $args\n',
+        encoding="utf-8")
+    dest.chmod(0o755)
+    return dest
 
 
 def _package_manager() -> tuple:

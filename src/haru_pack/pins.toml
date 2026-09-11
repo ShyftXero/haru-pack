@@ -225,3 +225,56 @@ sha256 = "f4c22b31ddbf8d7824cbcba2d8707621c2c8fab1fb6d2c1810c2bb0304d8e9a8"
 provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
 retrieved = "2026-09-10"
 
+# ── zig ──────────────────────────────────────────────────────────────────────
+# The C cross-compiler for the launcher (docs/ZIG_TOOLCHAIN.md). One pinned download
+# replaces build-essential + mingw-w64 + gcc-aarch64-linux-gnu +
+# gcc-arm-linux-gnueabihf, needs no sudo, and covers every target haru-pack builds
+# for. Keyed by BUILD HOST: zig runs on the machine doing the build and never ships
+# in a payload.
+#
+# Digests are zig's own, from the publisher's index, not computed from a download.
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "linux-x86_64"
+sha256 = "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+url = "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "linux-aarch64"
+sha256 = "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"
+url = "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "macos-x86_64"
+sha256 = "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7"
+url = "https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "macos-aarch64"
+sha256 = "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
+url = "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "windows-x86_64"
+sha256 = "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"
+url = "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"

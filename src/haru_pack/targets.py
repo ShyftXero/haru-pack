@@ -162,6 +162,41 @@ class Target:
                 flags += [f"--gcc.exe:{cc}", f"--gcc.linkerexe:{cc}"]
         return flags
 
+    @property
+    def nim_cpu(self) -> str:
+        """Nim's name for this architecture — the `--cpu:` value."""
+        return _NIM_CPU[self.arch]
+
+    @property
+    def nim_os(self) -> str:
+        """Nim's name for this OS — the `--os:` value. Nim says `macosx`, not `macos`."""
+        return {"macos": "macosx"}.get(self.os, self.os)
+
+    def zig_triple(self) -> str:
+        """This target as a `zig cc -target` triple.
+
+        zig covers every target haru-pack builds for from one download, which is why it is
+        the default compiler provider (docs/ZIG_TOOLCHAIN.md). macOS is the exception and is
+        deliberately absent: zig's bundled macOS headers lack `fstore_t`, which Nim's posix
+        module needs, so a Mac target still requires the real Apple SDK.
+        """
+        arch = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64",
+                "armv7": "arm"}.get(self.arch, self.arch)
+        if self.os == "linux":
+            return f"{arch}-linux-gnueabihf" if arch == "arm" else f"{arch}-linux-gnu"
+        if self.os == "windows":
+            return f"{arch}-windows-gnu"
+        raise TargetError(
+            f"zig cannot build for {self}: only linux and windows targets are supported by "
+            f"the bundled compiler. Use `--cc system` with a real cross toolchain.")
+
+    def zig_can_build(self) -> bool:
+        try:
+            self.zig_triple()
+            return True
+        except TargetError:
+            return False
+
     def cross_cc(self) -> tuple:
         """(compiler-name, install-hint) for this target, or (None, None) if native."""
         if self.is_host:

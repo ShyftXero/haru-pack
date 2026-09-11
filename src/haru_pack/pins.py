@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import tomlio
 
-__all__ = ["PinsError", "pins_path", "load", "uv_digests", "python_digests",
+__all__ = ["PinsError", "pins_path", "load", "uv_digests", "python_digests", "zig_digests",
            "nim_digests", "choosenim_digests", "provenance"]
 
 SCHEMA_VERSION = 1
@@ -66,6 +66,7 @@ def load(path: str | None = None) -> dict:
     python: dict = {}
     nim: dict = {}
     choosenim: dict = {}
+    zig: dict = {}
     prov: dict = {}
     for i, a in enumerate(data.get("artifact") or []):
         kind = a.get("kind")
@@ -82,6 +83,15 @@ def load(path: str | None = None) -> dict:
                 raise PinsError(f"{where}: a python entry needs `url`")
             python[url] = _check_digest(a.get("sha256"), where)
             prov[f"python:{url}"] = a.get("provenance", "")
+        elif kind == "zig":
+            v, asset = a.get("version"), a.get("asset")
+            if not v or not asset:
+                raise PinsError(f"{where}: a zig entry needs both `version` and `asset`")
+            zig.setdefault(v, {})[asset] = {
+                "sha256": _check_digest(a.get("sha256"), where),
+                "url": a.get("url", ""),
+            }
+            prov[f"zig:{v}:{asset}"] = a.get("provenance", "")
         elif kind in ("nim", "choosenim"):
             v, asset = a.get("version"), a.get("asset")
             if not v or not asset:
@@ -95,12 +105,12 @@ def load(path: str | None = None) -> dict:
         else:
             raise PinsError(
                 f"{where}: unknown kind {kind!r} "
-                "(expected 'uv', 'python', 'nim' or 'choosenim')")
+                "(expected 'uv', 'python', 'nim', 'choosenim' or 'zig')")
 
     if not uv and not python:
         raise PinsError(f"{p} contains no artifacts")
     return {"uv": uv, "python": python, "nim": nim, "choosenim": choosenim,
-            "provenance": prov}
+            "zig": zig, "provenance": prov}
 
 
 def uv_digests() -> dict:
@@ -119,6 +129,15 @@ def nim_digests() -> dict:
 def choosenim_digests() -> dict:
     """{version: {asset: {"sha256", "url"}}} for choosenim binaries."""
     return load()["choosenim"]
+
+
+def zig_digests() -> dict:
+    """{version: {build-host: {"sha256", "url"}}} for the zig cross-compiler.
+
+    Keyed by haru-pack build host (`linux-x86_64`, …), not by zig's own naming, so callers
+    ask the question they actually have.
+    """
+    return load()["zig"]
 
 
 def provenance() -> dict:

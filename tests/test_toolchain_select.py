@@ -75,7 +75,7 @@ def test_capabilities_are_derived_from_the_target_table_not_duplicated():
     second list would drift from what `build` actually needs."""
     from haru_pack.targets import KNOWN_TARGETS, Target
 
-    for name in NAMES - {"wine"}:
+    for name in NAMES - {"wine", "zig"}:   # zig is a capability, not a cross target
         assert name in KNOWN_TARGETS
         cc, pkg = Target.parse(name).cross_cc()
         cap = next(c for c in tc.capabilities() if c.name == name)

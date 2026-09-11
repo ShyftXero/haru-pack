@@ -110,34 +110,41 @@ shake; the big wins are projects whose dependencies dwarf that. Details, limits 
 config block: [`SHAKE.md`](SHAKE.md).
 
 ## Cross-compile notes (Linux → aarch64)
-Building a **launcher** for `linux-aarch64` needs the real cross toolchain:
+The launcher for `linux-aarch64` cross-compiles with the **default** compiler — the pinned
+`zig` haru-pack installs into its own directory. No sudo, no system cross-gcc:
 
 ```sh
-haru-pack bootstrap --target linux-aarch64      # or: sudo apt install gcc-aarch64-linux-gnu
+haru-pack bootstrap                          # installs zig (and Nim); covers every target
+haru-pack build ./app -o app --target linux-aarch64
 ```
 
-### zig is not a dependency, and cannot replace this
-`zig cc` is **not** used by haru-pack anywhere — not in the code, the CI, or `pyproject.toml`.
-It came up only as a local experiment while the real cross toolchain was unavailable, and the
-results are recorded here so nobody repeats them:
+If you would rather use a cross toolchain already on the box, opt out per build with
+`--cc system` (or `HARUPACK_CC=system`), and install it the old way:
 
-| target | `zig cc` |
-|---|---|
-| `windows-x86_64` | builds a launcher (PE32+) |
-| `linux-armv7` | builds a launcher (ARM EABI5) |
-| `linux-aarch64` | **fails** — `nimcrypto`'s `sha2_neon.nim` compiles with `-march=armv8-a+crypto` and zig's clang rejects it: `unknown CPU: 'armv8'` |
-| `macos-aarch64` | **fails** — zig's bundled macOS headers lack `fstore_t`, which Nim's posix module needs. Cross-compiling to macOS still needs the real Apple SDK |
+```sh
+haru-pack build ./app -o app --target linux-aarch64 --cc system
+# needs: sudo apt install gcc-aarch64-linux-gnu
+```
 
-That first pass concluded zig was not worth it. That conclusion answered the wrong question
-— "can zig replace the set outright?" — and a second pass against the right one ("is one
-bundled compiler more ergonomic than four system packages?") found that with a small shim for
-one GCC-only flag, zig builds **every target this project cares about**, and the resulting
-aarch64 binary's SHA-256 matches the GCC build byte for byte on real hardware. macOS remains
-out of reach either way.
+### why zig is the default compiler
+`zig cc` is a cross-compiler in one download: it builds every target haru-pack ships for —
+`linux-{x86_64,aarch64,armv7}` and `windows-x86_64` — with no system package and no sudo,
+which is what makes `uv tool install haru-pack && haru-pack bootstrap` the whole setup.
+`--cc system` remains for anyone who prefers their own toolchains, and is **required** for a
+macOS target: zig's bundled macOS headers lack `fstore_t`, which Nim's posix module needs.
 
-It is still not used by any code here. The evidence, the shim, the costs and what adopting it
-would take are in [`ZIG_TOOLCHAIN.md`](ZIG_TOOLCHAIN.md) — read that rather than re-deriving
-it. Tried 2026-09-11.
+| target | bundled `zig` | note |
+|---|---|---|
+| `windows-x86_64` | builds a launcher (PE32+) | verified under wine |
+| `linux-armv7` | builds a launcher (ARM EABI5) | |
+| `linux-aarch64` | builds a launcher (ELF aarch64) | needs a one-flag shim: `nimcrypto`'s `sha2_neon.nim` passes `-march=armv8-a+crypto`, which zig's clang reads as a CPU name and rejects; the shim rewrites it to `-mcpu=baseline+aes+sha2`. The result's SHA-256 matches the GCC build byte for byte on real hardware |
+| `macos-aarch64` | **not supported** | use `--cc system` with the real Apple SDK |
+
+An earlier pass here concluded zig "was not worth it" — it answered the wrong question
+("can zig replace the whole set outright, unmodified?"). Against the right one ("is one
+bundled compiler more ergonomic than four system packages?") the answer is yes, with the
+single shim above. The full record — pins, the shim, the byte-for-byte KAT on real arm64
+hardware, and the macOS gap — is in [`ZIG_TOOLCHAIN.md`](ZIG_TOOLCHAIN.md). `INV-TOOL-02`.
 
 ## Cross-compile notes (Linux → Windows)
 - **thin / default**: fully supported from Linux. `haru-pack` fetches the **Windows** uv

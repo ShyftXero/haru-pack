@@ -3,7 +3,7 @@ import datetime as _dt
 import re as _re
 import os, secrets, shutil, string, subprocess, tempfile
 from pathlib import Path
-from . import tomlio, discovery, crypto
+from . import tomlio, discovery, crypto, toolchain
 from .paths import launcher_src_dir
 from .payload import build_payload_zip
 from .overlay import attach
@@ -300,19 +300,68 @@ def validate_manifest(manifest: dict) -> None:
             f"directory on someone else's machine.")
 
 
-def compile_launcher(nim: str, target, workdir: Path) -> Path:
+# Which C compiler compiles the launcher. `zig` is the default on purpose (INV-TOOL-02):
+# one pinned ~50 MB download covers every target haru-pack builds for, needs no sudo and no
+# package manager, and so removes the last step between `uv tool install haru-pack` and a
+# working build. `system` is the escape hatch for anyone who would rather use the cross
+# toolchains they already have — and it is what a Mac target requires, since zig's bundled
+# macOS headers are incomplete for Nim's posix module.
+CC_PROVIDERS = ("zig", "system")
+CC_ENV = "HARUPACK_CC"
+
+
+def resolve_cc(cc: str = "", target=None, log=None) -> str:
+    """Decide the provider. Explicit flag beats env var beats the default.
+
+    A macOS target forces `system` rather than failing later with a header error, and says
+    so — the operator asked for a Mac build, not for a lecture about zig.
+    """
+    say = log or (lambda _m: None)
+    want = (cc or os.environ.get(CC_ENV, "") or "zig").strip().lower()
+    if want not in CC_PROVIDERS:
+        raise BuildError(
+            f"unknown --cc {want!r}. Choose one of: {', '.join(CC_PROVIDERS)}.\n"
+            f"`zig` uses the pinned compiler haru-pack installs for itself; `system` uses "
+            f"the cross toolchains already on this machine.")
+    if want == "zig" and target is not None:
+        tgt = target if isinstance(target, Target) else Target.parse(target)
+        if not tgt.zig_can_build():
+            say(f"--cc zig cannot build for {tgt}; using the system compiler instead "
+                f"(zig's bundled macOS headers are incomplete for Nim's posix module).")
+            return "system"
+    return want
+
+
+def compile_launcher(nim: str, target, workdir: Path, cc: str = "", log=None) -> Path:
     tgt = target if isinstance(target, Target) else Target.parse(target)
     src = launcher_src_dir() / "main.nim"
     if not src.exists():
         raise BuildError(f"launcher source missing: {src}")
     out = workdir / ("launcher" + tgt.exe_suffix)
     args = [nim, "c", "-d:release", f"--nimcache:{workdir/'nimcache'}", f"--out:{out}"]
-    args += tgt.nim_flags()          # empty for a native build
+
+    provider = resolve_cc(cc, target=tgt, log=log)
+    if provider == "zig":
+        # A generated shim, not a bare `zig cc`: Nim wants ONE executable for the compiler
+        # key, and one GCC-only flag has to be translated per invocation. Nim also ignores
+        # the generic `--gcc.exe` for a cross target and reads `--<cpu>.<os>.gcc.exe`, which
+        # is why the keys below are spelled out per target.
+        zig = toolchain.find_managed_zig() or toolchain.install_zig(
+            log=log or (lambda _m: None))
+        shim = toolchain.zig_cc_shim(str(zig), tgt.zig_triple(), workdir / "zig-cc")
+        cpu, os_ = tgt.nim_cpu, tgt.nim_os
+        args += [f"--cpu:{cpu}", f"--os:{os_}",
+                 f"--{cpu}.{os_}.gcc.exe:{shim}",
+                 f"--{cpu}.{os_}.gcc.linkerexe:{shim}"]
+    else:
+        args += tgt.nim_flags()          # empty for a native build
     args.append(str(src))
     r = subprocess.run(args, capture_output=True, text=True)
     if r.returncode != 0 or not out.exists():
-        raise BuildError("nim compile failed:\n" + (r.stderr or r.stdout)[-2000:])
+        raise BuildError(f"nim compile failed (cc={provider}):\n"
+                         + (r.stderr or r.stdout)[-2000:])
     return out
+
 
 def _declarations(decl_dir: Path) -> dict:
     """Merge the project's build directives from both places it may declare them.
@@ -655,15 +704,26 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
           reap: bool = False, ram_only: bool = False, base_path: str = "",
-          env_append=None, log=None) -> dict:
+          env_append=None, cc: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
     if not nim:
         raise BuildError("Nim not found. Run `haru-pack bootstrap` first.")
-    tc = detect_c_toolchain(tgt)
-    if not tc["ok"]:
-        raise BuildError(f"C toolchain missing for target '{tgt}':\n{tc['advice']}")
+    # The SYSTEM toolchain is only required when it is the one being used. With the default
+    # `--cc zig` the compiler is the pinned one haru-pack installs for itself, so demanding
+    # `build-essential` here would defeat the entire point of that default — no sudo, no
+    # package manager (INV-TOOL-02). This gate used to run unconditionally.
+    provider = resolve_cc(cc, target=tgt, log=log)
+    if provider == "system":
+        tc = detect_c_toolchain(tgt)
+        if not tc["ok"]:
+            raise BuildError(
+                f"C toolchain missing for target '{tgt}':\n{tc['advice']}\n"
+                f"Or drop `--cc system` and let haru-pack use its own pinned zig, which "
+                f"needs no system packages.")
+    else:
+        tc = {"ok": True, "compiler": f"zig ({tgt.zig_triple()})", "advice": ""}
     manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
                                                      machine, user, embed_secret, encrypt,
                                                      entry_point, log=log)
@@ -757,7 +817,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 "internal: encryption state does not match the payload "
                 f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
                 "Refusing to emit a binary whose build receipt would be wrong.")
-        launcher = compile_launcher(nim, tgt, tdp)
+        launcher = compile_launcher(nim, tgt, tdp, cc=cc, log=log)
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
         info = attach(launcher, payload, out, flags=flags,
@@ -769,7 +829,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         pass
     # The receipt records WHERE this build's third-party bytes came from. An operator
     # auditing a signed artifact should not have to guess whether a mirror was in play.
-    info.update(sources=sources.describe(),
+    info.update(sources=sources.describe(), cc=provider,
                 tier=tier, target=str(tgt), nim=nim, compiler=tc["compiler"], out=str(out),
                 encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver,
                 # The resolved canary map (env-name prefixes) is not secret — recording it aids

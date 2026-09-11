@@ -2078,3 +2078,47 @@ sink' model, but I want people to be able to selectively choose what they get". 
 per-target mechanism already existed via `--target`; what changed is that the default is now
 everything and the parts are nameable.
 Territory: src/haru_pack/toolchain.py, src/haru_pack/cli.py, tests/test_toolchain_select.py
+
+### INV-TOOL-02
+Status: active
+Statement: The launcher's C compiler is `zig` by default — one digest-pinned download into
+haru-pack's own directory, needing no sudo and no package manager — and `--cc system` (or
+`HARUPACK_CC`) selects the system cross toolchains instead. A zig with no pin for this build
+host is refused, not downloaded.
+Actors: someone who just ran `uv tool install haru-pack` and wants a binary, on a machine
+where they may not have sudo at all.
+Assets: whether the tool works without a system-administration step. Before this, building
+for everything meant four system packages (`build-essential`, `mingw-w64`,
+`gcc-aarch64-linux-gnu`, `gcc-arm-linux-gnueabihf`) and a sudo prompt; zig covers every
+target haru-pack builds for from a single artifact. It is the same shape the project already
+uses for Nim (choosenim, own directory) and `uv` (downloaded, digest-pinned), so it makes
+the toolchain story consistent rather than adding a new kind of thing.
+Red-path: Change `build.resolve_cc`'s default from `"zig"` to `"system"` and
+`test_zig_is_the_default_compiler` goes red. Remove the pin lookup from
+`toolchain.install_zig` and `test_an_unpinned_zig_is_refused` goes red — at which point
+haru-pack downloads and then EXECUTES an unverified compiler, which is exactly what
+`INV-SUPPLY-01` exists to forbid.
+Note: Verified end to end with the PINNED zig 0.16.0 (not the maintainer's dev build) on
+2026-09-11: the launcher builds for linux-x86_64, windows-x86_64, linux-aarch64 and
+linux-armv7, and a SHA-256 known-answer test built through haru-pack's own shim passes on
+real arm64 hardware and under wine, with digests byte-identical to a GCC build. That check
+matters because the launcher's whole stage-verification story is SHA-256, so "it compiled"
+would not have been evidence.
+Note: A macOS target falls back to `system` automatically and says so, because zig's bundled
+macOS headers lack `fstore_t`, which Nim's posix module needs. Refusing outright would be
+worse: the operator asked for a Mac build, not a lecture about compilers.
+Note: The shim is generated, not checked in, because Nim wants ONE executable for
+`--<cpu>.<os>.gcc.exe` — and note those per-target keys, not the generic `--gcc.exe`, which
+Nim ignores for a cross build. The shim also translates `nimcrypto`'s
+`-march=armv8-a+crypto`, which zig's clang rejects as a CPU name. Measured consequence:
+SHA-256 stays correct but the NEON path is not enabled, so ARM hashing falls back to the
+reference implementation. A speed regression, not a correctness one; recorded in
+docs/ZIG_TOOLCHAIN.md.
+Note: The build receipt records which provider compiled the launcher, so an artifact can be
+traced to its compiler. zig is clang-based, so binaries are NOT byte-identical to GCC-built
+ones.
+Source: Asked for 2026-09-11. The maintainer's reasoning overrode mine: I had suggested
+system-GCC-by-default to avoid changing existing setups, which is inertia rather than a
+benefit, against a real ergonomic win of one less post-install step and no sudo.
+Territory: src/haru_pack/toolchain.py, src/haru_pack/build.py, src/haru_pack/targets.py,
+src/haru_pack/pins.toml, tests/test_zig_provider.py

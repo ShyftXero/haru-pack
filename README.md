@@ -79,14 +79,19 @@ haru-pack ./lotek --out lotek --entry-point "app.cli:main"
 
 ```sh
 uv tool install haru-pack        # or:  pip install haru-pack / uvx haru-pack ...
-haru-pack bootstrap              # Nim via choosenim + verify the C toolchain
+haru-pack bootstrap              # Nim via choosenim + the pinned zig compiler
 haru-pack init ./myproject       # optional: write a haru_pack.toml you can edit
 ```
 
-`bootstrap` installs Nim into haru-pack's own directory. Your system Nim and your
-`~/.nimble` are left alone. Everything that needs sudo is a system package — the host C
-compiler, the cross toolchains, and wine — and they are all worked out first, so it asks
-once and shows you the exact command before running it.
+`bootstrap` installs Nim **and** the default C compiler — a pinned `zig` — into haru-pack's
+own directory. Both are plain downloads verified against a digest; your system Nim, your
+`~/.nimble`, and your system compilers are left alone, and neither needs sudo. That is the
+point of the zig default: `uv tool install haru-pack && haru-pack bootstrap` is the whole
+setup, with nothing for the package manager to do (`INV-TOOL-02`).
+
+You only reach for sudo if you opt out with `--cc system`: then the host C compiler, the
+cross toolchains, and wine are ordinary system packages. Those are still worked out first,
+so bootstrap asks once and shows you the exact command before running it.
 
 By default it installs **everything this host can**: that is the point of the kitchen sink,
 and it means you do not discover a missing cross-compiler three commands into a release.
@@ -97,7 +102,7 @@ Building for another machine? Ask for it up front and the same single prompt cov
 
 ```sh
 haru-pack bootstrap                            # everything this host can install
-haru-pack bootstrap --minimal                  # host compiler + Nim only
+haru-pack bootstrap --minimal                  # Nim only; zig arrives on first build
 haru-pack bootstrap --target linux-aarch64     # exactly that, nothing else
 haru-pack bootstrap --without wine             # everything except wine
 haru-pack bootstrap --list                     # see what is available and what it costs
@@ -301,8 +306,8 @@ user data — the code lives in the stage dir.
   RAM staging)
 - [docs/UV_FREE_THICK.md](docs/UV_FREE_THICK.md) — a costed and **declined** design, kept so
   it is not rediscovered from scratch
-- [docs/ZIG_TOOLCHAIN.md](docs/ZIG_TOOLCHAIN.md) — a validated **prototype**: one bundled
-  `zig cc` instead of four system cross-compilers, with what it would cost
+- [docs/ZIG_TOOLCHAIN.md](docs/ZIG_TOOLCHAIN.md) — why the **default** compiler is one bundled
+  `zig cc` instead of four system cross-compilers: the evidence, the shim, the byte-for-byte KAT
 - [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)
 
 ## Status
