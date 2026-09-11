@@ -81,6 +81,40 @@ Stated plainly because the sales-shaped version of this is easy to write and wro
 - **Local execution has a ceiling.** The machine must decrypt to run. Against a determined
   reverse-engineer with a debugger, none of this holds. For hard enforcement, add a server.
 
+## What `--overwrite` (shred-on-reap) actually does
+
+Stated plainly because "secure erase" is the sales-shaped version and it is wrong.
+
+`--overwrite` makes the detached reaper overwrite each staged file's full logical extent with
+matching-length random bytes and `fsync` BEFORE unlinking (`INV-SHRED-01`). What it BUYS is
+narrow and real: it defeats **simple logical file-undelete** (Recuva/PhotoRec/TestDisk) on a
+**non-copy-on-write filesystem on a spinning disk**. **[V]** the overwrite covers the whole
+logical extent and is durable before the unlink (tests/test_shred.py).
+
+What it does NOT do — and must never be labelled "secure erase" / "unrecoverable." Each caveat
+hits the **overwrite itself**, not just the delete:
+
+- **SSD FTL / wear-leveling.** In-place overwrite is a fiction: the controller writes to a fresh
+  erase block and remaps the LBA; the old block (plaintext) sits in over-provisioning until GC.
+  Matching byte count occupies the **logical** range, not the **physical** cells (LBA ≠ PBA).
+  Recovery is chip-off / vendor forensics, not "simple tools." **[R]**
+- **Copy-on-write filesystems and snapshots.** APFS (macOS default), Btrfs, ReFS, ZFS never
+  overwrite a live block in place, so the original extent survives; and snapshots pin it
+  regardless — APFS local snapshots, **Windows VSS** (commonly on), Time Machine, Btrfs
+  snapshots can hand the plaintext back. macOS default APFS ⇒ largely ineffective. **[R]**
+- **May never reach disk / may reach extra places.** `fsync` between overwrite and unlink is
+  mandatory or the FS may drop the dirty overwrite. Journals (ext4 `data=journal`, NTFS
+  `$LogFile`) may keep fragments. Swap / hibernation may hold the decrypted model — file
+  shredding cannot reach it. **[R]**
+
+**The stronger control (the recommended path).** The durable defense for "don't leave my model
+recoverable" is to **never write plaintext to the block device**: ship the model **encrypted**
+(cryptbox / AES-256-GCM, already present — `INV-CRYPTO-03`/`04`) and use `--ephemeral` so it
+decrypts only to `/dev/shm` (Linux, RAM) — then there is **nothing to shred**, no FTL remnant,
+no CoW extent, no VSS snapshot. `--overwrite` is belt-and-suspenders for plaintext that
+unavoidably touches disk on Windows/macOS (where there is no unprivileged RAM disk). This is the
+doctrine; `--overwrite` is not a substitute for it.
+
 ## The AI-development threat
 
 lotek's process retrospective names the defect precisely: *"the agent's failure mode in

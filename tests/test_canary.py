@@ -206,8 +206,10 @@ def test_default_build_stub_config_is_byte_identical():
     'no version bump' claim (docs/adr/0004 §2.2) hold. Red-path: emit the keys unconditionally
     and this diverges from the Phase-1 shape asserted above."""
     c = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
-    assert stub_config_bytes(c) == stub_config_bytes(c, reap=False, ram_only=False, base_path="")
+    assert stub_config_bytes(c) == stub_config_bytes(
+        c, reap=False, overwrite=False, ram_only=False, base_path="")
     assert b"reap" not in stub_config_bytes(c)
+    assert b"overwrite" not in stub_config_bytes(c)
     assert b"ram_only" not in stub_config_bytes(c)
 
 
@@ -261,3 +263,61 @@ def test_build_bakes_base_path_into_stub_and_receipt(stub_toolchain, script_proj
     info = stub_toolchain.build(script_project, out, tier="thin", base_path=base)
     assert f'base_path = "{base}"' in verify(out)["stub_config"]
     assert info["staging"]["base_path"] == base
+
+
+# ── Phase-2b: --overwrite (shred-on-reap) build half (docs/adr/0004 5b, INV-SHRED-01) ────────
+# The launcher (Nim) half — the actual overwrite + fsync + guarded --haru-shred worker — is
+# claimed end-to-end and by harness in tests/test_shred.py. Here: the stub-config bytes, the
+# receipt, the corpus discipline, and the --overwrite-requires---reap build refusal.
+
+
+@pytest.mark.invariant("INV-SHRED-01")
+def test_stub_config_emits_overwrite_only_when_set():
+    c = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
+    assert b"overwrite" not in stub_config_bytes(c)
+    out = stub_config_bytes(c, reap=True, overwrite=True).decode()
+    assert "\noverwrite = true\n" in out
+    # top-level key precedes the [canary] table (TOML)
+    assert out.index("overwrite = true") < out.index("[canary]")
+
+
+@pytest.mark.invariant("INV-SHRED-01")
+def test_build_bakes_overwrite_into_stub_and_receipt(stub_toolchain, script_project, tmp_path):
+    out = tmp_path / "app"
+    info = stub_toolchain.build(script_project, out, tier="thin", reap=True, overwrite=True)
+    assert "overwrite = true" in verify(out)["stub_config"]
+    assert info["staging"]["overwrite"] is True
+
+
+@pytest.mark.invariant("INV-SHRED-01")
+def test_overwrite_requires_reap(stub_toolchain, script_project, tmp_path):
+    """--overwrite is shred-ON-reap: without --reap nothing deletes the stage, so it is refused
+    at build rather than silently ignored. Red-path: drop the `overwrite and not reap` raise in
+    build.build → the build succeeds and ships a binary that never shreds."""
+    out = tmp_path / "app"
+    with pytest.raises(BuildError, match="reap"):
+        stub_toolchain.build(script_project, out, tier="thin", overwrite=True)
+
+
+# ── Part A: --ram-only renamed to --ephemeral (surface only; wire key `ram_only` unchanged) ──
+
+
+def test_ephemeral_is_the_surface_name_and_ram_only_is_a_hidden_alias():
+    """--ephemeral is the honest name; --ram-only stays a hidden, deprecated alias for one
+    release. The stub-config WIRE key is deliberately still `ram_only` (ADR 0004 §2.2 pins the
+    v1 corpus), so renaming the flag must not move the key."""
+    from typer.main import get_command
+
+    import haru_pack.cli as cli
+
+    cmd = get_command(cli.app).commands["build"]
+    opts = {}
+    for param in cmd.params:
+        for name in getattr(param, "opts", []):
+            opts[name] = param
+    assert "--ephemeral" in opts and not opts["--ephemeral"].hidden
+    assert "--ram-only" in opts and opts["--ram-only"].hidden, "--ram-only must be a hidden alias"
+    # the wire key never moved: RAM-backed staging still bakes `ram_only`, not `ephemeral`
+    c = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
+    out = stub_config_bytes(c, ram_only=True).decode()
+    assert "ram_only = true" in out and "ephemeral" not in out

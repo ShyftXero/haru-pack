@@ -28,12 +28,12 @@
 ## What it does stop is a *different* user pre-creating or tampering with the cache, a
 ## stale/corrupt tree, and reuse across payloads. Closing the same-uid case needs an OS
 ## boundary (separate service account, or a root-owned read-only stage), not a checksum.
-import std/[os, strutils, algorithm]
+import std/[os, strutils, algorithm, times]
 import zippy/ziparchives
 import nimcrypto/sha2
 import xzdec
 when defined(posix): import std/posix
-when defined(windows): import std/osproc
+when defined(windows): import std/[osproc, winlean]
 
 type StageError* = object of CatchableError
 
@@ -175,81 +175,231 @@ proc ramBackedRoot*(): string =
   ## import tree cannot live there. If /dev/shm is missing or not writable, fall back to the
   ## persistent cache and say so on stderr — no silent promise.
   ##
-  ## WINDOWS / macOS: there is no guaranteed RAM filesystem, so --ram-only is best-effort only
+  ## WINDOWS / macOS: there is no guaranteed RAM filesystem, so --ephemeral is best-effort only
   ## and NOT guaranteed; fall back to the persistent cache with an honest note.
   ##
-  ## HONEST DISCLAIMER: --ram-only governs only where the STUB stages the payload tree. It
+  ## HONEST DISCLAIMER: --ephemeral governs only where the STUB stages the payload tree. It
   ## cannot control the packed application's OWN disk writes. No strong promises.
   when defined(linux):
     const shm = "/dev/shm"
     if isDirWritable(shm):
       return shm / "haru-pack"
-    stderr.writeLine "haru-pack: --ram-only requested but /dev/shm is unavailable or not " &
+    stderr.writeLine "haru-pack: --ephemeral requested but /dev/shm is unavailable or not " &
                      "writable; staging to the persistent cache instead."
     return baseDir()
   else:
-    stderr.writeLine "haru-pack: --ram-only is best-effort and not guaranteed on this OS " &
+    stderr.writeLine "haru-pack: --ephemeral is best-effort and not guaranteed on this OS " &
                      "(no RAM-backed filesystem); staging to the persistent cache instead."
     return baseDir()
 
+# --------------------------------------------------- shred-on-reap: matching-length overwrite
+#
+# --overwrite (docs/adr/0004 §5b, INV-SHRED-01). Before the reaper unlinks a staged file it
+# overwrites the file's WHOLE logical extent with matching-length random bytes and fsyncs, so a
+# proprietary model blob written to disk resists SIMPLE logical file-undelete (Recuva/PhotoRec/
+# TestDisk) on a non-CoW filesystem on a spinning disk. This is NOT a secure erase and must not
+# be sold as one: SSD FTL/wear-leveling (LBA != PBA), copy-on-write filesystems, snapshots/VSS,
+# journals, and swap can all retain the original bytes. The durable defense is --encrypt +
+# --ephemeral (decrypt only to /dev/shm, nothing to shred) — see THREAT_MODEL.md.
+#
+# Native Nim only: no PowerShell (locked on hardened targets), no shipped SDelete, no `cipher /w`
+# (that wipes FREE SPACE, not a named file). The bare-target property (uvfetch) is preserved.
+
+const ShredChunkBytes = 1024 * 1024
+  ## The reused overwrite buffer size. One buffer is filled once and re-used for every file:
+  ## crypto RNG is needless and slow for multi-GB — we are occupying LBAs, not resisting
+  ## cryptanalysis. A megabyte keeps the write loop's syscall count low on large blobs.
+
+proc newShredBuffer*(): string =
+  ## A ShredChunkBytes buffer of fast, non-crypto pseudo-random bytes (INV-SHRED-01). xorshift64
+  ## so there is no dependency and no per-byte RNG call; seeded from time+pid so two runs differ,
+  ## which does not matter for correctness (the bytes only have to not be the plaintext).
+  result = newString(ShredChunkBytes)
+  var st = uint64(epochTime() * 1_000_000.0) xor
+           (uint64(getCurrentProcessId()) shl 32) xor 0x9E3779B97F4A7C15'u64
+  if st == 0'u64: st = 0x1234567'u64
+  var i = 0
+  while i < result.len:
+    st = st xor (st shl 13); st = st xor (st shr 7); st = st xor (st shl 17)
+    var v = st
+    var j = 0
+    while j < 8 and i < result.len:
+      result[i] = char(v and 0xFF'u64)
+      v = v shr 8; inc i; inc j
+
+proc overwriteFile*(path: string; buf: string): bool =
+  ## Overwrite the full logical extent of `path` IN PLACE with `buf`'s bytes, fsync, close.
+  ## Returns true iff exactly getFileSize(path) bytes were written — the byte-count assertion
+  ## that the whole logical extent was covered (INV-SHRED-01). Opened WITHOUT truncation
+  ## (fmReadWriteExisting) and seeked to 0, so the on-disk length is unchanged: we occupy the
+  ## same logical byte range the plaintext used (LBA, not PBA — see this section's header).
+  ##
+  ## fsync/FlushFileBuffers is MANDATORY and happens BEFORE the caller unlinks: without it the
+  ## filesystem may drop the dirty overwrite and only the unlink lands, leaving the bytes.
+  if buf.len == 0: return false
+  var size: int64
+  try: size = getFileSize(path)
+  except OSError: return false
+  var f: File
+  if not open(f, path, fmReadWriteExisting): return false
+  var written: int64 = 0
+  try:
+    setFilePos(f, 0)
+    var remaining = size
+    while remaining > 0:
+      let n = int(min(remaining, int64(buf.len)))
+      let w = f.writeBuffer(unsafeAddr buf[0], n)
+      if w != n: return false
+      written += int64(w)
+      remaining -= int64(w)
+    flushFile(f)                                   # C stdio buffer -> OS
+    when defined(posix):
+      if fsync(getFileHandle(f)) != 0: return false            # OS buffer -> disk, before unlink
+    else:
+      if flushFileBuffers(cast[Handle](getOsFileHandle(f))) == 0: return false   # Windows fsync
+  finally:
+    close(f)
+  result = (written == size)                       # full logical extent covered
+
+proc shredAndRemoveTree*(root: string) =
+  ## Overwrite every regular file under `root` (INV-SHRED-01), fsync each, THEN remove the tree.
+  ## Overwrite-BEFORE-unlink is the whole point; unlink alone leaves the bytes for undelete.
+  ## Best-effort per file — a file we cannot open is skipped, not fatal (the tree is going away
+  ## regardless). Symlinks are never followed (yieldFilter {pcFile}, followFilter {pcDir}); we
+  ## overwrite content that lives INSIDE the tree, never a link target outside it.
+  if root.len == 0: return
+  let buf = newShredBuffer()
+  for path in walkDirRec(root, yieldFilter = {pcFile}):
+    try: discard overwriteFile(path, buf)
+    except CatchableError: discard
+  removeDir(root)
+
+proc shredGuard*(target: string): string =
+  ## "" if `target` is safe to shred-and-remove; else a one-line diagnostic. Defensive guard for
+  ## the `--haru-shred` re-exec surface (Windows worker) so a hand-typed `--haru-shred <path>`
+  ## can never become arbitrary-delete: the target must be an existing, non-symlink directory
+  ## named like a stageZip subtree (`<hexkey>-<32-hex-digest>`), sitting UNDER a root that is not
+  ## '/', a drive/UNC root, or $HOME, and never a HARUPACK_DEV_STAGE tree (INV-SHRED-01 shares
+  ## INV-REAP-01 / INV-BASE-01's own-subtree-only story). The POSIX reaper gets the same property
+  ## by construction — it only ever passes the exact subtree stageZip created this run.
+  if target.len == 0: return "empty shred target"
+  let p = stripTrailingSep(target)
+  let selfBad = refuseUnsafeRoot(p)                # the subtree is never a root/drive/home itself
+  if selfBad.len > 0: return selfBad
+  when defined(posix):
+    var st: Stat
+    if lstat(p, st) != 0: return "shred target does not exist: " & target
+    if not S_ISDIR(st.st_mode):
+      return "shred target is not a directory (symlink or file?): " & target
+  else:
+    if not dirExists(p): return "shred target does not exist: " & target
+  let parentBad = refuseUnsafeRoot(p.parentDir)    # the staging ROOT it lives under must be safe
+  if parentBad.len > 0: return "shred target's parent is an unsafe root: " & parentBad
+  let name = p.extractFilename                      # <key>-<digest> shape, nothing else
+  let dash = name.find('-')
+  if dash <= 0 or dash >= name.high:
+    return "shred target is not a haru-pack stage subtree: " & name
+  let key = name[0 ..< dash]
+  let dig = name[dash + 1 .. ^1]
+  if key.len < 1 or key.len > 64 or not key.allCharsInSet(KeyChars):
+    return "shred target key is not hex: " & name
+  if dig.len != 32 or not dig.allCharsInSet(KeyChars):
+    return "shred target digest is not 32 hex: " & name
+  let dev = getEnv("HARUPACK_DEV_STAGE")
+  if dev.len > 0 and stripTrailingSep(dev) == p:
+    return "refusing to shred a HARUPACK_DEV_STAGE tree"
+  return ""
+
 # ------------------------------------------------------------- detached reap (fire-and-forget)
 
-proc reapDetached*(target: string) =
+proc reapDetached*(target: string; overwrite = false) =
   ## Spawn a DETACHED, fire-and-forget process that deletes `target`, then return WITHOUT
-  ## waiting — deletion of many GB continues after the stub has died (docs/adr/0004 §4,
-  ## INV-REAP-01). `target` is ALWAYS the exact staged subtree the launcher created this run
-  ## (`<root>/<key>-<digest>`), never a raw base_path or env value.
+  ## waiting - deletion of many GB continues after the stub has died (docs/adr/0004 4/5b,
+  ## INV-REAP-01 / INV-SHRED-01). `target` is ALWAYS the exact staged subtree the launcher
+  ## created this run (`<root>/<key>-<digest>`), never a raw base_path or env value.
+  ##
+  ## With `overwrite`, the detached worker SHREDS first: it overwrites every staged file with
+  ## matching-length random bytes and fsyncs before unlinking (native Nim, no shell - see the
+  ## shred section header for the honest ceiling). Without it the behaviour is byte-for-byte the
+  ## Phase-2 reap: a shell `rm -rf` (POSIX) / `rmdir` (Windows).
   if target.len == 0: return
-  # TOCTOU defence: the launcher created `target` as a real directory, but the app ran for an
-  # unbounded time between creation and this reap. If `target` is now a SYMLINK, a local
-  # attacker swapped it — do not follow it. We only ever reap a real directory we made. (GNU
-  # `rm -rf -- link` already removes the link rather than its target, but not every target's
-  # `rm` is GNU, so refuse explicitly.) INV-BASE-01 / INV-REAP-01.
-  if symlinkExists(target): return
   when defined(posix):
-    # Double-fork + setsid: the grandchild is reparented to init and OUTLIVES this stub. We
-    # wait only for the FIRST child (which exits immediately after forking the deleter), never
-    # for the deletion itself. The path is passed to sh as a POSITIONAL arg ($1), never
-    # interpolated into the script text, so a staging root containing shell metacharacters (a
-    # hostile BASE_PATH that reached staging) cannot inject a command into our own reaper.
-    #
-    # The deleter redirects its own stdin/stdout/stderr to /dev/null: it INHERITS our fds, and
-    # a parent capturing our output would otherwise not see EOF (so would BLOCK) until the
-    # multi-GB delete finished — the exact "return without waiting" property we are promising.
-    #
-    # A known-good PATH is set INSIDE the script (a constant, not attacker input) so `rm`
-    # resolves even when we were launched with an empty or hostile PATH — a security-sensitive
-    # cleanup must not silently no-op because the inherited PATH could not find `rm`.
-    var argv = allocCStringArray(["/bin/sh", "-c",
-      "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec rm -rf -- \"$1\" </dev/null >/dev/null 2>&1",
-      "haru-reap", target])
-    let pid1 = fork()
-    if pid1 < 0:
-      deallocCStringArray(argv)
-      return                                   # cannot fork -> best-effort cleanup gives up
-    if pid1 == 0:
-      discard setsid()                         # detach from our session / controlling tty
-      let pid2 = fork()
-      if pid2 == 0:
-        discard execv("/bin/sh", argv)         # grandchild becomes `rm`; on success never returns
-        exitnow(127)                           # exec failed
+    if not overwrite:
+      # Plain reap (unchanged). Double-fork + setsid: the grandchild is reparented to init and
+      # OUTLIVES this stub. We wait only for the FIRST child (which exits immediately after
+      # forking the deleter). The path is passed to sh as a POSITIONAL arg ($1), never
+      # interpolated into the script text, so a staging root containing shell metacharacters
+      # cannot inject a command into our own reaper. The deleter redirects its std fds to
+      # /dev/null so a parent capturing our output sees EOF instead of BLOCKING on the delete.
+      # A known-good PATH is set INSIDE the script so `rm` resolves even under an empty/hostile
+      # inherited PATH - a security cleanup must not silently no-op.
+      var argv = allocCStringArray(["/bin/sh", "-c",
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec rm -rf -- \"$1\" </dev/null >/dev/null 2>&1",
+        "haru-reap", target])
+      let pid1 = fork()
+      if pid1 < 0:
+        deallocCStringArray(argv)
+        return
+      if pid1 == 0:
+        discard setsid()
+        let pid2 = fork()
+        if pid2 == 0:
+          discard execv("/bin/sh", argv)
+          exitnow(127)
+        else:
+          exitnow(0)
       else:
-        exitnow(0)                             # first child exits -> grandchild orphaned to init
+        var status: cint
+        discard waitpid(pid1, status, 0)
+        deallocCStringArray(argv)
     else:
-      var status: cint
-      discard waitpid(pid1, status, 0)         # reap the IMMEDIATE child, not the deleter
-      deallocCStringArray(argv)
+      # Shred-on-reap. Same double-fork/setsid detach, but the grandchild overwrites each staged
+      # file (native Nim shredAndRemoveTree) before removing the tree - no shell, no PowerShell
+      # (INV-SHRED-01). Running Nim post-fork is safe here: this launcher is single-threaded (it
+      # spawns processes, never threads), so the child holds no locked allocator/GC state.
+      let pid1 = fork()
+      if pid1 < 0: return
+      if pid1 == 0:
+        discard setsid()
+        let pid2 = fork()
+        if pid2 == 0:
+          # Detach std fds to /dev/null so a parent capturing our output sees EOF and does not
+          # BLOCK on the multi-GB shred (same property the sh path gets via its redirection).
+          let devnull = posix.open("/dev/null", O_RDWR)
+          if devnull >= 0:
+            discard dup2(devnull, 0); discard dup2(devnull, 1); discard dup2(devnull, 2)
+            if devnull > 2: discard posix.close(devnull)
+          shredAndRemoveTree(target)           # overwrite (fsync) every file, THEN remove
+          exitnow(0)
+        else:
+          exitnow(0)
+      else:
+        var status: cint
+        discard waitpid(pid1, status, 0)
   else:
-    # Windows (compile + code-review only on this host): `cmd /c start /b rmdir /s /q` launches
-    # rmdir without a window; cmd returns at once, so the stub does not wait for the deletion.
-    # poDaemon (DETACHED_PROCESS) keeps it off our console. The empty "" after `start` is its
-    # title argument, so a quoted target is not mistaken for the window title.
-    try:
-      let p = startProcess("cmd", args = ["/c", "start", "", "/b", "rmdir", "/s", "/q", target],
-                           options = {poDaemon, poUsePath})
-      p.close()                                # do NOT waitForExit — fire and forget
-    except CatchableError:
-      discard
+    # Windows (compile + code-review only on this host).
+    if not overwrite:
+      # Plain reap (unchanged): `cmd /c start /b rmdir /s /q` launches rmdir without a window;
+      # cmd returns at once, so the stub does not wait. poDaemon (DETACHED_PROCESS) keeps it off
+      # our console. The empty "" after `start` is its title argument.
+      try:
+        let p = startProcess("cmd", args = ["/c", "start", "", "/b", "rmdir", "/s", "/q", target],
+                             options = {poDaemon, poUsePath})
+        p.close()
+      except CatchableError:
+        discard
+    else:
+      # Shred-on-reap: re-exec THIS launcher as a hidden `--haru-shred <target>` worker so the
+      # overwrite loop is native Nim (no PowerShell - frequently locked on hardened targets via
+      # Constrained Language Mode / AppLocker / ExecutionPolicy; no shipped SDelete). poDaemon
+      # detaches it; we do not wait. main.nim guards the subcommand with shredGuard so it can
+      # only ever shred a stage-shaped own-subtree (INV-SHRED-01).
+      try:
+        let self = getAppFilename()
+        let p = startProcess(self, args = ["--haru-shred", target], options = {poDaemon})
+        p.close()
+      except CatchableError:
+        discard
 
 # ---------------------------------------------------------------- digests
 

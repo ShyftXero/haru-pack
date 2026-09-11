@@ -23,7 +23,11 @@ type
     ## INV-REAP-01). A Phase-1 launcher, which ignores unknown top-level keys, simply stages
     ## the normal way — a safe default, never a downgraded protection.
     reap*: bool          ## build-time --reap: detached on-exit cleanup of the staged subtree
-    ramOnly*: bool       ## build-time --ram-only: best-effort RAM-backed staging root
+    overwrite*: bool     ## build-time --overwrite: shred-on-reap (overwrite each staged file
+                         ## with matching-length random bytes + fsync BEFORE unlink). Only
+                         ## acts with reap; honest anti-recovery ceiling (INV-SHRED-01).
+    ramOnly*: bool       ## build-time --ephemeral (wire key still `ram_only`): best-effort
+                         ## RAM-backed staging root
     basePath*: string    ## build-time --base-path: staging-root default ("" = normal cache)
 
 const
@@ -52,6 +56,7 @@ proc defaultStubConfig*(): StubConfig =
   result.version = SupportedStubConfigVersion
   for k in Knob: result.canary[k] = DefaultCanary
   result.reap = false
+  result.overwrite = false
   result.ramOnly = false
   result.basePath = ""
 
@@ -115,6 +120,7 @@ proc parseStubConfig*(raw: string): StubConfig =
   # unknown top-level key stays reserved/ignored (§2.3 forward-extensibility seam). No version
   # bump: their absence changes no security decision, only where/whether the stub stages/reaps.
   result.reap = false
+  result.overwrite = false
   result.ramOnly = false
   result.basePath = ""
   if t.contains("reap"):
@@ -122,6 +128,11 @@ proc parseStubConfig*(raw: string): StubConfig =
     if n.kind != TomlValueKind.Bool:
       raise newException(ValueError, "stub-config: reap must be a boolean")
     result.reap = n.getBool()
+  if t.contains("overwrite"):
+    let n = t["overwrite"]
+    if n.kind != TomlValueKind.Bool:
+      raise newException(ValueError, "stub-config: overwrite must be a boolean")
+    result.overwrite = n.getBool()
   if t.contains("ram_only"):
     let n = t["ram_only"]
     if n.kind != TomlValueKind.Bool:

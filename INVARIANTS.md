@@ -2198,6 +2198,38 @@ Source: docs/adr/0004-reap-ram-staging.md §5/§6. CONTEXT.md "detached reap" / 
 (build-time)".
 Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py
 
+### INV-SHRED-01
+Status: active
+Statement: With `overwrite` baked (which requires `reap`), the detached reaper SHREDS before it
+unlinks: for every staged regular file it opens the file WITHOUT truncation, seeks to 0, writes
+`getFileSize(file)` bytes from a reused non-crypto PRNG buffer covering the whole logical extent,
+and `fsync`/`FlushFileBuffers` BEFORE the file is unlinked; `overwriteFile` returns true only when
+bytes-written == file length. It is native Nim on both platforms — a POSIX inline shred in the
+double-forked reaper, and a Windows re-exec of the launcher as a guarded `--haru-shred <subtree>`
+worker — with no shell, no PowerShell, and no shipped secure-erase binary. The shred target is
+always the launcher's own `<root>/<key>-<digest>` subtree; the `--haru-shred` surface is guarded
+(stage-shaped name, safe root, non-symlink, never a `HARUPACK_DEV_STAGE` tree).
+Actors: not an attacker — a packager shipping an unencrypted model blob that unavoidably touches
+disk on Windows/macOS, who wants it to resist SIMPLE file-undelete after the app exits. The safety
+edge is shared with INV-REAP-01/INV-BASE-01: the shred/delete target must be the launcher's own
+subtree, and the new `--haru-shred` re-exec must never become arbitrary-delete.
+Assets: the property that a matching-length in-place overwrite covers the full LOGICAL extent and
+is durable (fsync) before the unlink, so a logical file-undelete tool (Recuva/PhotoRec/TestDisk)
+on a non-CoW filesystem finds overwritten bytes, not the plaintext. This is an HONEST, BOUNDED
+control, NOT a secure erase: SSD FTL/wear-leveling (LBA != PBA), copy-on-write filesystems,
+snapshots/VSS, journals, and swap can all retain the original — documented in THREAT_MODEL.md, with
+`--encrypt` + `--ephemeral` named as the durable defense (nothing plaintext ever reaches disk).
+Red-path: In `stage.overwriteFile` add `return true` before the write loop (claim success without
+writing), rebuild the tests/test_shred.py harness, run `harness overwrite <file>`: the file still
+holds its original bytes and `test_overwrite_covers_extent_and_changes_content` goes red with
+CONTENT_UNCHANGED. Separately, delete the `fsync`/`flushFileBuffers` line and
+`test_overwritefile_fsyncs_before_it_closes` goes red. Separately, drop the `overwrite and not
+reap` raise in `build.build` and `test_overwrite_requires_reap` goes red. Walked 2026-09-11 on
+this Linux host.
+Source: docs/adr/0004-reap-ram-staging.md §5b. Asked for in issue #2 — an honest anti-recovery
+ceiling, native-only (no PowerShell on hardened targets), belt-and-suspenders to encrypt-at-rest.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py, src/haru_pack/cli.py
+
 ---
 
 ## TOOL — the kitchen sink is the default, and all of it is declinable

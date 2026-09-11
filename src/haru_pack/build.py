@@ -168,13 +168,13 @@ def resolve_base_path(base_path: str) -> str:
     return base_path
 
 
-def stub_config_bytes(canary: dict, *, reap: bool = False, ram_only: bool = False,
-                      base_path: str = "") -> bytes:
+def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = False,
+                      ram_only: bool = False, base_path: str = "") -> bytes:
     """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2), UTF-8,
     in fixed order. Canary tokens are validated env-name prefixes, so no escaping is needed.
 
-    The Phase-2 keys `reap`/`ram_only`/`base_path` are emitted ONLY when non-default, so a
-    build that uses none of them is byte-identical to the Phase-1 stub-config (the v1 corpus
+    The Phase-2 keys `reap`/`overwrite`/`ram_only`/`base_path` are emitted ONLY when non-default,
+    so a build that uses none of them is byte-identical to the Phase-1 stub-config (the v1 corpus
     and its exact-bytes test are unchanged). Their absence is today's behaviour, so no
     stub_config_version bump is needed (docs/adr/0004 §2). Read before decryption by
     launcher/stubconfig.parseStubConfig; sha-checked first (INV-STUB-01)."""
@@ -182,6 +182,8 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, ram_only: bool = Fals
     # Top-level keys must precede the [canary] table (TOML). Emit only when non-default.
     if reap:
         lines.append("reap = true")
+    if overwrite:
+        lines.append("overwrite = true")           # shred-on-reap (docs/adr/0004 5b, INV-SHRED-01)
     if ram_only:
         lines.append("ram_only = true")
     if base_path:
@@ -703,8 +705,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           env_canary: str = "", env_canary_random: bool = False,
           stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
-          reap: bool = False, ram_only: bool = False, base_path: str = "",
-          env_append=None, cc: str = "", log=None) -> dict:
+          reap: bool = False, overwrite: bool = False, ram_only: bool = False,
+          base_path: str = "", env_append=None, cc: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -767,16 +769,32 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     injects = resolve_injects(env_append, encrypted=enc["enabled"], log=log)
     # Phase-2 staging knobs (docs/adr/0004). base_path is refused at build time if it is a
     # root; reap/ram-only are baked into the cleartext stub-config below (INV-BASE-01 /
-    # INV-RAM-01 / INV-REAP-01). HONEST DISCLAIMER, said out loud at build: --ram-only governs
+    # INV-RAM-01 / INV-REAP-01). HONEST DISCLAIMER, said out loud at build: --ephemeral governs
     # only where the STUB stages the payload tree — haru cannot control the packed app's OWN
     # disk writes, and on Windows/macOS there is no guaranteed RAM filesystem.
     base_path = resolve_base_path(base_path)
+    # --overwrite is shred-ON-reap: the reaper is what runs the shred, so overwrite without reap
+    # would silently do nothing. Refuse it at build rather than ship a binary that ignores a
+    # security flag the packager asked for (INV-SHRED-01).
+    if overwrite and not reap:
+        raise BuildError("--overwrite is shred-on-reap and needs --reap to run: without --reap "
+                         "nothing deletes the stage, so nothing shreds it. Add --reap, or drop "
+                         "--overwrite.")
     say = log or (lambda _m: None)
+    if overwrite:
+        say("--overwrite: shred-on-reap. The detached reaper overwrites each staged file with "
+            "matching-length random data and fsyncs BEFORE unlinking, so a plaintext blob on disk "
+            "resists SIMPLE file-undelete (Recuva/PhotoRec/TestDisk) on a non-CoW filesystem. This "
+            "is NOT a secure erase: SSD wear-leveling (LBA != PBA), copy-on-write filesystems, "
+            "snapshots/VSS, journals, and swap can all retain the original bytes (THREAT_MODEL.md). "
+            "The durable defense is --encrypt + --ephemeral: decrypt only to RAM, nothing to shred.")
     if ram_only:
-        say("--ram-only: best-effort RAM-backed staging. Linux stages under /dev/shm (tmpfs) "
-            "when available, else falls back to the persistent cache with a note. Windows/macOS "
-            "have no guaranteed RAM filesystem, so this is not guaranteed there. It governs only "
-            "where the STUB stages the payload tree — not the packed app's own disk writes.")
+        say("--ephemeral: best-effort RAM-backed staging (wire key still `ram_only`). Linux stages "
+            "under /dev/shm (tmpfs) when available, else falls back to the persistent cache with a "
+            "note - truly RAM-only ONLY on Linux. Windows/macOS have no unprivileged RAM disk (no "
+            "tmpfs; a RAM disk needs a signed kernel driver + admin), so it is best-effort there. "
+            "It governs only where the STUB stages the payload tree - not the packed app's own "
+            "disk writes.")
     if reap:
         say("--reap: after the app exits the stub spawns a detached, fire-and-forget deletion "
             "of the staged subtree it created this run, then exits without waiting. Only that "
@@ -821,8 +839,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
         info = attach(launcher, payload, out, flags=flags,
-                      stub_config=stub_config_bytes(canary, reap=reap, ram_only=ram_only,
-                                                    base_path=base_path))
+                      stub_config=stub_config_bytes(canary, reap=reap, overwrite=overwrite,
+                                                    ram_only=ram_only, base_path=base_path))
     try:
         out.chmod(0o755)
     except Exception:
@@ -838,8 +856,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 canary=canary,
                 # Phase-2 staging knobs (docs/adr/0004): not secret, and recording them lets an
                 # auditor see whether a binary reaps / stages to RAM / relocates its cache.
-                staging={"reap": bool(reap), "ram_only": bool(ram_only),
-                         "base_path": base_path},
+                staging={"reap": bool(reap), "overwrite": bool(overwrite),
+                         "ram_only": bool(ram_only), "base_path": base_path},
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
     if shake_report:

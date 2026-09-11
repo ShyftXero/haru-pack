@@ -165,6 +165,7 @@ proc launch(): int =
   # it). reapTarget is the exact subtree stageZip created/verified this run (INV-REAP-01).
   var reapWanted = false
   var reapTarget = ""
+  var reapOverwrite = false
   # INV-LAUNCH-02: HARUPACK_DEV_STAGE stages an arbitrary directory and skips the
   # overlay, the digest check, decryption and every license check. In a shipped, signed
   # binary that is a signed proxy for arbitrary code execution, available to anyone who
@@ -216,6 +217,7 @@ proc launch(): int =
     stageRoot = stageZip(payload, shahex[0..15], root)
     reapWanted = sc.reap                 # build-time --reap; independent of ram_only
     reapTarget = stageRoot               # the exact subtree we just created/verified
+    reapOverwrite = sc.overwrite         # build-time --overwrite: shred-on-reap (INV-SHRED-01)
 
   # 2. manifest
   let mfPath = stageRoot / "manifest.toml"
@@ -312,10 +314,24 @@ proc launch(): int =
   # keep deleting after this stub has died. Only the subtree the launcher created this run is
   # reaped; a dev-stage tree (reapTarget == "") is never touched.
   if reapWanted and reapTarget.len > 0:
-    reapDetached(reapTarget)
+    reapDetached(reapTarget, reapOverwrite)
   return rc
 
 when isMainModule:
+  when defined(windows):
+    # Hidden shred worker (docs/adr/0004 5b, INV-SHRED-01). The --overwrite reaper on Windows
+    # re-execs THIS launcher as `--haru-shred <subtree>` (stage.reapDetached), because there is
+    # no native per-file secure-erase and PowerShell is frequently locked on hardened targets.
+    # This is a delete primitive, so it is guarded to a stage-shaped own-subtree under a safe
+    # root and never a dev-stage tree (stage.shredGuard); anything else is refused, never run.
+    let shredArgs = commandLineParams()
+    if shredArgs.len == 2 and shredArgs[0] == "--haru-shred":
+      let why = shredGuard(shredArgs[1])
+      if why.len > 0:
+        stderr.writeLine "haru-pack: refusing --haru-shred: " & why
+        quit(2)
+      shredAndRemoveTree(shredArgs[1])
+      quit(0)
   # W16: parseManifest, parseJson and the expiry parse all raise, and zippy raises on a
   # malformed zip. Without this the end user of a shipped binary sees a raw Nim traceback
   # listing source paths from the machine that built it. `die`/`quit` are not exceptions,
