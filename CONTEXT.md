@@ -33,17 +33,24 @@ The Nim launcher. The **delivery vehicle**, invisible to haru-pack's own users: 
 write Nim or reason about it. Its job is to carry a payload to an end-user and run it —
 flexibly, securely, off-road.
 
-## RAM-backed staging (ephemeral)
-Staging the payload into memory-backed storage (`/dev/shm` or `memfd` on Linux; Windows TBD)
-so nothing the payload contains is written to persistent disk. For packagers concerned about
-disk-based artifacts. Distinct from the normal **cache**, which is persistent and reused.
+## RAM-backed staging (ephemeral) — `--ephemeral`
+Staging the payload into memory-backed storage so nothing the payload contains is written to
+persistent disk. Baked at build with **`--ephemeral`** (the honest name; `--ram-only` is a
+deprecated alias kept for one release). Truly RAM-only ONLY on **Linux**, via `/dev/shm` (a
+tmpfs with real paths the interpreter can import from — `memfd` is unusable because it has no
+path). **Windows/macOS have no unprivileged RAM disk** (Windows has no tmpfs, and a RAM disk is
+a block device needing a signed kernel-mode storage driver + admin; macOS has no tmpfs either),
+so there `--ephemeral` is best-effort and falls back to the persistent cache with an honest note
+(docs/adr/0004 §4). The **stub-config wire key stays `ram_only`** — the surface renamed, the key
+did not (ADR 0004 §2.2 pins the v1 byte-corpus). For packagers concerned about disk-based
+artifacts. Distinct from the normal **cache**, which is persistent and reused.
 
 ## detached reap
 The stub's fire-and-forget final act when `--reap` is baked in: after the app exits it spawns
 a **separate, detached process** to delete the exact subtree it created this run, then exits
 immediately. Cleanup of many gigabytes continues after the stub has died. Independent of
-`--ram-only` (either, both, or neither): `--reap` alone deletes a subtree of the *persistent*
-cache; with `--ram-only` it deletes the RAM-backed one. It only ever removes the
+`--ephemeral` (either, both, or neither): `--reap` alone deletes a subtree of the *persistent*
+cache; with `--ephemeral` it deletes the RAM-backed one. It only ever removes the
 stub-created `<root>/<key>-<digest>` subtree — never a raw `BASE_PATH`, and never a refused
 root (`/`, a drive/UNC root, or a home directory).
 
@@ -121,3 +128,17 @@ written, that is the `wedge` persona. Both live in `tools/busybody.py`; see
 `docs/BUSYBODY.md`. When it is genuinely ambiguous, the runtime sense is the likelier ask —
 and a stall can only be *observed*, never injected, so "create a wedge" almost always means
 sense 1, which is a file you can write.
+## shred-on-reap (`--overwrite`)
+A packager choice, fixed at build with **`--overwrite`** (requires `--reap`), that makes the
+detached reaper **shred before it unlinks**: for every staged file it overwrites the whole
+logical extent with matching-length random bytes and `fsync`s BEFORE removing the file. Native
+Nim on both platforms — a POSIX inline shred in the double-forked reaper, a Windows re-exec of
+the launcher as a guarded `--haru-shred <subtree>` worker — with **no shell, no PowerShell**
+(often locked on hardened targets) and **no shipped secure-erase binary**. It defeats SIMPLE
+logical file-undelete (Recuva/PhotoRec/TestDisk) on a non-CoW filesystem, and NOTHING more: it
+is **not a secure erase**. SSD FTL/wear-leveling (LBA ≠ PBA), copy-on-write filesystems,
+snapshots/VSS, journals, and swap can all retain the original bytes. The durable defense for
+"don't leave my model recoverable" is **`--encrypt` + `--ephemeral`** (decrypt only to RAM —
+nothing plaintext ever reaches the block device, so there is nothing to shred). `--overwrite` is
+belt-and-suspenders for plaintext that unavoidably touches disk on Windows/macOS
+(THREAT_MODEL.md, docs/adr/0004 §5b, INV-SHRED-01).

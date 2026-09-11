@@ -77,7 +77,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                shake=False, shake_keep=(), env_canary="", env_canary_random=False,
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
-               reap=False, ram_only=False, base_path="",
+               reap=False, ephemeral=False, ram_only=False, overwrite=False, base_path="",
                env_append=None, cc="") -> None:
     """The build, as a plain function with real Python defaults.
 
@@ -89,6 +89,11 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     """
     if thin: tier = "thin"
     if thick or chonky: tier = "thick"
+    # --ram-only is the deprecated surface name of --ephemeral (docs/adr/0004). The WIRE key
+    # stays `ram_only`, so the internal kwarg does too; only the flag the user types moved.
+    if ram_only and not ephemeral:
+        print(f"{prog()}: --ram-only is deprecated; use --ephemeral (same behavior)", style="warn")
+    ram_only = ephemeral or ram_only
     if tier not in TIERS:
         print(f"unknown tier '{tier}' ({'|'.join(TIERS)})", style="error"); raise typer.Exit(2)
     if chonky:
@@ -122,7 +127,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                          stub_env_source_url_canary=stub_env_source_url_canary,
                          stub_env_base_path_canary=stub_env_base_path_canary,
-                         reap=reap, ram_only=ram_only, base_path=base_path,
+                         reap=reap, overwrite=overwrite, ram_only=ram_only, base_path=base_path,
                          env_append=list(env_append or []),
                          log=lambda m: print(
                              f"{prog()}: {m}",
@@ -455,10 +460,19 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           reap: bool = typer.Option(False, "--reap",
               help="after the app exits, spawn a DETACHED process that deletes the staged "
                    "subtree, then exit without waiting (fire-and-forget cleanup)"),
-          ram_only: bool = typer.Option(False, "--ram-only",
-              help="best-effort RAM-backed staging: Linux stages under /dev/shm when available "
-                   "(else falls back to the cache). Governs only where the STUB stages — not "
-                   "the app's own disk writes; not guaranteed on Windows/macOS"),
+          ephemeral: bool = typer.Option(False, "--ephemeral",
+              help="best-effort RAM-backed (ephemeral) staging: Linux stages under /dev/shm when "
+                   "available (else falls back to the cache with a note) - truly RAM-only ONLY on "
+                   "Linux. Windows/macOS have no unprivileged RAM disk, so it is best-effort there. "
+                   "Governs only where the STUB stages, not the app's own disk writes"),
+          ram_only: bool = typer.Option(False, "--ram-only", hidden=True,
+              help="deprecated alias for --ephemeral (kept working for one release)"),
+          overwrite: bool = typer.Option(False, "--overwrite",
+              help="shred-on-reap: the detached reaper overwrites each staged file with "
+                   "matching-length random data and fsyncs before unlinking, so a plaintext blob "
+                   "on disk resists SIMPLE undelete. Requires --reap. NOT a secure erase - SSD "
+                   "wear-leveling, copy-on-write filesystems, snapshots/VSS and swap can retain "
+                   "the bytes (see THREAT_MODEL.md)"),
           base_path: str = typer.Option("", "--base-path", metavar="DIR",
               help="staging-root default baked into the stub-config (a canary-named BASE_PATH "
                    "env var overrides it at runtime). Refused if it is a root/drive/home path"),
@@ -480,8 +494,8 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                stub_env_source_url_canary=stub_env_source_url_canary,
                stub_env_base_path_canary=stub_env_base_path_canary,
-               reap=reap, ram_only=ram_only, base_path=base_path,
-               env_append=env_append)
+               reap=reap, ephemeral=ephemeral, ram_only=ram_only, overwrite=overwrite,
+               base_path=base_path, env_append=env_append)
 
 @app.command()
 def verify(exe: Path):

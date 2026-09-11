@@ -62,11 +62,11 @@ heavy dependencies; **thick** when the target has no internet, or must not depen
 already installed on it. There is no knob today to make *thick* share one global cache across
 binaries — that would reintroduce the network dependency thick exists to remove.
 
-## Recipe: a licensed diagnostic that leaves little on disk — `--ram-only --encrypt --obfuscate`
+## Recipe: a licensed diagnostic that leaves little on disk — `--ephemeral --encrypt --obfuscate`
 
 A licensed diagnostic tool whose *source itself* is sensitive — proprietary detection logic,
 an embedded credential, a customer's data schema — should not be written to the user's disk in
-the clear, even transiently. Combine four flags, each covering a different moment in the
+the clear, even transiently. Combine these flags, each covering a different moment in the
 binary's life:
 
 - **`--encrypt`** keeps the payload AES-256-GCM encrypted **at rest** inside the binary, so the
@@ -77,9 +77,17 @@ binary's life:
   logic is not sitting there as source. This is the **slight anti-forensics** step: a dump of
   the RAM stage yields obfuscated code, not your program. See
   [obfuscation](SHARP_CORNERS.md) and `INV-OBF-01`.
-- **`--ram-only`** stages the (encrypted-at-rest, obfuscated) tree to a RAM-backed root
-  (`/dev/shm` on Linux) instead of the on-disk cache, so what is staged never touches
-  persistent storage and is gone when the process exits.
+- **`--ephemeral`** (renamed from `--ram-only`; wire key unchanged) stages the (encrypted-at-rest,
+  obfuscated) tree to a RAM-backed root (`/dev/shm` on Linux) instead of the on-disk cache, so
+  what is staged never touches persistent storage and is gone when the process exits. This is the
+  **strongest** disk-hygiene control and it is truly RAM-only **only on Linux**: Windows/macOS
+  have no unprivileged RAM disk, so there it is best-effort and falls back to disk with a note.
+- **`--overwrite`** (optional; requires `--reap`) is belt-and-suspenders for the platforms where
+  `--ephemeral` cannot keep the tree off disk: the detached reaper overwrites each staged file
+  with matching-length random bytes and `fsync`s before unlinking, so a plaintext blob resists
+  **simple** file-undelete. It is **not a secure erase** (SSD FTL, copy-on-write filesystems,
+  snapshots/VSS and swap can retain the bytes — see [`THREAT_MODEL.md`](../THREAT_MODEL.md)); the
+  durable defense remains `--encrypt` + `--ephemeral` (nothing plaintext ever reaches disk).
 - **`--thin` vs `--thick`** — the size/reliability trade, and it interacts with `--obfuscate`
   (see the caveat): `--thin` ships a tiny file and fetches uv + Python + deps at run time;
   `--thick` bakes in the exact interpreter and runs offline.
@@ -89,7 +97,7 @@ the staged source; it is **not a confidentiality boundary**. Whatever runs on th
 runnable, so it must be recoverable: a determined reverse engineer with the binary, a debugger
 and time still wins — most casual rummaging does not. The rule the whole codebase holds to is
 *a secret that must never be recovered must never be shipped to the client.* Likewise
-`--ram-only` governs only where the launcher stages *your payload tree*; it does not move uv's
+`--ephemeral` governs only where the launcher stages *your payload tree*; it does not move uv's
 dependency cache (the public PyPI packages `--thin` fetches land in the normal on-disk
 `~/.cache/uv-cache` — not your secret), cannot control the application's own disk writes, and is
 best-effort (no writable `/dev/shm` → it falls back to disk and says so). Anyone who can *run*
@@ -102,8 +110,8 @@ Only `--thick` bundles that exact interpreter and guarantees the match; with `--
 target resolves its own Python and the binary **fails to start** unless it happens to be exactly
 that minor (haru-pack warns loudly at build time). So:
 
-- target's Python is known/controlled → `--thin --ram-only --encrypt --obfuscate` (smallest).
-- target's Python is not guaranteed → `--thick --ram-only --encrypt --obfuscate` (bundles the
+- target's Python is known/controlled → `--thin --ephemeral --encrypt --obfuscate` (smallest).
+- target's Python is not guaranteed → `--thick --ephemeral --encrypt --obfuscate` (bundles the
   matching interpreter; larger, and offline, but it actually starts).
 
 ## The bundled uv is compressed, not packed
