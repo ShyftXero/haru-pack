@@ -158,6 +158,82 @@ def test_rollup_counts_repeats_and_keeps_first_seen(tmp_path):
 
 
 @pytest.mark.invariant("INV-CHAOS-01")
+def test_a_cascade_never_outranks_a_fresh_finding(tmp_path):
+    """Red-path: drop the post_wedge term from the sort key. One stall that takes sixteen
+    children with it then forms a sixteen-count group that sorts above the single-count
+    record of the fault that caused it — one bug ranked as the top sixteen problems."""
+    led = tmp_path / "findings.jsonl"
+    stall = bl.fingerprint("tinkerer", "stall", "WEDGED", "no child progressed")
+    child = bl.fingerprint("herd", "member", "HUNG", "child never exited")
+    rows = [{"fingerprint": stall, "run": "bb-1", "at": 100, "name": "stall",
+             "persona": "tinkerer", "outcome": "WEDGED", "severity": "critical"}]
+    rows += [{"fingerprint": child, "run": "bb-1", "at": 101 + i, "name": f"m{i}",
+              "persona": "herd", "outcome": "HUNG", "severity": "critical",
+              "post_wedge": True} for i in range(16)]
+    # the same fault seen cleanly, once: a cascade group and a fresh group of one
+    # fingerprint must not merge, or the fresh sighting inherits the cascade's rank
+    rows.append({"fingerprint": child, "run": "bb-2", "at": 200, "name": "m0",
+                 "persona": "herd", "outcome": "HUNG", "severity": "critical"})
+    bl.ledger_append(rows, path=led)
+
+    got = bl.ledger_rollup(led)
+    assert [(g["fingerprint"], g["count"], g["post_wedge"]) for g in got] == [
+        (stall, 1, False), (child, 1, False), (child, 16, True)
+    ], "a cascade group ranked at or above a fresh one"
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_rows_written_before_post_wedge_existed_rank_as_they_always_did(tmp_path):
+    """Every row already on the ledger lacks the key. bool(None) is False, so they must all
+    be fresh, group by fingerprint alone, and order by count exactly as before."""
+    led = tmp_path / "findings.jsonl"
+    fp = bl.fingerprint("forger", "c", "CRASHED", "boom")
+    other = bl.fingerprint("vandal", "d", "CRASHED", "boom")
+    bl.ledger_append(
+        [{"fingerprint": fp, "run": f"bb-{i}", "at": 10 + i, "name": "c"} for i in range(3)]
+        + [{"fingerprint": other, "run": "bb-9", "at": 99, "name": "d"}], path=led)
+
+    got = bl.ledger_rollup(led)
+    assert [(g["fingerprint"], g["count"]) for g in got] == [(fp, 3), (other, 1)]
+    assert all(g["post_wedge"] is False for g in got)
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_a_record_with_no_timestamp_does_not_take_the_rollup_down(tmp_path):
+    """A record written by hand — a fixture, or anything not built by busybody's field
+    whitelist — can arrive with no `at`. Comparing None with an int raised TypeError and
+    lost every group in the file, which is the whole history, to one incomplete row."""
+    led = tmp_path / "findings.jsonl"
+    bl.ledger_append([{"fingerprint": "ff", "run": "bb-1", "name": "c"},
+                      {"fingerprint": "ff", "run": "bb-2", "at": 55, "name": "c"},
+                      {"fingerprint": "gg", "run": "bb-3", "name": "d"}], path=led)
+
+    got = {g["fingerprint"]: g for g in bl.ledger_rollup(led)}
+    assert got["ff"]["count"] == 2 and got["ff"]["first_seen"] == 55
+    assert got["gg"]["first_seen"] is None, "an unknown date must stay unknown, not become 0"
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_history_counts_a_wedged_herd_as_one_finding(tmp_path):
+    """--history and --triage have to agree about how much a run found. Counting every
+    not-ok case as a finding made one view say seventeen and the other say one."""
+    runs = tmp_path / "runs"
+    d = runs / "bb-herd"
+    d.mkdir(parents=True)
+    recs = [{"kind": "started", "run": "bb-herd", "at": 1, "planned": ["a"]},
+            {"kind": "case", "run": "bb-herd", "at": 2, "name": "stall", "ok": False}]
+    recs += [{"kind": "case", "run": "bb-herd", "at": 3 + i, "name": f"m{i}",
+              "ok": False, "post_wedge": True} for i in range(16)]
+    recs.append({"kind": "finished", "run": "bb-herd", "at": 99})
+    (d / "journal.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+
+    got = bl.scan_runs(runs)[0]
+    assert got["cases"] == 17
+    assert got["findings"] == 1, "cascades were counted as findings of their own"
+    assert got["cascades"] == 16, "cascades must still be counted, just not as findings"
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
 def test_the_ledger_lives_outside_the_repository():
     """lotek keeps its ledger beside the checkout because a file inside the tree is caught
     by git stash, worktree switches and branch changes — losing history exactly when you
@@ -177,8 +253,8 @@ def test_severity_vocabulary_is_closed():
     value from severity_for and this fails."""
     bb = _load_busybody()
     for outcome, expect in (("CRASHED", "critical"), ("SILENT", "critical"),
-                            ("HUNG", "critical"), ("REFUSED", "warning"),
-                            ("CASE-ERROR", "note")):
+                            ("HUNG", "critical"), ("WEDGED", "critical"),
+                            ("REFUSED", "warning"), ("CASE-ERROR", "note")):
         sev = bb.severity_for({}, {"outcome": outcome}, ok=False)
         assert sev in bl.SEVERITIES, f"{outcome} produced {sev!r}, outside the vocabulary"
         assert sev == expect
@@ -323,6 +399,8 @@ def test_app_crashed_is_not_automatically_fatal_but_launcher_crashed_is():
     on any heavy package, which is the outcome those cases exist to produce."""
     bb = _load_busybody()
     assert "CRASHED" in bb.FATAL and "HUNG" in bb.FATAL and "SILENT" in bb.FATAL
+    # WEDGED joined FATAL with the herd persona; INV-CHAOS-04 is where that claim lives.
+    assert "WEDGED" in bb.FATAL
     assert "APP-CRASHED" not in bb.FATAL, (
         "an application declining an imposed resource limit is not a haru-pack defect"
     )

@@ -37,8 +37,10 @@ way to distinguish a test that would go red along the red-path from one that cou
 That is why the Red-path field is mandatory and why neutralize-then-observe-red is the
 expected workflow before marking an invariant `active`.
 
-`INV-LAUNCH-03` and `INV-SUPPLY-02` are deliberately `proposed`. The behavior is **not implemented**, or is only
-partly implemented and the entry says which part. They are written down so the gap is
+Every `proposed` entry — `grep -B4 'Status: proposed'` for today's list — is deliberately
+`proposed`. Usually the behavior is **not implemented**, or is only partly implemented and the
+entry says which part. `INV-STAGE-03` is the other shape: the code is there, and what is
+missing is a test that goes red when it is removed. Both are written down so the gap is
 legible, not so it looks covered.
 
 **Every `active` entry below was promoted by walking its Red-path** — neutralize the guard,
@@ -47,6 +49,11 @@ subsequently proved a claiming test *vacuous* (green with the guard removed), th
 not promoted until the test was fixed; two were. Two further entries had their **Statement
 narrowed** because verification showed the original wording claimed more than the code does.
 Those narrowings are recorded in the entries themselves rather than quietly applied.
+
+`INV-CHAOS-04` through `INV-CHAOS-07` were promoted the same way on 2026-09-11: every
+Red-path branch in them was walked. Three of them carry more than one claiming test, because a
+single test stayed GREEN along part of its own entry's Red-path — the vacuity the walk exists
+to find — and each of those entries names which test carries which half.
 
 ---
 
@@ -219,6 +226,140 @@ per case. App-level personas are the only ones for which `--fixtures top25` buys
 and even then only 2 of 13 diverged — the bundled interpreter absorbs most environmental
 difference.
 Territory: tools/busybody.py, tests/test_busybody_ledger.py
+
+### INV-CHAOS-04
+Status: active
+Statement: `WEDGED` is declared only by an observer outside every process being judged — never
+derived from a child's exit status or from one process's own timeout — and once declared it is
+a finding whatever the case said it expected.
+Actors: not an attacker — whoever reads the report of a sixteen-way herd case, and the next
+person to add a case that starts more than one process at a time.
+Assets: the one failure class no child can report. "Everybody alive, nobody burning CPU,
+nothing being written" is invisible from inside each of the processes it is happening to, and
+if a single process's timeout could say `WEDGED` then every slow case on a loaded box would say
+it too and the class would mean nothing. A wedge outside `FATAL` is worse: it is a stall a case
+can declare acceptable, and a harness that exits 0 after watching nothing happen for forty
+seconds.
+Red-path: Two, each with a claiming test. (1) Return `"WEDGED"` from `classify()` when
+`timed_out` — one process's own wait then declares a system-wide stall, and the classify grid
+goes red. (2) Remove `"WEDGED"` from `FATAL` — the case whose `expect` set names WEDGED passes,
+the run exits 0, `severity_for` grades the stall `warning`, and the report's always-a-finding
+legend stops naming it. Walked 2026-09-11, both red then green again — and neither test moves
+along the other's branch (the classify grid is green with WEDGED out of `FATAL`; the end-to-end
+case is green when `classify` hands back WEDGED), which is why the entry needs both.
+Source: lotek's BusyBody sent back what to steal; triaged in docs/BRAINSTORM.md section 1b on
+2026-09-11. The wedge is the part this harness could not already see — twelve personas watched
+one process at a time, and a stall is a property of several at once.
+Note: HUNG and WEDGED are not the same claim, and the split is the whole entry. HUNG is one
+process failing to exit inside its timeout, which is all a single wait can observe. WEDGED is no
+process progressing, which needs several watched together: `StallWatch` AND-s three signals
+(every child still alive, no child's CPU time advanced, the staged byte total did not grow) and
+requires them continuously, because not one of the three is trustworthy alone.
+Note: A declaration is journalled as `kind="wedge"` and deliberately NOT through `Ctx.perturb`.
+A perturb record means a fault the harness INJECTED; filing an observation there would make the
+seeded-kill record — the one thing a seed exists to make reproducible — untrustworthy.
+INV-CHAOS-06 is that record.
+Note: `WEDGE_QUIET_S = 40` is provisional and `tools/busybody.py` says so beside the number,
+with the proxy measurement it was derived from and a TODO naming the replacement. The threshold
+is not what this entry claims. Who is allowed to declare the outcome is.
+Territory: tools/busybody.py, tests/test_busybody_faults.py, tests/test_busybody_ledger.py
+
+### INV-CHAOS-05
+Status: active
+Statement: A result that resolves at or after a declared wedge is recorded as a cascade of that
+wedge, and no cascade group can outrank a fresh finding in the triage roll-up, however many
+results fell into it.
+Actors: whoever reads `--triage` to decide what to fix first — days later, on a run they did
+not start, with nothing but the ledger.
+Assets: the ranking, which is the only thing in the ledger that says what to do next. A wedged
+herd is one stall and then N children failing because of it; those N share a fingerprint, so
+ordering on count alone put a sixteen-count group above the single-count record of the fault
+that caused it. One bug presented as the top sixteen problems, with its cause ranked
+seventeenth — an arithmetic error wearing the clothes of a priority.
+Red-path: Restore the count-only ordering key in `ledger_rollup` —
+`sorted(out, key=lambda g: (-g["count"], g["fingerprint"]))`. The claiming test lays down one
+stall plus N cascades and parametrises N over 2, 16 and 64: it goes red at every N, because the
+defect is arithmetic and is already wrong at two. Walked 2026-09-11. The second claiming test,
+over `--triage`'s own output, stays GREEN under it — `print_triage` splits on the `post_wedge`
+field rather than trusting the sort order — so the roll-up test is the one that carries this
+claim, and the triage test carries the counting ("1 finding, plus 16 cascades").
+Source: lotek's BusyBody sent back what to steal; triaged in docs/BRAINSTORM.md section 1b on
+2026-09-11. Then measured here: `--history` and `--triage` disagreed sixteen-to-one about how
+much one run had found, which is what exposed the ranking rather than any reasoning about it.
+Note: `post_wedge` is part of the GROUPING key and deliberately not of the fingerprint basis.
+Every fingerprint already on the ledger was computed without it and has to keep matching, and
+putting it in the basis would not have helped anyway — N cascades would still form one N-count
+group under a different name. Rows written before the field existed carry no `post_wedge`, and
+`bool(None)` is False, so they group and rank exactly as they always did.
+Note: A cascade is de-emphasised, never hidden. It keeps `ok=False`, it reaches the ledger, and
+it prints under its own heading with the numbering running on — because the shape of a cascade
+is the primary evidence for the wedge that caused it. Suppressing it is triage's job, not the
+ledger's.
+Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_faults.py,
+tests/test_busybody_ledger.py
+
+### INV-CHAOS-06
+Status: active
+Statement: A perturbation whose moment or victim was drawn from the run seed is journalled
+BEFORE it is performed, so its record survives the fault it announces.
+Actors: whoever tries to reproduce a finding from the journal, holding the seed and nothing
+else. Also the next person to add a seeded case.
+Assets: the seed's only purpose. A fault landed at a moment drawn from a seed is worth having
+because it can be landed again deliberately, and that requires the moment and the victim to be
+on disk — recorded afterwards, they are lost to exactly the faults worth reproducing, and the
+harness's own timing jitter then reads as a product defect.
+Red-path: Two, each with a claiming test. (1) Move the `Ctx.perturb(...)` call in
+`sixteen_cold_starts_one_killed_mid_stage` below `target.send_signal(signal.SIGKILL)` — the
+source-order test goes red. (2) Record the fault on the case record instead of before the
+action (drop the write from `Ctx.perturb`, fold its fields into the record `run_one` builds) —
+a case that SIGKILLs the harness then leaves a journal with no trace of what it did, and the
+survival test goes red. Walked 2026-09-11, both red then green again.
+Source: lotek's BusyBody sent back what to steal; triaged in docs/BRAINSTORM.md section 1b on
+2026-09-11, where the `--seed` and "faults that land at a seeded moment" item is taken.
+Note: The two claiming tests are deliberately different in kind, because each one stays GREEN
+along the other's Red-path — measured, both ways, on 2026-09-11. Under (1) the journal's ORDER
+is unchanged, since the driver writes the case record after the case returns either way: a test
+that only asserts "the perturb record precedes the result record" passes while the fault is now
+recorded after it landed, so the source-order test is the one that catches it. Under (2) the two
+statements are still in the right order and the source-shape check passes, while a fault that
+stops the recorder leaves no record at all — the journal reads `['started', 'case']`. Either
+test alone would therefore be satisfiable by a claim; the source-shape half is also blind to a
+fault performed inside a helper the case calls, and says so.
+Note: `Journal.write` flushes and fsyncs per record for this reason, which is the same property
+INV-CHAOS-01 needs for an interrupted run.
+Territory: tools/busybody.py, tools/busybody_ledger.py, tests/test_busybody_faults.py
+
+### INV-CHAOS-07
+Status: active
+Statement: The harness can express a build-time fault: a `kind="build"` case is invoked with the
+haru-pack CLI and a fresh, empty work directory to write a throwaway project into — never with
+a prebuilt binary — and it runs once per run rather than once per fixture.
+Actors: whoever adds a case about a directive the BUILD ignored rather than about a binary
+misbehaving on a target.
+Assets: a whole class of defect the harness could not previously state. Every case before this
+one attacked an artifact that had already been built, so "the build accepted a contradictory
+pair of flags and shipped one of them silently" was unsayable. The persona that this kind
+exists for found three such defects on its first run.
+Red-path: Run the build-kind cases inside the `for fname, exe in fixtures` loop. The claiming
+test drives `main()` with two fixtures, one exe case and one build case, and the build case is
+then invoked twice — twenty-five times under `--fixtures top25`, for twenty-five identical
+answers. Or drop the kind partition entirely and it is invoked with a packed binary where it
+expects the builder. Walked 2026-09-11.
+Source: lotek's BusyBody sent back what to steal; triaged in docs/BRAINSTORM.md section 1b on
+2026-09-11 — the `settings-tinkerer` item, which is where "but it needs a new case kind" comes
+from.
+Note: Dispatch is on the registry's `kind` field and never on the function's arity. A wrong
+signature raises `TypeError`, which the driver's bare `except` swallows into a `CASE-ERROR`
+naming nothing; a case kind decided by arity would fail that way on every run and look like a
+harness bug.
+Note: Once per run because a build's answer does not vary by fixture. The evidence is the sweep
+in the other direction: 575 launcher-case runs across 25 packages on 2026-09-10 produced 23
+distinct fingerprints, one per case.
+Note: What a build-kind case can assert stops at the artifact. The effect of a directive is
+read out of `manifest.toml` at the payload zip root — the same bytes the launcher parses at
+stage time — not by running the binary, because a thin one fetches uv and a Python on first
+run. "The launcher then obeys the manifest" is the twelve launcher personas' job.
+Territory: tools/busybody.py, tests/test_busybody_faults.py
 
 ---
 
@@ -1037,6 +1178,44 @@ Note: An adversarial verifier proved the original suite vacuous at the call site
 directly. `tests/test_stage_callsites.py` exists for that reason and is honest about being a
 source-shape check rather than an end-to-end one.
 Territory: src/haru_pack/launcher/stage.nim
+
+### INV-STAGE-03
+Status: proposed
+Statement: N first runs of one binary that race to stage the same payload into one cache key
+all end up executing a complete, verified stage, and a process that loses the race never
+observes a partial tree.
+Actors: not an attacker — a CI job that starts one binary per worker, a login script on a
+shared box, a fleet rollout. Anything that fans out a first run, which is the only moment this
+is contended.
+Assets: the first-run promise under contention. Every other STAGE claim is about one process
+meeting a tree; this is about N of them building the same tree at once, and the failure modes
+are the ones a single process cannot produce — a half-extracted tree becoming reachable, or a
+process waiting forever on a claim whose owner is dead.
+Red-path: Neutralise the atomicity in `stage.nim` — extract in place under `final` instead of
+building `<key>.tmp-<pid>` and moving it in one `moveDir` — rebuild the launcher, and run
+`tools/busybody.py --persona herd --herd-n 16` against a thick fixture. **Deliberately not
+walked in this change**: it needs a launcher rebuild, and an invariant promoted without walking
+its red path is the exact defect this file exists because of.
+Source: The claim already existed as prose — it lives today only in the `twin` case's remedy
+("every process builds in its own `.tmp-<pid>` and races an atomic move") and in the three
+`herd` cases added on 2026-09-11. Neither INV-STAGE-01's nor INV-STAGE-02's Statement mentions
+atomicity or concurrency: INV-STAGE-01 governs what a stage must satisfy BEFORE it is executed
+and INV-STAGE-02 governs archive entry paths, so the herd cases cite INV-STAGE-01 for the half
+it legitimately covers (a tree with no `.ready` is refused, not run) and say in their remedy
+that the atomicity half is unwritten. This entry is that gap, labelled.
+Note: `proposed` here means the CLAIM is unclaimed, not that the code is absent — the atomic
+move is in `stageZip` today. What is missing is a test that goes red when it is removed, and
+the only honest one costs a Nim rebuild plus a sixteen-way herd run against a thick fixture.
+Promoting it on the strength of the herd cases passing would be linkage without efficacy:
+`--persona herd` is green on a launcher that never had the move, right up until the race lands.
+Note: The no-waiting half is a separate promise from the atomicity half, and worth writing
+separately when this is promoted. Today's staging takes no lock, so a dead owner's
+`<key>.tmp-<pid>` is ignored by construction; the moment a lock or a wait-for-the-winner
+appears, waiting forever on a dead claim arrives with it, and that is what
+`sixteen_starts_against_an_orphaned_stage` is standing guard over.
+Territory: not yet claimed. The behaviour lives in src/haru_pack/launcher/stage.nim
+(`stageZip`'s `<key>.tmp-<pid>` plus the atomic `moveDir`); the harness that probes it is the
+`herd` persona in tools/busybody.py.
 
 ---
 

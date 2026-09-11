@@ -56,12 +56,18 @@ classes.
 
 ## 1b. Second round from lotek's BusyBody — what transfers, what doesn't (2026-09-11)
 
+**Status: built, 2026-09-11.** All three "take" items landed, one of them re-aimed; the
+decline stands, and its transferable half was taken. The triage below is kept rather than
+deleted because it is *why* the design has the shape it does — the code answers "what", this
+answers "why that and not the obvious thing". [`BUSYBODY.md`](BUSYBODY.md) is the
+description of record for what actually runs.
+
 lotek sent back a list of what to steal next, having seen us take its journal / heartbeat /
 ledger / severity machinery. Its headline: our cases run standalone, deterministic, one-each,
 so the failure mode we structurally cannot reach is a **whole-system stall that no single case
 observes because it is emergent from concurrency**. Triaged four ways, cheapest first.
 
-### Take: a `--seed`, and faults that land at a seeded moment
+### Taken, first: a `--seed`, and faults that land at a seeded moment
 Every fault we inject lands at a **fixed** point — `killed_mid_stage` kills mid-stage,
 `impatient` signals *after* staging. Those are one point each on an axis that is continuous,
 and the axis is where the interesting bugs live: a SIGKILL 40 ms after the `.tmp-` directory
@@ -74,13 +80,29 @@ produces one case name with two outcomes and the journal cannot say which moment
 and our own jitter starts masquerading as a haru-pack defect, which is the exact confusion
 the `CASE-ERROR` split exists to prevent.
 
+**Landed as:** `--seed N` (default 0), and a module-level `Ctx` giving every case
+`rng(salt)`, `perturb(action, **fields)` and `beat()`. Module-level rather than a fourth
+parameter because 37 existing cases took `(exe, work)` and widening all of them to reach the
+journal is churn for no signal. Two details that are the difference between a seed working
+and appearing to work: the stream is keyed on `(seed, case, fixture, salt)` through `hashlib`
+and not the `hash()` builtin, which is salted per process; and the seed is deliberately
+**absent from the fingerprint basis**, so seeded variants of one fault group together at
+`--triage` rather than arriving as a fresh bug every run. `perturb` flushes and fsyncs before
+the case acts, which is the ordering rule above with nowhere to hide.
+
+Picked up on the way, because the same work needed it: `--timeout` was parsed and never read
+— `run_exe` hardcoded 120 while the help advertised 180 — and now sets the module default a
+case inherits when it does not name its own wait. Only one case so far draws from the seed
+(`sixteen_cold_starts_one_killed_mid_stage`); the facility is the prerequisite, not the
+payoff.
+
 lotek's framing of this ("a persona that executes its script perfectly was *too competent* —
 the one thing no real operator is") applies to us only halfway. Our runtime operator is a
 shell invoking `./myapp`; the perfect executor really is the realistic case there. The human
 fumbling that matters for haru-pack happens at **build** time — wrong flag, stale lockfile,
 typo'd directive — which is the persona below.
 
-### Take, and it's the best of the four: `settings-tinkerer` — but it needs a new case kind
+### Taken, best of the four: `settings-tinkerer` — and it did need a new case kind
 The eager admin who lives in Settings flipping toggles until something desyncs. We grew the
 surface for exactly this on 2026-09-10 (`[tool.haru-pack]` directives, `INV-BUILD-07`) and
 nobody attacks it. Better, the oracle is already written down — INV-BUILD-07's own Assets
@@ -101,11 +123,34 @@ edited after the lockfile · case and whitespace variants · a directive naming 
 the project. INV-BUILD-07 is `active` with a red path, but its tests are cooperative pytest
 ones; nothing has been hostile to it.
 
+**Landed as:** persona `tinkerer` — one lowercase word, because the summary and report
+columns are `{persona:14}` and "settings-tinkerer" is 17 — plus the `kind="build"` case kind
+it was blocked on. A `build` case receives `(haru, work)`, writes its own throwaway project
+into `work`, runs `haru-pack build` itself, and is dispatched on the registry field and never
+on arity: a wrong signature raises `TypeError`, which the driver's bare `except` swallows
+into a `CASE-ERROR` that names nothing. It runs **once per run** rather than once per
+fixture, for the reason §1's sweep established — a build-time answer does not vary by
+payload, and re-confirming it 25 times is what cost 35 minutes instead of 100 seconds.
+
+Of the cases listed above, five landed close to as written (the underscored table, the
+one-character key typo, the two homes disagreeing, the CLI flag overriding a directive, the
+entrypoint outside the tree) and two did not: *edited after the lockfile*, and *case and
+whitespace variants*. Two arrived that this triage had not thought of — `--thin --thick`
+together, and a `[[bundle]]` list present in both homes. Seven in total.
+
+The three-way discriminator survived contact. What the persona could not use is the
+artifact's *behaviour*: a thin binary fetches uv and a Python on first run, so executing one
+needs the network and measures the launcher, which twelve personas already do. The oracle is
+`manifest.toml` at the payload zip root, read back out of the artifact without running it —
+so `RAN` here means "exit 0 **and** the shipped artifact records the directive as honoured",
+and the gap after that is other personas' work. Three of the seven are written expecting a
+refusal today's haru-pack does not give; `BUSYBODY.md` says which, and why each is a product
+finding rather than a miscalibrated case.
 Because we ship refusals that hand over the fix, the discriminator here is three-way, not two:
 refuse *with the fix* (correct), refuse uselessly (a docs defect), ignore silently (the
 finding). Only the third is a `SILENT`.
 
-### Take, re-aimed: `herd` + a watchdog — the wedge class, which we genuinely cannot see
+### Taken, re-aimed: `herd` + a watchdog — the wedge class, which we genuinely could not see
 lotek composes N personas at chosen ratios against one shared board. We have no board, no
 queue and no worker pool — a launcher stages and execs. But we do have exactly one shared
 mutable resource under a lock: **the stage cache directory, keyed by digest.** `twin` already
@@ -130,7 +175,34 @@ Cost is real: a case kind that owns N children plus a watchdog process, a `WEDGE
 taught — this discriminates on **haru-pack's own concurrent state, not on the payload**, so it
 runs against the synthetic fixture in seconds and never needs the 35-minute sweep.
 
-### Decline: WebUI-first
+**Landed as:** persona `herd`, `HERD_N = 16` from `--herd-n`, a `WEDGED` outcome inside
+`FATAL`, and `post_wedge` + a shared `wedge_id` carried through the journal, `results.json`
+and the ledger. Re-aimed in three places, each of them a place this triage guessed wrong:
+
+- **A watchdog thread, not a watchdog process.** The harness parent is not computing while a
+  herd runs — it sits in a poll loop here and in `communicate()` everywhere else, both of
+  which release the GIL, so a 1 s sampler is scheduled on time. It is already outside every
+  child, which is the only property that matters; a subprocess would read the same `/proc`
+  and `lstat()` and then need IPC to hand the verdict back. Isolation from a *harness* crash
+  is not the failure this looks for.
+- **Three cases, not 3×N.** `--triage` ranks groups by count, so registering one case per
+  child would rank a single bug N times — the same arithmetic this section warns about, one
+  layer up.
+- **The threshold is provisional and the source says so.** No thick fixture existed to
+  measure a healthy 16-way cold start against, so `WEDGE_QUIET_S = 40.0` sits an order of
+  magnitude above a *proxy* whose longest quiet stretch was 0.0 s over two runs, with a TODO
+  naming the measurement that replaces it. Recorded as a limit of the method, not a rounding
+  choice: a fixture that only slept produced 6 s of continuous quiet on a healthy 4-way herd,
+  so an app that deliberately idles is indistinguishable from a stall at any threshold.
+
+The reciprocal warning at the bottom of this section was the useful half. `_attribute` checks
+**its own lateness first**, before anything else, and says `unknown` if the sampler missed its
+own ticks; `launcher` needs positive launcher-side evidence, which is exactly one thing — a
+`<key>.tmp-<pid>` directory whose bytes are static and whose owner pid is gone. And
+`ledger_rollup` groups on `(fingerprint, cascade)` with cascades sorted last, `--history`
+counts them in a separate column, and a cascade is still not marked `ok` — de-emphasised at
+triage, never hidden from the exit code.
+### Declined, and still declined: WebUI-first
 There is no web UI. haru-pack is a CLI and a Nim launcher, and building a UI in order to have
 one to drive would be the tail wagging the dog. The transferable half — *drive the surface a
 human actually touches, not the API underneath* — maps to the rich terminal output that landed
@@ -138,10 +210,23 @@ under `INV-UI-01`, and the silent-success failure there is a progress line claim
 verified when it was not, or the wrapper eating a message when stdout is not a TTY. That is one
 `mute`-adjacent case comparing what a TTY sees against what a pipe sees. Not a new harness.
 
-### Order, if this gets built
+**Landed as exactly that, and nothing more:** `the_message_survives_a_tty_and_a_pipe`, a
+third `mute` case, citing `INV-UI-01`. One binary, one cache, two runs — stdout on a real
+`pty.openpty` so `isatty` is genuinely true, then stdout on a pipe — and the marker has to
+survive both. The half that needed care is which difference counts: escapes are stripped from
+**both** sides before classifying, because a marker wearing a colour code would otherwise
+read as `SILENT` and the case would file ANSI as a launcher defect, while comparing a
+stripped tty against an unstripped pipe would call every run a divergence. Formatting may
+differ (a tty gets width-dependent wrapping); text may not. Still no web UI, and still no
+reason for one.
+### Order — and this is the order it was built in
 `--seed` and journal-before-act (small, unblocks the rest) → the build-time case kind and
 `settings-tinkerer` (best value, invariant already written) → `herd` + watchdog + `post_wedge`
 (most expensive, only class we cannot currently observe at all) → TTY-vs-pipe (small).
+
+Built in that order with one swap: the ledger and `--triage` cascade ranking went in ahead of
+the `herd` cases that produce cascades, so the thing that *files* a wedge never existed before
+the thing that *ranks* one. Personas went from 12 to 14 and cases from 37 to 48.
 
 And the reciprocal, if anyone is routing this back: a composed run with a watchdog needs to
 attribute a stall to the harness or to the product, which is what our `blame` field

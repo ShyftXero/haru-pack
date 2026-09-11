@@ -172,10 +172,17 @@ def scan_runs(out_dir: Path) -> list:
         hb = heartbeat_state(d)
         state = "complete" if finished else ("live" if hb == "live" else "INTERRUPTED")
         started = next((r for r in recs if r.get("kind") == "started"), {})
+        # `findings` deliberately excludes cascades. A wedge that takes sixteen children
+        # with it writes sixteen not-ok case records, and counting them all here made
+        # --history disagree with the ledger's own rollup about how much a run found: one
+        # view saying sixteen problems, the other one. Cascades stay visible, counted
+        # separately, because their shape is the evidence for the wedge.
+        failed = [r for r in cases if not r.get("ok")]
         runs.append({
             "run": d.name, "dir": d, "state": state,
             "cases": len(cases),
-            "findings": len([r for r in cases if not r.get("ok")]),
+            "findings": len([r for r in failed if not r.get("post_wedge")]),
+            "cascades": len([r for r in failed if r.get("post_wedge")]),
             "planned": started.get("planned"),
             "at": started.get("at"),
         })
@@ -210,33 +217,63 @@ def ledger_append(records: list, path: Path | None = None) -> Path:
 
 
 def ledger_rollup(path: Path | None = None) -> list:
-    """One row per fingerprint: count, first_seen, last_seen, which runs, which cases."""
+    """One row per (fingerprint, cascade?): count, first_seen, last_seen, runs, cases.
+
+    ## Why the cascade flag is part of the grouping key and NOT of the fingerprint
+
+    Ordering on count alone ranked one bug as many. A wedged herd is one stall and then
+    sixteen children failing because of it; those sixteen share a fingerprint, so they
+    formed a sixteen-count group that sorted straight to the top of `--triage`, above the
+    single-count record of the fault that caused it. That is an arithmetic error wearing
+    the clothes of a priority.
+
+    So `post_wedge` joins the grouping key — one fault seen both cleanly and as a cascade
+    is two groups, not an average of the two — and cascade groups sort BELOW every fresh
+    group whatever their count. It stays out of the fingerprint basis for two reasons:
+    every fingerprint already on disk was computed without it and has to keep matching,
+    and putting it there would not have helped anyway, since fifteen cascades would still
+    be one fifteen-count group under a different name. Rows written before the field
+    existed carry no `post_wedge`; `bool(None)` is False, so they group and rank today
+    exactly as they did.
+    """
     rows = read_jsonl(path or ledger_path())
     groups: dict = {}
     for r in rows:
         fp = r.get("fingerprint")
         if not fp:
             continue
-        g = groups.setdefault(fp, {
+        cascade = bool(r.get("post_wedge"))
+        g = groups.setdefault((fp, cascade), {
             "fingerprint": fp, "count": 0, "runs": set(), "cases": set(),
             "personas": set(), "outcome": r.get("outcome"), "severity": r.get("severity"),
             "inv": r.get("inv", ""), "remedy": r.get("remedy", ""),
             "first_seen": r.get("at"), "last_seen": r.get("at"),
-            "sample": r.get("message", ""),
+            "sample": r.get("message", ""), "post_wedge": cascade,
         })
         g["count"] += 1
         g["runs"].add(r.get("run"))
         g["cases"].add(r.get("name"))
         g["personas"].add(r.get("persona"))
-        g["first_seen"] = min(g["first_seen"] or r.get("at"), r.get("at"))
-        g["last_seen"] = max(g["last_seen"] or r.get("at"), r.get("at"))
+        # A record written by hand — a test fixture, or anything that did not come through
+        # busybody's field whitelist — can arrive with no `at`. The old min()/max() pair
+        # then compared None with an int and raised TypeError, losing the entire rollup to
+        # one incomplete row. Skip the timestamp instead: the count and the grouping still
+        # hold, and a missing first_seen prints as unknown rather than as nothing at all.
+        at = r.get("at")
+        if at is not None:
+            fs, ls = g["first_seen"], g["last_seen"]
+            g["first_seen"] = at if fs is None else min(fs, at)
+            g["last_seen"] = at if ls is None else max(ls, at)
     out = []
     for g in groups.values():
         g["runs"] = sorted(x for x in g["runs"] if x)
         g["cases"] = sorted(x for x in g["cases"] if x)
         g["personas"] = sorted(x for x in g["personas"] if x)
         out.append(g)
-    return sorted(out, key=lambda g: (-g["count"], g["fingerprint"]))
+    # Cascades last, then biggest first, then a stable tiebreak. The leading term is the
+    # whole point: no cascade group outranks a fresh finding, however many children fell.
+    return sorted(out, key=lambda g: (bool(g.get("post_wedge")), -g["count"],
+                                      g["fingerprint"]))
 
 
 # ---------------------------------------------------------------- reaping
