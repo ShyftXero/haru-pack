@@ -2002,9 +2002,14 @@ Note: The refusal resolves SYMLINKS, not just `.`/`..`. A lexical-only check was
 bypassable 2026-09-11: `refuseUnsafeRoot("/tmp/x")` where `/tmp/x -> $HOME` returned ACCEPTED,
 so a symlinked `BASE_PATH` staged (and, with `--reap`, reaped) a subtree at the forbidden real
 location — blast radius bounded to the own subtree, but the guard's intent defeated and a
-TOCTOU window opened. `physicalPrefix` now resolves the longest existing ancestor via
-`expandFilename` before the root/drive/home checks, and `reapDetached` refuses a target that has
-since become a symlink (defence-in-depth against a swap between create and the detached delete).
+TOCTOU window opened. On POSIX, `physicalPrefix` resolves the longest existing ancestor via `expandFilename`
+(realpath) before the root/drive/home checks. On WINDOWS, `getFullPathNameW` (what
+`expandFilename` uses there) does NOT follow reparse points and untested
+`GetFinalPathNameByHandleW` FFI has no place in a delete-primitive guard, so Windows FAILS
+CLOSED: it refuses a staging root whose existing prefix passes through any reparse point
+(symlink OR junction; both set FILE_ATTRIBUTE_REPARSE_POINT, which `symlinkExists` tests).
+`reapDetached` refuses a target that has since become a symlink/reparse point on both platforms
+(defence-in-depth against a swap between create and the detached delete).
 Red-path: delete the `physicalPrefix` block in `refuseUnsafeRoot` and
 `test_symlinked_env_base_path_to_a_refused_root_is_refused` goes red (the launcher stages under
 `$HOME` / `/`). See CHANGELOG.md 2026-09-11.

@@ -73,7 +73,7 @@ proc stripTrailingSep(p: string): string =
   while result.len > 1 and (result[^1] == '/' or result[^1] == '\\'):
     result.setLen(result.len - 1)
 
-proc physicalPrefix(path: string): string =
+proc physicalPrefix(path: string): string {.used.} =
   ## Resolve symlinks on the longest EXISTING ancestor of `path`, then re-attach the
   ## not-yet-created tail lexically. A purely lexical root check is fooled by a symlink: a
   ## `BASE_PATH=/tmp/x` where `/tmp/x -> $HOME` (or `-> /`) passes every string comparison in
@@ -124,22 +124,35 @@ proc refuseUnsafeRoot*(root: string): string =
   let home = stripTrailingSep(getHomeDir())
   if p == home or pn == normalizedPath(home):
     return "staging root is the home-directory root: " & root
-  # Symlink hardening: the lexical checks above are blind to symlinks. Resolve the existing
-  # part of the path to its PHYSICAL location and re-run the same refusals, so a benign-looking
-  # `BASE_PATH` that resolves through a symlink to '/', a drive root, or $HOME is refused too
-  # (proven bypassable before this: /tmp/x -> $HOME was ACCEPTED). INV-BASE-01.
-  let phys = stripTrailingSep(physicalPrefix(p))
-  if phys != p:
-    let pp = normalizedPath(phys)
-    if phys == "/" or pp == "/":
-      return "staging root resolves through a symlink to the filesystem root '/': " & root
-    when defined(windows):
-      if phys.len >= 2 and phys.len <= 3 and phys[1] == ':':
-        return "staging root resolves to a drive root: " & root
-      if pp.len >= 2 and pp.len <= 3 and pp[1] == ':':
-        return "staging root resolves to a drive root: " & root
-    if phys == home or pp == normalizedPath(home):
-      return "staging root resolves through a symlink to the home-directory root: " & root
+  # Symlink / junction hardening. The lexical checks above are blind to reparse points, and
+  # the resolution primitive differs by OS, so the two platforms are handled differently — but
+  # BOTH refuse the attack (a `BASE_PATH` that reaches a forbidden root through a link). Proven
+  # bypassable before this on POSIX (2026-09-11): `/tmp/x -> $HOME` returned ACCEPTED.
+  when defined(windows):
+    # `getFullPathNameW` — what `expandFilename` uses on Windows — does NOT follow symlinks or
+    # junctions, and shipping untested `GetFinalPathNameByHandleW` FFI inside a delete-primitive
+    # guard is the wrong risk. So Windows FAILS CLOSED: refuse a staging root whose existing
+    # prefix passes through ANY reparse point (symlink OR junction; both set
+    # FILE_ATTRIBUTE_REPARSE_POINT, which `symlinkExists` tests). A packager who needs that
+    # location points `BASE_PATH` at a non-reparse path. Compile + review only on this host.
+    var probe = p
+    while true:
+      if symlinkExists(probe):
+        return "staging root passes through a symlink/junction (refused on Windows): " & root
+      let parent = stripTrailingSep(parentDir(probe))
+      if parent.len == 0 or parent == probe: break
+      probe = parent
+  else:
+    # POSIX: `realpath` (via `expandFilename`) follows symlinks, so resolve the existing prefix
+    # to its PHYSICAL location and re-run the refusals. A benign symlink is allowed; one that
+    # resolves to '/' or the home root is refused.
+    let phys = stripTrailingSep(physicalPrefix(p))
+    if phys != p:
+      let pp = normalizedPath(phys)
+      if phys == "/" or pp == "/":
+        return "staging root resolves through a symlink to the filesystem root '/': " & root
+      if phys == home or pp == normalizedPath(home):
+        return "staging root resolves through a symlink to the home-directory root: " & root
   return ""
 
 proc isDirWritable(dir: string): bool {.used.} =   # {.used.}: consumed only on the Linux path
