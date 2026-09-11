@@ -176,7 +176,12 @@ def scan_runs(out_dir: Path) -> list:
         runs.append({
             "run": d.name, "dir": d, "state": state,
             "cases": len(cases),
-            "findings": len([r for r in cases if not r.get("ok")]),
+            # Counted the same way --triage groups them, or the two views disagree
+            # sixteen-to-one about one stall and neither number can be trusted.
+            "findings": len([r for r in cases
+                             if not r.get("ok") and not r.get("post_stall")]),
+            "cascades": len([r for r in cases
+                             if not r.get("ok") and r.get("post_stall")]),
             "planned": started.get("planned"),
             "at": started.get("at"),
         })
@@ -249,33 +254,62 @@ def ledger_append(records: list, path: Path | None = None) -> Path:
 
 
 def ledger_rollup(path: Path | None = None) -> list:
-    """One row per fingerprint: count, first_seen, last_seen, which runs, which cases."""
+    """One row per (fingerprint, cascade?): count, first_seen, last_seen, runs, cases.
+
+    WHY THE CASCADE FLAG IS PART OF THE GROUPING KEY AND NOT OF THE FINGERPRINT
+
+    When the herd persona declares a stall, every child that resolves afterwards fails too,
+    and it fails for the stall rather than for itself. Sixteen of those share a persona, a
+    case and an outcome, so they land in one group — and this function used to rank groups
+    by count alone, which put that sixteen-count group above a genuine one-off finding.
+    One bug, ranked sixteen times, at the top of --triage.
+
+    So `post_stall` joins the grouping key (a fault seen both cleanly and as a cascade must
+    not merge, or the group's remedy and sample come from whichever row was read first) and
+    the ordering key sinks every cascade group below every fresh one, whatever the counts.
+
+    It stays OUT of the fingerprint basis for two reasons. A cascade of a real fault would
+    fingerprint differently from the same fault seen cleanly, so the history of that fault
+    would split in two; and the basis is written into every row already on disk, so
+    changing it would orphan every fingerprint ever recorded. Rows written before this
+    field existed have no `post_stall` key at all — bool(None) is False, so they group and
+    rank exactly as they did before.
+    """
     rows = read_jsonl(path or ledger_path())
     groups: dict = {}
     for r in rows:
         fp = r.get("fingerprint")
         if not fp:
             continue
-        g = groups.setdefault(fp, {
+        cascade = bool(r.get("post_stall"))
+        g = groups.setdefault((fp, cascade), {
             "fingerprint": fp, "count": 0, "runs": set(), "cases": set(),
             "personas": set(), "outcome": r.get("outcome"), "severity": r.get("severity"),
             "inv": r.get("inv", ""), "remedy": r.get("remedy", ""),
             "first_seen": r.get("at"), "last_seen": r.get("at"),
-            "sample": r.get("message", ""),
+            "sample": r.get("message", ""), "post_stall": cascade,
         })
         g["count"] += 1
         g["runs"].add(r.get("run"))
         g["cases"].add(r.get("name"))
         g["personas"].add(r.get("persona"))
-        g["first_seen"] = min(g["first_seen"] or r.get("at"), r.get("at"))
-        g["last_seen"] = max(g["last_seen"] or r.get("at"), r.get("at"))
+        # A row written by hand rather than through the driver's whitelist can have no
+        # `at` at all, and min(None, None) raises instead of degrading. Skip the unknowns
+        # rather than let one malformed row take out the whole roll-up.
+        seen = [x for x in (g["first_seen"], g["last_seen"], r.get("at")) if x is not None]
+        if seen:
+            g["first_seen"] = min(seen)
+            g["last_seen"] = max(seen)
     out = []
     for g in groups.values():
         g["runs"] = sorted(x for x in g["runs"] if x)
         g["cases"] = sorted(x for x in g["cases"] if x)
         g["personas"] = sorted(x for x in g["personas"] if x)
         out.append(g)
-    return sorted(out, key=lambda g: (-g["count"], g["fingerprint"]))
+    # Cascades last, whatever their count: that ordering IS the claim. A stall that took
+    # sixteen children with it must not outrank the fault that caused it.
+    return sorted(out, key=lambda g: (bool(g.get("post_stall")), -g["count"],
+                                      g["fingerprint"]))
 
 
 # ---------------------------------------------------------------- reaping
