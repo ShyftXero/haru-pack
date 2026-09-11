@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:      # so a fix to CI itself can be verified without a dummy commit
   workflow_call:          # so publish.yml can require this before releasing
 
 permissions:
