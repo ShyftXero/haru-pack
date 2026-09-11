@@ -4,6 +4,12 @@
 #   ./scripts/cut-release.sh 0.2.0            # verify, stamp, tag, and offer to push
 #   ./scripts/cut-release.sh 0.2.0 --dry-run  # do everything except write anything
 #   ./scripts/cut-release.sh --check          # just run the release gate, tag nothing
+#   ./scripts/cut-release.sh 0.2.0 --no-self-build   # skip building the release binaries
+#
+# The gate packs haru-pack WITH haru-pack for linux-x86_64 and windows-x86_64, verifies each
+# payload, smoke-runs what this host can run, and — once the tag is pushed — attaches them to
+# the GitHub release. That is the project's own claim tested on the project itself; see
+# scripts/self-build.sh. `--no-self-build` skips it and says so loudly.
 #
 # WHY THIS EXISTS
 #
@@ -49,10 +55,12 @@ usage() {
 VERSION=""
 DRY_RUN=0
 CHECK_ONLY=0
+SELF_BUILD=1
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --check)   CHECK_ONLY=1 ;;
+        --no-self-build) SELF_BUILD=0 ;;
         -h|--help) usage 0 ;;
         -*)        die "unknown flag: $arg (try --help)" ;;
         *)         [ -n "$VERSION" ] && die "version given twice: $VERSION and $arg"
@@ -114,13 +122,19 @@ info "== release gate (this RUNS the checks; it does not take your word for it) 
 
 PY=".venv/bin/python"
 [ -x "$PY" ] || PY="python3"
-command -v ruff >/dev/null 2>&1 && RUFF="ruff" || RUFF=""
-
-if [ -n "$RUFF" ]; then
-    echo "-- lint"
-    $RUFF check . || die "ruff failed. Fix it; do not tag a release you would not merge."
+# Lint through the PINNED ruff from [dependency-groups] dev, not through whatever `ruff` is
+# on PATH. This gate used to do the latter and passed, while CI — which downloaded a newer
+# ruff — failed on the same commit for days. There were three different ruff versions on the
+# maintainer's machine when that was diagnosed (INV-CI-01).
+echo "-- lint (pinned ruff via uv)"
+if command -v uv >/dev/null 2>&1; then
+    uv run --quiet --group dev ruff check . \
+        || die "ruff failed. Fix it; do not tag a release you would not merge."
+    echo "   ok"
 else
-    red "note: ruff not on PATH, skipping lint"
+    die "uv is not on PATH, so the pinned linter cannot run.
+The gate will not fall back to an unpinned \`ruff\` — that is exactly the drift that kept CI
+red while this gate reported success. Install uv and re-run."
 fi
 
 # pytest's default basetemp lives at /tmp/pytest-of-$USER, which is shared and can end up
@@ -158,6 +172,26 @@ else
     red "note: nim not on PATH — launcher NOT compile-checked.
 This is a real gap in the gate, not a formality. Install Nim (haru-pack bootstrap) and
 re-run before tagging anything you intend to publish."
+fi
+
+echo "-- self-build (haru-pack packs haru-pack, linux + windows)"
+SELF_OUT="$REPO_ROOT/dist/self"
+if [ "$SELF_BUILD" -eq 1 ]; then
+    # Run BEFORE tagging on purpose. These artifacts are part of the release, so if the tool
+    # cannot pack itself we want to know while there is still no tag — a pushed tag with no
+    # binaries is a release that has to be explained.
+    rm -rf "$SELF_OUT"
+    ./scripts/self-build.sh --out "$SELF_OUT" \
+        || die "haru-pack could not pack itself at $SHORT.
+
+That is the demonstration failing, not a packaging detail: this project's claim is that you
+point it at a Python project and get a binary, and it is a Python project. Fix it before
+tagging. To tag anyway without artifacts (and know that you are doing it):
+    ./scripts/cut-release.sh $VERSION --no-self-build"
+    echo "   ok"
+else
+    red "note: --no-self-build given; release artifacts will NOT be built or attached.
+The published release will be PyPI-only, and nobody without Python can install it."
 fi
 
 green ""
@@ -217,6 +251,34 @@ case "$reply" in
         git push origin "$MAIN_BRANCH"
         git push origin "$TAG"
         green "pushed. The publish workflow runs CI again on the tag, then uploads to PyPI."
+
+        # The self-built binaries go to GitHub Releases, not PyPI — they exist for people
+        # who have no Python, and PyPI cannot reach that audience (docs/PUBLISHING.md).
+        if [ "$SELF_BUILD" -eq 1 ] && [ -d "$SELF_OUT" ]; then
+            if command -v gh >/dev/null 2>&1; then
+                info ""
+                info "== attaching self-built binaries to the GitHub release =="
+                if gh release view "$TAG" >/dev/null 2>&1; then
+                    gh release upload "$TAG" "$SELF_OUT"/* --clobber \
+                        && green "uploaded $(ls -1 "$SELF_OUT" | wc -l) asset(s) to $TAG"
+                else
+                    gh release create "$TAG" "$SELF_OUT"/* \
+                        --title "haru-pack $VERSION" \
+                        --notes "Built by haru-pack packing itself — see scripts/self-build.sh.
+
+\`haru-pack-$VERSION-linux-x86_64\` and \`haru-pack-$VERSION-windows-x86_64.exe\` need no
+Python and no uv on the machine that runs them: the launcher stages its own on first run.
+Verify a download against \`SHA256SUMS\`.
+
+Python users want \`pip install haru-pack\` or \`uv tool install haru-pack\` instead — same
+tool, importable, one small wheel." \
+                        && green "created release $TAG with $(ls -1 "$SELF_OUT" | wc -l) asset(s)"
+                fi
+            else
+                info "gh not installed; attach the binaries by hand:"
+                echo "    gh release create $TAG $SELF_OUT/* --title 'haru-pack $VERSION'"
+            fi
+        fi
         ;;
     *)
         info "not pushed. When ready:"

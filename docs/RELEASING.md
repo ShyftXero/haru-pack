@@ -25,7 +25,8 @@ script's job is to make sure that commit deserves it.
 
 | Check | Why it blocks a release |
 |---|---|
-| `ruff check .` | don't tag what you wouldn't merge |
+| `uv run --group dev ruff check .` | don't tag what you wouldn't merge — and through the **pinned** ruff, because this gate once passed on the exact commit CI rejected (`INV-CI-01`) |
+| `./scripts/self-build.sh` | haru-pack packs haru-pack for linux + windows, and each artifact's payload is verified. If the tool cannot pack itself, the project's central claim is false — better to learn that before a tag exists than after (`INV-CI-02`). `--no-self-build` skips it and says so |
 | `pytest -m invariant` | the invariant contract — see below |
 | the full suite | the obvious one |
 | `nim c -d:release` on the launcher | every shipped binary embeds it |

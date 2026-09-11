@@ -133,3 +133,94 @@ def test_the_license_file_exists():
         "the vendored third-party source should be acknowledged where someone auditing the "
         "distribution will look"
     )
+
+
+# ------------------------------------------------- the checks that gate a release, checked
+
+CI_YML = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+CUT_RELEASE = (REPO / "scripts" / "cut-release.sh").read_text(encoding="utf-8")
+SELF_BUILD = REPO / "scripts" / "self-build.sh"
+
+
+def uncommented(text: str) -> str:
+    """Lines with `#` comments stripped.
+
+    These assertions forbid specific strings, and the comment *explaining* why a string is
+    forbidden contains it — so grepping the raw file fails on the explanation. That has now
+    bitten four tests in this repo; strip the comments and check the code.
+    """
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        out.append(line.split("#", 1)[0] if "#" in line else line)
+    return "\n".join(out)
+
+
+CI_RUN = uncommented(CI_YML)
+CUT_RUN = uncommented(CUT_RELEASE)
+
+
+@pytest.mark.invariant("INV-CI-01")
+def test_the_linter_is_pinned_to_one_version():
+    """An unpinned linter fails on code it passed yesterday. Because `lint` runs before the
+    invariant contract in ci.yml, that meant the contract did not run in CI for days.
+
+    Red-path: put `uvx ruff check .` back in ci.yml, or loosen the dev-group pin.
+    """
+    dev = (PYPROJECT.get("dependency-groups") or {}).get("dev") or []
+    pins = [d for d in dev if isinstance(d, str) and d.replace(" ", "").startswith("ruff==")]
+    assert pins, f"ruff is not pinned exactly in [dependency-groups] dev: {dev}"
+
+    assert "uvx ruff" not in CI_RUN, (
+        "ci.yml lints with an unpinned `uvx ruff`; ruff's default rule set grows between "
+        "releases, so this fails on unchanged code"
+    )
+    assert "uv run --group dev ruff check ." in CI_RUN, (
+        "ci.yml no longer lints through the pinned dev-group ruff"
+    )
+
+
+@pytest.mark.invariant("INV-CI-01")
+def test_the_release_gate_uses_the_same_pinned_linter():
+    """The gate reported success on the exact commit CI rejected, because it used whatever
+    `ruff` was on PATH. Three different ruffs were installed on the machine at the time."""
+    assert "uv run --quiet --group dev ruff check ." in CUT_RUN, (
+        "cut-release.sh does not lint through the pinned ruff"
+    )
+    assert "skipping lint" not in CUT_RUN, (
+        "the gate still has a path where it skips the linter and prints a note; a skipped "
+        "check that looks like a passed one is what let CI stay red for a week"
+    )
+
+
+@pytest.mark.invariant("INV-CI-02")
+def test_the_release_gate_self_builds():
+    """Red-path: remove the self-build call from the gate, or make its failure non-fatal."""
+    assert "./scripts/self-build.sh" in CUT_RUN, (
+        "the release gate no longer packs haru-pack with haru-pack"
+    )
+    gate = CUT_RUN.split("gate passed at")[0]
+    assert "self-build.sh" in gate, (
+        "the self-build runs after the gate; it must run BEFORE tagging, or a failure "
+        "leaves a pushed tag with no artifacts"
+    )
+    assert "--no-self-build" in CUT_RUN, "there is no explicit way to skip it"
+
+
+@pytest.mark.invariant("INV-CI-02")
+def test_the_self_build_covers_both_release_targets():
+    src = uncommented(SELF_BUILD.read_text(encoding="utf-8"))
+    assert "linux-x86_64 windows-x86_64" in src, "both release targets must be built"
+    assert "-e haru-pack" in src, (
+        "this project declares two console scripts, so the self-build must name one or "
+        "discovery correctly refuses (INV-PKG-01)"
+    )
+    assert "verify" in src, "every artifact's payload must be verified before publishing"
+
+
+@pytest.mark.invariant("INV-CI-02")
+def test_the_self_build_script_is_executable():
+    import os
+    assert SELF_BUILD.is_file()
+    assert os.access(SELF_BUILD, os.X_OK), "scripts/self-build.sh is not executable"

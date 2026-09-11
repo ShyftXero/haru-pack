@@ -1345,3 +1345,61 @@ network.
 Source: Added 2026-09-10 while getting the project ready for PyPI. The vendored C had just
 been added and was one forgotten line away from shipping broken.
 Territory: pyproject.toml, tests/test_packaging.py
+
+---
+
+## CI — the checks that gate a release actually run, and run the same thing everywhere
+
+### INV-CI-01
+Status: active
+Statement: The linter is pinned to one exact version, declared in exactly one place, and
+both CI and `scripts/cut-release.sh` use that pin rather than whatever `ruff` is on PATH.
+Actors: nobody adversarial — ruff's own release cadence.
+Assets: every other check in this repository. `ci.yml` runs `lint` before the invariant
+contract and the full suite, so a lint failure means **neither of them runs**; and
+`publish.yml` has `needs: ci`, so it also means nothing can be released. Measured
+2026-09-11: CI had failed on eight consecutive runs, every one of them a lint failure on
+unchanged code, because `uvx ruff check .` downloads the newest ruff and ruff's DEFAULT rule
+set grows between versions. On this tree, ruff 0.15.19 is clean and ruff 0.16.6 reports 143
+errors (`I001`, `PLW1510`, `RUF100`). The machine-checked half of this very file had not
+executed in CI for days.
+Red-path: Change `ci.yml`'s lint step back to `uvx ruff check .`, or loosen the dev-group pin
+to `ruff>=…`. `test_the_linter_is_pinned_to_one_version` goes red. To watch the original
+failure: run `uvx ruff@0.16.6 check .`.
+Note: There were **three** different ruff versions on the maintainer's machine when this was
+diagnosed — `~/.local/bin/ruff` 0.15.19, `.venv/bin/ruff` 0.16.6, `uvx ruff` 0.15.19 — which
+is why the release gate reported success on the exact commit CI rejected. The gate no longer
+falls back to an unpinned `ruff`; it fails if `uv` is missing instead, because a skipped
+check that prints a note is the thing that let this run for a week.
+Note: Pinning is not an opinion about the new rules. Adopting them is a separate, deliberate
+change — `I001` in particular fights the compact grouped-import style `[tool.ruff.lint]`
+documents on purpose.
+Source: Found 2026-09-11 while answering "what do we need to publish to PyPI": the answer
+was "nothing, except that CI has been red for days and gates the publish workflow".
+Territory: .github/workflows/ci.yml, pyproject.toml, scripts/cut-release.sh,
+tests/test_packaging.py
+
+### INV-CI-02
+Status: active
+Statement: A release built by `scripts/cut-release.sh` packs haru-pack with haru-pack for
+linux-x86_64 and windows-x86_64, verifies each artifact's payload, and refuses to tag if
+that fails; skipping it requires saying `--no-self-build` out loud.
+Actors: the user who downloads a binary because they have no Python — and every reader of
+the claim "point it at a Python project and get a binary".
+Assets: whether the pitch is true. haru-pack is a Python project with a native dependency
+(`cryptography`), a console-script entrypoint, and package data that has to survive into the
+payload, so packing itself exercises the parts most likely to break. Verified 2026-09-11:
+both targets build, both pass `haru-pack verify`, the Linux artifact runs and reports its own
+version, and the Windows artifact stages and executes its bundled uv under wine.
+Red-path: Remove the `./scripts/self-build.sh` call from the gate in `cut-release.sh`, or
+make its failure non-fatal. `test_the_release_gate_self_builds` goes red.
+Note: Default tier, not `--thick`, so each artifact is ~15 MB and fetches Python on first
+run. Thick self-builds would need Windows `cryptography` wheels resolved from Linux — a
+different question from "does the tool work on itself".
+Note: The Windows artifact cannot be fully smoke-tested here. wine cannot create the
+junctions uv wants for a Python install (`os error 50`), so the script accepts reaching that
+error as success and says why. A full Windows first-run check needs real Windows, and this
+invariant does not claim otherwise.
+Source: Asked for 2026-09-11 — "wire the self build to demonstrate it via releases (linux
+and windows as part of the release script)".
+Territory: scripts/self-build.sh, scripts/cut-release.sh, tests/test_packaging.py

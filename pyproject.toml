@@ -76,7 +76,21 @@ include = [
 include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproject.toml"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+# ruff is pinned EXACTLY, and this pin is the single source of truth — CI and
+# scripts/cut-release.sh both lint via `uv run --group dev ruff`, never via whatever `ruff`
+# happens to be on PATH (INV-CI-01).
+#
+# Why exact: ruff's DEFAULT rule set grows between releases, so an unpinned linter fails on
+# code it passed yesterday with no change to the code. Measured on this tree 2026-09-11 —
+# 0.15.19: clean. 0.16.6: 143 errors (I001 import sorting, PLW1510, RUF100). CI ran
+# `uvx ruff check .` unpinned, downloaded the newer one, and had been red for days while the
+# same commit passed the local gate. There were three different ruffs on the maintainer's
+# machine alone.
+#
+# Bumping this is a deliberate act, not a side effect: a newer ruff may demand 100+ changes,
+# and I001 in particular fights the compact grouped-import house style that [tool.ruff.lint]
+# documents. Decide the rules, then bump.
+dev = ["pytest>=8", "ruff==0.15.19"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

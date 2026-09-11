@@ -26,7 +26,11 @@ jobs:
       - run: uv pip install -e . pytest
 
       - name: lint
-        run: uvx ruff check .
+        # `uvx ruff` (unpinned) downloads whatever ruff released most recently, whose
+        # DEFAULT rule set grows between versions — so this step failed on unchanged code
+        # for days while the same commit passed the local gate. The pin lives in
+        # [dependency-groups] dev and nowhere else (INV-CI-01).
+        run: uv run --group dev ruff check .
 
       - name: invariant contract
         # Runs first and on its own so a linkage failure is legible in the log rather
