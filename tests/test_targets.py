@@ -198,7 +198,17 @@ def test_bare_path_dispatches_to_build_without_shadowing_subcommands():
     r = run_cli("definitely-not-a-real-path-9f3a")
     assert r.returncode != 0
     combined = r.stdout + r.stderr
-    assert ("discover" in combined or "No such" in combined
-            or "does not exist" in combined or "no pyproject" in combined), (
-        f"a bare path did not reach `build`: {combined[:300]!r}"
+    # Which failure proves routing depends on the machine, and both answers are fine:
+    #   * with a toolchain, `build` gets as far as discovery and complains about the path;
+    #   * without one, `build` refuses at `find_nim()` first — and "Nim not found" is if
+    #     anything the STRONGER evidence, because only `build` can emit it. A CI runner has
+    #     no Nim, which is why this assertion had to learn about it the first time the
+    #     invariant contract actually ran there.
+    reached_build = ("discover" in combined or "No such" in combined
+                     or "does not exist" in combined or "no pyproject" in combined
+                     or "Nim not found" in combined)
+    assert reached_build, f"a bare path did not reach `build`: {combined[:300]!r}"
+    # ...and it must not have been mistaken for a subcommand.
+    assert "No such command" not in combined, (
+        f"the bare path was parsed as a subcommand, not routed to build: {combined[:200]!r}"
     )
