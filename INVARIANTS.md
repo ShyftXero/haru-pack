@@ -1293,3 +1293,55 @@ verified. Colour is never the carrier of meaning: every state that is coloured i
 stated in words (`payload integrity: OK`, `nim deps: FAILED`), because a colour is invisible
 to anyone reading a log file.
 Territory: src/haru_pack/ui.py, src/haru_pack/cli.py, tests/test_ui.py
+
+---
+
+## PKG — the thing on PyPI is the thing that works
+
+### INV-PKG-01
+Status: active
+Statement: `haru` and `haru-pack` are both installed console scripts pointing at the same
+callable, and every command haru-pack prints back for the operator to run uses the name they
+actually invoked.
+Actors: a downstream user who typed `haru` because it is shorter, then read a refusal telling
+them to run `haru-pack`.
+Assets: `docs/PRINCIPLES.md`'s second user. Copy-pasteable output is the entire point of the
+entrypoint refusals (INV-BUILD-09); printing a command the operator did not type makes them
+translate it, and translating is where the typo goes.
+Red-path: Remove either entry from `[project.scripts]` —
+`test_both_commands_are_declared` goes red. Or hardcode `"haru-pack"` in `cli.prog()` and
+`test_the_copy_pasteable_command_uses_the_invoked_name` goes red.
+Note: Two real console scripts, not a shell alias, so the short name works on a Windows
+install with no shell profile to alias in. `version` deliberately still prints `haru-pack`
+whichever way it was invoked, because it reports the installed *distribution*.
+Note: The distribution name `haru` is NOT available on PyPI — it is an unrelated web
+framework (`haru 0.0.1a4`). Script names are per-environment so the command is fine, but
+`pip install haru` will never be this project.
+Note: A consequence, verified 2026-09-10: haru-pack's own `pyproject.toml` now declares two
+console scripts, so `haru-pack .` on this repository correctly refuses as ambiguous and
+lists both. Packing haru-pack with haru-pack needs `-e haru-pack`.
+Source: Asked for 2026-09-10 — "i want to have haru-pack and haru as equivalent commands".
+Territory: pyproject.toml, src/haru_pack/cli.py, tests/test_packaging.py
+
+### INV-PKG-02
+Status: active
+Statement: Every file the launcher is compiled from — the Nim sources, the vendored XZ
+decoder's `.c`/`.h`, and `pins.toml` — is shipped in the wheel, and no launcher file on disk
+falls outside the include list.
+Actors: anyone who installs from PyPI rather than from a git checkout.
+Assets: whether the published package works at all. `[tool.hatch.build] include` is a
+hand-written allowlist, so a new launcher file is omitted *silently* — and the resulting
+haru-pack builds nothing, failing on the user's machine at their first build with
+`xz.h: No such file or directory`. The dev machine never sees it, because there the sources
+are simply present in the tree.
+Red-path: Drop `src/haru_pack/launcher/xz/*.c` from the include list.
+`test_the_launcher_sources_are_declared_for_the_wheel` goes red. Add a new file under
+`src/haru_pack/launcher/` matching no pattern and
+`test_every_launcher_source_on_disk_is_covered_by_an_include_pattern` goes red.
+Note: Verified end to end 2026-09-10 — `uv build`, install the wheel into a clean venv, and
+`launcher_src_dir()` resolves with `main.nim`, `xzdec.nim` and three `xz/*.c` present. The
+suite checks the declaration rather than repeating that, because building a wheel needs a
+network.
+Source: Added 2026-09-10 while getting the project ready for PyPI. The vendored C had just
+been added and was one forgotten line away from shipping broken.
+Territory: pyproject.toml, tests/test_packaging.py

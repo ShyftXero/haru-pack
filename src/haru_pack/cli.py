@@ -1,6 +1,8 @@
 from __future__ import annotations
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import List
 import typer
@@ -20,6 +22,29 @@ from .entrypoints import EntryPointError
 from .overlay import verify as verify_exe
 from .targets import KNOWN_TARGETS, Target, TargetError
 from .tiers import TIERS
+
+def prog() -> str:
+    """The command name the user actually typed — `haru-pack` or `haru`.
+
+    Both are real console scripts (see `[project.scripts]`), so a message that hardcodes
+    one of them tells half the users to type something other than what they just used.
+    Copy-pasteable output is the whole point of those messages (docs/PRINCIPLES.md), and a
+    command they did not invoke is one more thing to translate in their head.
+
+    Falls back to `haru-pack` when argv[0] is something unhelpful — `python -m haru_pack`,
+    a pytest runner, a frozen launcher.
+
+    Split on BOTH separators rather than with `Path`: `Path(r"C:\\...\\haru.exe").name`
+    returns the whole string on POSIX, because a backslash is an ordinary character there.
+    That matters because this is a Windows-first tool whose argv[0] is routinely a Windows
+    path, and it is the same mistake the vendored decoder's include path made under mingw.
+    """
+    raw = sys.argv[0] if sys.argv else ""
+    name = re.split(r"[\\/]", raw)[-1] if raw else ""
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    return name if name in ("haru", "haru-pack") else "haru-pack"
+
 
 class _DefaultToBuild(TyperGroup):
     """Make `haru-pack somescript.py` mean `haru-pack build somescript.py`.
@@ -66,7 +91,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
         try:
             suffix = Target.parse(target).exe_suffix
         except TargetError as e:
-            print(f"haru-pack: {e}", style="error"); raise typer.Exit(2)
+            print(f"{prog()}: {e}", style="error"); raise typer.Exit(2)
         out = Path(project.name or "app").with_suffix(suffix)
     want_enc = encrypt or embed_secret or secret or secret_env or secret_prompt or expires or machine or user or geo
     sec = None
@@ -85,13 +110,13 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          entry_point=entry_point, shake=shake,
                          shake_keep=list(shake_keep or []),
                          log=lambda m: print(
-                             f"haru-pack: {m}",
+                             f"{prog()}: {m}",
                              style="warn" if "WARNING" in m else "info"))
     except AmbiguousProject as e:
         _report_ambiguity(project, e)
         raise typer.Exit(2)
     except TargetError as e:
-        print(f"haru-pack: {e}", style="error"); raise typer.Exit(2)
+        print(f"{prog()}: {e}", style="error"); raise typer.Exit(2)
     except EntryPointError as e:
         print(str(e), style="error"); raise typer.Exit(2)
     except BuildError as e:
@@ -120,7 +145,7 @@ def _report_ambiguity(project: Path, e: "AmbiguousProject") -> None:
     A wrong guess here builds cleanly and runs the wrong program, so the failure shows up
     at the customer rather than at the build. Refusing costs the operator one command.
     """
-    print(f"haru-pack: {e}", style="warn")
+    print(f"{prog()}: {e}", style="warn")
     if e.candidates:
         print("\ncandidates:")
         for c in e.candidates:
@@ -129,11 +154,11 @@ def _report_ambiguity(project: Path, e: "AmbiguousProject") -> None:
     cfg = out_dir / "haru_pack.toml"
     print("\npick one, either way:")
     first = e.candidates[0] if e.candidates else "app.cli:main"
-    print(f"  haru-pack build {project} --entry-point {first}")
+    print(f"  {prog()} build {project} --entry-point {first}")
     if cfg.exists():
         print(f"  ...or set `entrypoint` in {cfg}")
     else:
-        print(f"  ...or run `haru-pack init {project}` to write {cfg.name} and edit it")
+        print(f"  ...or run `{prog()} init {project}` to write {cfg.name} and edit it")
 
 
 @app.command()
@@ -142,7 +167,7 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
                help="'host', or <os>-<arch>: " + ", ".join(KNOWN_TARGETS))):
     """Check the build toolchain, and (if given a project) detect needed bundle/post_install steps."""
     nim = find_nim()
-    print(f"nim       : {nim_version(nim) if nim else 'NOT FOUND — run `haru-pack bootstrap`'}",
+    print(f"nim       : {nim_version(nim) if nim else f'NOT FOUND — run `{prog()} bootstrap`'}",
           style=("ok" if nim else "error"))
     tc = detect_c_toolchain(target)
     print(f"C ({target}) : {tc['compiler'] if tc['ok'] else 'MISSING'}",
@@ -176,7 +201,7 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
                     tag = {"bundle": "bundle (offline)", "post_install": "post_install (1st run)",
                            "note": "note"}[h["kind"]]
                     print(f"  • {h['package']:14} [{tag}]  {h['why']}")
-                print("  run `haru-pack init` to scaffold them into haru_pack.toml", style="info")
+                print(f"  run `{prog()} init` to scaffold them into haru_pack.toml", style="info")
 
     if not nim or not tc["ok"]:
         raise typer.Exit(1)
@@ -202,12 +227,12 @@ def bootstrap(target: list[str] = typer.Option(None, "--target",
         print(f"needs {len(missing)} system package(s): {', '.join(missing)}", style="warn")
         if not cmd:
             print("install them with your package manager, then re-run "
-                        "`haru-pack bootstrap`.", style="warn")
+                        f"`{prog()} bootstrap`.", style="warn")
             raise typer.Exit(1)
         print("\n    " + " ".join(cmd) + "\n")
         run_it = yes or typer.confirm("run it now?", default=True)
         if not run_it:
-            print("skipped. Run that command, then `haru-pack bootstrap` again.", style="warn")
+            print(f"skipped. Run that command, then `{prog()} bootstrap` again.", style="warn")
             raise typer.Exit(1)
         rc = subprocess.call(cmd)
         if rc != 0:
@@ -239,7 +264,7 @@ def bootstrap(target: list[str] = typer.Option(None, "--target",
         if not tc["ok"]:
             print(tc["advice"], style="warn")
 
-    print("\nready — try `haru-pack yourscript.py`", style="ok")
+    print(f"\nready — try `{prog()} yourscript.py`", style="ok")
 
 
 @app.command()
