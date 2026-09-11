@@ -82,7 +82,7 @@ uses to boot XZ kernels), with no dependencies beyond `memcpy`. Where it has bee
 |---|---|
 | linux-x86_64 | compiles and round-trips the real `uv.xz` byte-identically (`ae65ed04…`) |
 | windows-x86_64 | cross-compiled from Linux; same round-trip byte-identical under wine |
-| **linux-aarch64** | compiled natively on an aarch64 Debian box (gcc 14.2, `-Wall -Wextra`, no warnings) and decoded the **real** `uv.xz` to the same digest `ae65ed04…`, 2026-09-11. Also cross-compiles cleanly with `zig cc -target aarch64-linux-gnu` |
+| **linux-aarch64** | compiled natively on an aarch64 Debian box (gcc 14.2, `-Wall -Wextra`, no warnings) and decoded the **real** `uv.xz` to the same digest `ae65ed04…`. The whole launcher also cross-builds with `aarch64-linux-gnu-gcc`, and that binary ran on an arm64 Pi with its expanded uv matching the recorded digest — 2026-09-11 |
 | macOS | **not** compiled or run — no Mac and no osxcross here. The C is architecture-neutral and has no Darwin-specific paths, but that is reasoning, not a measurement |
 
 Provenance and per-file digests: `src/haru_pack/launcher/xz/PROVENANCE.md`, enforced by
@@ -116,11 +116,22 @@ Building a **launcher** for `linux-aarch64` needs the real cross toolchain:
 haru-pack bootstrap --target linux-aarch64      # or: sudo apt install gcc-aarch64-linux-gnu
 ```
 
-`zig cc -target aarch64-linux-gnu` is **not** a substitute for the full launcher, though it
-works fine for the vendored C on its own. `nimcrypto`'s `sha2_neon.nim` compiles with
-`-march=armv8-a+crypto`, and zig's clang rejects that with `unknown CPU: 'armv8'`. That is a
-dependency's NEON path, not anything in haru-pack — recorded here so the next person does
-not spend an afternoon on it. Tried 2026-09-11.
+### zig is not a dependency, and cannot replace this
+`zig cc` is **not** used by haru-pack anywhere — not in the code, the CI, or `pyproject.toml`.
+It came up only as a local experiment while the real cross toolchain was unavailable, and the
+results are recorded here so nobody repeats them:
+
+| target | `zig cc` |
+|---|---|
+| `windows-x86_64` | builds a launcher (PE32+) |
+| `linux-armv7` | builds a launcher (ARM EABI5) |
+| `linux-aarch64` | **fails** — `nimcrypto`'s `sha2_neon.nim` compiles with `-march=armv8-a+crypto` and zig's clang rejects it: `unknown CPU: 'armv8'` |
+| `macos-aarch64` | **fails** — zig's bundled macOS headers lack `fstore_t`, which Nim's posix module needs. Cross-compiling to macOS still needs the real Apple SDK |
+
+So zig covers two of the four and misses both of the ones that would matter — ARM64, and the
+macOS gap nothing else here can fill. Adopting it would add a second partially-overlapping
+toolchain to pin and verify rather than removing one, so it is deliberately not used. Tried
+2026-09-11.
 
 ## Cross-compile notes (Linux → Windows)
 - **thin / default**: fully supported from Linux. `haru-pack` fetches the **Windows** uv

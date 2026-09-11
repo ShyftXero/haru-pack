@@ -2037,3 +2037,44 @@ the base dir and a sentinel survive) goes red. Walked 2026-09-10 on Linux.
 Source: docs/adr/0004-reap-ram-staging.md §5/§6. CONTEXT.md "detached reap" / "reap
 (build-time)".
 Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py
+
+---
+
+## TOOL — the kitchen sink is the default, and all of it is declinable
+
+### INV-TOOL-01
+Status: active
+Statement: `haru-pack bootstrap` installs every optional build capability this host knows how
+to install — every cross toolchain with a known package, plus wine — and every one of them
+can be declined individually or all at once, in one sudo prompt, with the package command
+shown before it runs.
+Actors: the developer setting haru-pack up for the first time, and the one who deliberately
+does not want ARM cross-compilers or a wine install on their machine.
+Assets: `docs/PRINCIPLES.md`'s second user, from both directions. Discovering a missing
+cross-compiler three commands into a release is the failure the default prevents; being made
+to install several hundred megabytes of wine to build for your own laptop is the failure the
+flags prevent. A default that cannot be declined is not a default, it is a requirement.
+Red-path: Make `toolchain.select_capabilities()` return `()` when called with no arguments —
+`test_the_default_is_everything` goes red and the kitchen sink silently becomes opt-in.
+Remove the unknown-name reporting and `test_an_unknown_name_is_reported_rather_than_ignored`
+goes red, at which point `--without wein` installs wine and says nothing.
+Note: The precedence is deliberately boring, because guessing wrong installs the wrong
+hundreds of megabytes: `--minimal` wins and selects nothing; naming any `--target`/`--with`
+makes the selection EXACT; otherwise it is everything minus `--without`.
+Note: Capabilities are derived from `Target.cross_cc()`, not a second hand-kept list, so a
+new target with a known package becomes selectable for free and cannot drift from what
+`build` actually needs. The host C compiler and Nim are deliberately NOT capabilities — a
+haru-pack that cannot build for its own machine is not a working install, so offering to
+decline them would be a lie.
+Note: `bootstrap --list` reports weight as a PACKAGE COUNT resolved with `apt-get -s`, not a
+size. The first version read `apt-cache show`'s `Installed-Size`, which is the metapackage
+alone, and reported `wine` as "194 kB" when wine's real cost is its dependency closure — a
+number that makes the kitchen sink look free is worse than no number. When there is no apt
+to ask, the column is blank rather than guessed.
+Note: `doctor` separates targets from tools, because wine is not something you build *for*
+and the flag to add it differs (`--with` vs `--target`).
+Source: Asked for 2026-09-11 — "be mindful that I do want the default to be the 'kitchen
+sink' model, but I want people to be able to selectively choose what they get". The
+per-target mechanism already existed via `--target`; what changed is that the default is now
+everything and the parts are nameable.
+Territory: src/haru_pack/toolchain.py, src/haru_pack/cli.py, tests/test_toolchain_select.py

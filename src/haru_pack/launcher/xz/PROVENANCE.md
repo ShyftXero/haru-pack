@@ -54,7 +54,7 @@ same commit or the decoder will reject the stream at runtime, on the customer's 
 | linux-x86_64 (gcc) | compiles; decodes the real `uv.xz` to `ae65ed04…` |
 | windows-x86_64 (mingw, cross from Linux) | compiles; same digest, run under wine |
 | linux-aarch64 (gcc 14.2, native on real hardware) | compiles with `-Wall -Wextra` and no warnings; decodes the real `uv.xz` to the same `ae65ed04…`, 2026-09-11 |
-| linux-aarch64 (`zig cc`, cross) | compiles to aarch64 objects cleanly |
+| linux-aarch64 (`aarch64-linux-gnu-gcc`, cross from x86_64) | whole launcher builds; the resulting binary ran on an arm64 Pi and its expanded uv matched the recorded digest, 2026-09-11 |
 | macOS | not attempted — no Mac available |
 
 The aarch64 run used the same `XZ_SINGLE` call shape as `xzdec.nim` against the same stream

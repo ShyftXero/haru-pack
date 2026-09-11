@@ -78,19 +78,29 @@ haru-pack ./lotek --out lotek --entry-point "app.cli:main"
 ## Install
 
 ```sh
-pip install haru-pack            # or:  uvx haru-pack ...
+uv tool install haru-pack        # or:  pip install haru-pack / uvx haru-pack ...
 haru-pack bootstrap              # Nim via choosenim + verify the C toolchain
 haru-pack init ./myproject       # optional: write a haru_pack.toml you can edit
 ```
 
 `bootstrap` installs Nim into haru-pack's own directory. Your system Nim and your
-`~/.nimble` are left alone. The only thing it asks sudo for is a C compiler, and it asks
-once, showing you the exact command first.
+`~/.nimble` are left alone. Everything that needs sudo is a system package — the host C
+compiler, the cross toolchains, and wine — and they are all worked out first, so it asks
+once and shows you the exact command before running it.
+
+By default it installs **everything this host can**: that is the point of the kitchen sink,
+and it means you do not discover a missing cross-compiler three commands into a release.
+None of it is compulsory — see the flags below, or `haru-pack bootstrap --list` to look
+first. `INV-TOOL-01`.
 
 Building for another machine? Ask for it up front and the same single prompt covers it:
 
 ```sh
-haru-pack bootstrap --target linux-aarch64      # also gets the ARM cross-compiler
+haru-pack bootstrap                            # everything this host can install
+haru-pack bootstrap --minimal                  # host compiler + Nim only
+haru-pack bootstrap --target linux-aarch64     # exactly that, nothing else
+haru-pack bootstrap --without wine             # everything except wine
+haru-pack bootstrap --list                     # see what is available and what it costs
 ```
 
 ## Decisions

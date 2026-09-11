@@ -9,7 +9,8 @@ import typer
 
 # rich, via a wrapper that keeps markup OFF by default: rich reads `[project.scripts]`
 # as a style tag and silently prints nothing. See ui.py.
-from .ui import print, fields
+from .ui import print, fields, console as ui_console
+from rich.text import Text
 from typer.core import TyperGroup
 from . import __version__
 from .bootstrap import (find_nim, nim_version, ensure_nim_deps, nim_dep_specs,
@@ -178,6 +179,48 @@ def _report_ambiguity(project: Path, e: AmbiguousProject) -> None:
         print(f"  ...or run `{prog()} init {project}` to write {cfg.name} and edit it")
 
 
+def _report_capabilities(selected=()) -> None:
+    """Show every optional capability, whether it is installed, and what it costs.
+
+    This exists because the default is the kitchen sink: an operator is entitled to see what
+    that means in megabytes before agreeing to it, and `wine` alone is the difference between
+    a small install and a large one. Sizes come from apt when apt is present and are left
+    blank rather than guessed when it is not.
+    """
+    chosen = {c.name for c in selected}
+    rows = []
+    for c in toolchain.capabilities():
+        # only meaningful for something you do not have yet, which is exactly
+        # when you are deciding whether to install it
+        weight = "" if c.present else toolchain.install_weight(c.packages)
+        rows.append((
+            ("*" if c.name in chosen else " ") + " " + c.name,
+            "installed" if c.present else "missing",
+            weight or "-",
+            ", ".join(c.packages),
+            c.unlocks,
+        ))
+    print("capabilities (* = selected by the flags you gave)", style="info")
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    for r in rows:
+        line = Text()
+        line.append(f"  {r[0]:<{widths[0]}}  ", style="key")
+        line.append(f"{r[1]:<{widths[1]}}  ", style="ok" if r[1] == "installed" else "warn")
+        line.append(f"{r[2]:>{widths[2]}}  {r[3]:<{widths[3]}}  ", style="detail")
+        line.append(r[4])
+        ui_console.print(line)
+    print("")
+    print("the host C compiler and Nim are not listed: they are not optional, and a "
+          "haru-pack that cannot build for its own machine is not a working install.",
+          style="detail")
+    no_pkg = [t for t in KNOWN_TARGETS
+              if t not in {c.name for c in toolchain.capabilities()}]
+    if no_pkg:
+        print(f"no cross toolchain is known for: {', '.join(no_pkg)} — those are either "
+              f"native here or not cross-compilable from this host (macOS needs a Mac or "
+              f"osxcross).", style="detail")
+
+
 @app.command()
 def doctor(path: Path = typer.Argument(None, help="project/script to scan for needed bundle/install steps"),
            target: str = typer.Option("host",
@@ -191,6 +234,29 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
           style=("ok" if tc["ok"] else "error"))
     if not tc["ok"]:
         print(tc["advice"], style="warn")
+
+    # What can this host build for, and what is missing? Previously the only way to find out
+    # was to run a build and read the failure — and `wine` was invisible entirely, so a
+    # `--wine` bundle step failed on a host the operator believed was fully set up
+    # (INV-TOOL-01).
+    caps = toolchain.capabilities()
+    from .targets import KNOWN_TARGETS
+    # wine is a TOOL, not a target — listing it under "can build for" would be wrong, and
+    # the flag to add it differs (`--with` vs `--target`).
+    tgt_have = [c.name for c in caps if c.present and c.name in KNOWN_TARGETS]
+    tgt_lack = [c.name for c in caps if not c.present and c.name in KNOWN_TARGETS]
+    tool_have = [c.name for c in caps if c.present and c.name not in KNOWN_TARGETS]
+    tool_lack = [c.name for c in caps if not c.present and c.name not in KNOWN_TARGETS]
+    print(f"can build for : {', '.join(['host'] + tgt_have)}", style="ok")
+    if tgt_lack:
+        print(f"  not set up  : {', '.join(tgt_lack)}  "
+              f"(`{prog()} bootstrap --target {tgt_lack[0]}`)", style="warn")
+    if tool_have:
+        print(f"build tools   : {', '.join(tool_have)}", style="ok")
+    if tool_lack:
+        print(f"  not set up  : {', '.join(tool_lack)}  "
+              f"(`{prog()} bootstrap --with {tool_lack[0]}`)", style="warn")
+    print(f"                full list: `{prog()} bootstrap --list`", style="detail")
 
     if path is not None:
         from . import scaffold
@@ -224,21 +290,62 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
         raise typer.Exit(1)
 
 @app.command()
-def bootstrap(target: list[str] = typer.Option(None, "--target",
-                  help="also prepare cross-compiling to this target; repeatable"),
+def bootstrap(target: List[str] = typer.Option(None, "--target",
+                  help="prepare cross-compiling to this target; repeatable. Giving any "
+                       "--target or --with makes the selection EXACT"),
+              with_: List[str] = typer.Option(None, "--with", metavar="NAME",
+                  help="add one capability by name (e.g. wine); repeatable"),
+              without: List[str] = typer.Option(None, "--without", metavar="NAME",
+                  help="kitchen sink MINUS this capability; repeatable"),
+              minimal: bool = typer.Option(False, "--minimal",
+                  help="host compiler + Nim only — no cross toolchains, no wine"),
+              list_: bool = typer.Option(False, "--list",
+                  help="show what is available, what it costs, and what each unlocks; "
+                       "install nothing"),
               yes: bool = typer.Option(False, "--yes", "-y",
                   help="run the system package command without asking"),
               force: bool = typer.Option(False, "--force", help="reinstall Nim even if present")):
     """Install the toolchain. One command, at most one sudo prompt.
 
+    The default is the kitchen sink: the host C compiler, Nim, every cross toolchain this
+    host knows how to install, and wine. That is deliberate — the common case is wanting to
+    build for everything, and discovering a missing cross-compiler three commands into a
+    release is worse than installing one you did not need.
+
+    It is not compulsory, though. Nothing in the kitchen sink is required to build for this
+    machine, so every piece of it can be declined:
+
+        haru-pack bootstrap                            everything
+        haru-pack bootstrap --minimal                  host compiler + Nim only
+        haru-pack bootstrap --target linux-aarch64     exactly that, nothing else
+        haru-pack bootstrap --without wine             everything except wine
+        haru-pack bootstrap --list                     look first, install nothing
+
     Nim comes from choosenim, into haru-pack's own directory — your system Nim and your
-    ~/.nimble are left alone. The only thing that has to come from the system is a C
-    compiler, so that is the only thing this asks to install.
+    ~/.nimble are left alone. Everything that needs sudo is a system package, and they are
+    all worked out first so there is one prompt rather than one per capability.
     """
-    targets = list(target or [])
+    caps, unknown = toolchain.select_capabilities(
+        targets=list(target or []), minimal=minimal,
+        without=list(without or []), with_=list(with_ or []))
+    if unknown:
+        names = ", ".join(c.name for c in toolchain.capabilities())
+        print(f"unknown capability: {', '.join(unknown)}", style="error")
+        print(f"known names: {names}", style="warn")
+        raise typer.Exit(2)
+
+    if list_:
+        _report_capabilities(caps)
+        raise typer.Exit(0)
+
+    if caps:
+        print(f"selected {len(caps)} capability/ies: "
+              + ", ".join(c.name for c in caps), style="info")
+    elif minimal:
+        print("--minimal: host compiler + Nim only", style="info")
 
     # 1. system packages: work out everything needed, ask ONCE.
-    missing = toolchain.system_packages(targets)
+    missing = toolchain.missing_packages(caps)
     if missing:
         cmd = toolchain.sudo_command(missing)
         print(f"needs {len(missing)} system package(s): {', '.join(missing)}", style="warn")
@@ -273,8 +380,11 @@ def bootstrap(target: list[str] = typer.Option(None, "--target",
     if not ok:
         raise typer.Exit(1)
 
-    # 4. report the toolchain per requested target.
-    for t in ["host", *targets]:
+    # 4. report the toolchain per target that was actually selected. Derived from the
+    #    capabilities rather than a separate `targets` list, so the summary cannot claim a
+    #    target the install never covered.
+    chosen_targets = [c.name for c in caps if c.name in KNOWN_TARGETS]
+    for t in ["host", *chosen_targets]:
         tc = detect_c_toolchain(t)
         print(f"C ({t}) : {tc['compiler'] if tc['ok'] else 'MISSING'}",
               style=("ok" if tc["ok"] else "error"))

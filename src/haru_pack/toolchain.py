@@ -42,7 +42,9 @@ import os
 import shutil
 import stat
 import subprocess
+import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import pins
@@ -52,7 +54,8 @@ from .targets import Target, host_arch, host_os
 
 __all__ = ["ToolchainError", "NIM_VERSION", "CHOOSENIM_VERSION", "install_nim",
            "choosenim_asset", "find_managed_nim", "system_packages", "sudo_command",
-           "SUPPORTED_BUILD_HOSTS"]
+           "SUPPORTED_BUILD_HOSTS", "Capability", "capabilities", "select_capabilities",
+           "missing_packages", "install_weight"]
 
 NIM_VERSION = "2.2.6"
 CHOOSENIM_VERSION = "0.8.16"
@@ -105,6 +108,133 @@ def system_packages(targets=()) -> list:
         if cc and not shutil.which(cc):
             need.append(pkg)
     return sorted(set(need))
+
+
+# ─────────────────────────────────────────────────────────── optional capabilities
+#
+# Everything haru-pack can install BEYOND the host C compiler and Nim, as named units the
+# operator can choose between. Two rules make this worth having rather than a flag soup:
+#
+#   1. A capability is named after what it lets you DO, not after a package. `linux-aarch64`
+#      is a thing you want; `gcc-aarch64-linux-gnu` is an implementation detail of wanting
+#      it. `haru-pack bootstrap --without linux-armv7` should not require knowing Debian's
+#      naming.
+#   2. Nothing here is required. The host compiler and Nim are not capabilities, because a
+#      haru-pack that cannot build for its own machine is not a working install.
+#
+# `bootstrap` defaults to ALL of them ("kitchen sink", deliberately — see its docstring) and
+# `--minimal` takes it back to just the host. Cross-compiling to a target with no entry here
+# is not supported from this host and `--list` says so rather than quietly omitting it.
+
+
+@dataclass(frozen=True)
+class Capability:
+    """One optional, independently installable build capability."""
+    name: str               # what you type: a target triple, or a tool like `wine`
+    packages: tuple         # system packages that provide it
+    probe: str              # an executable whose presence means "installed"
+    unlocks: str            # one line, operator-facing
+
+    @property
+    def present(self) -> bool:
+        return bool(shutil.which(self.probe))
+
+
+def capabilities() -> list:
+    """Every optional capability this build host could install, in a stable order.
+
+    Cross-compiler entries are derived from `Target.cross_cc()` rather than duplicated, so a
+    new target with a known package becomes selectable here for free and cannot drift out of
+    sync with what `build` actually needs.
+    """
+    from .targets import KNOWN_TARGETS, Target
+
+    out = []
+    for name in KNOWN_TARGETS:
+        tgt = Target.parse(name)
+        cc, pkg = tgt.cross_cc()
+        if not cc or not pkg:
+            continue                      # native, or no package we know how to install
+        out.append(Capability(name=name, packages=(pkg,), probe=cc,
+                              unlocks=f"build binaries for {name}"))
+    out.append(Capability(
+        name="wine", packages=("wine",), probe="wine",
+        unlocks="run execute-required [[bundle]] steps for a Windows target on this host "
+                "(`--wine`)"))
+    return out
+
+
+def select_capabilities(targets=(), minimal: bool = False, without=(),
+                        with_=()) -> tuple:
+    """Resolve flags to (selected, unknown_names).
+
+    The precedence is deliberately boring, because an operator guessing wrong here installs
+    the wrong hundreds of megabytes:
+
+        --minimal                  -> nothing (host compiler + Nim only)
+        --target / --with given    -> exactly those, and nothing else
+        neither                    -> everything, minus --without
+
+    `--without` applies to the default set; naming something in both `--with` and
+    `--without` is a contradiction and the caller is told rather than obeyed.
+    """
+    caps = {c.name: c for c in capabilities()}
+    asked = [str(t) for t in targets] + [str(w) for w in with_]
+    unknown = [a for a in asked if a not in caps]
+    unknown += [w for w in (str(x) for x in without) if w not in caps]
+
+    if minimal:
+        chosen = [caps[a] for a in asked if a in caps]
+    elif asked:
+        chosen = [caps[a] for a in asked if a in caps]
+    else:
+        drop = {str(w) for w in without}
+        chosen = [c for c in capabilities() if c.name not in drop]
+    # stable, de-duplicated
+    seen, ordered = set(), []
+    for c in chosen:
+        if c.name not in seen:
+            seen.add(c.name); ordered.append(c)
+    return tuple(ordered), tuple(dict.fromkeys(unknown))
+
+
+def missing_packages(caps=()) -> list:
+    """Packages still needed for the host compiler plus these capabilities."""
+    need = []
+    if not any(shutil.which(c) for c in ("cc", "gcc", "clang")):
+        need.append({"linux": "build-essential", "macos": "gcc"}.get(host_os(), "gcc"))
+    for c in caps:
+        if not c.present:
+            need.extend(c.packages)
+    return sorted(set(need))
+
+
+def install_weight(packages) -> str:
+    """How much a capability actually costs to add, or "" when it cannot be known cheaply.
+
+    Reported as a PACKAGE COUNT, not bytes, and that is deliberate. The first version of
+    this read `apt-cache show`'s `Installed-Size`, which is the metapackage alone — it
+    reported `wine` as "194 kB" when wine's real cost is its dependency closure. A number
+    that makes the kitchen sink look free is worse than no number, and `bootstrap --list`
+    exists precisely so an operator can see the weight before agreeing to it.
+
+    `apt-get -s` (simulate) needs no sudo and resolves the full closure. It does not print a
+    disk-space line in simulate mode on current apt, so the count is what is honestly
+    available; `wine` pulling ~100 packages says what needs saying.
+    """
+    pkgs = [p for p in packages if p]
+    if not pkgs or not shutil.which("apt-get"):
+        return ""
+    try:
+        out = subprocess.run(["apt-get", "install", "-s", "-y", *pkgs],
+                             capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    m = re.search(r"(\d+) newly installed", out)
+    if not m:
+        return ""
+    n = int(m.group(1))
+    return f"{n} pkg" if n == 1 else f"{n} pkgs"
 
 
 def _package_manager() -> tuple:
