@@ -301,6 +301,8 @@ user data — the code lives in the stage dir.
   RAM staging)
 - [docs/UV_FREE_THICK.md](docs/UV_FREE_THICK.md) — a costed and **declined** design, kept so
   it is not rediscovered from scratch
+- [docs/ZIG_TOOLCHAIN.md](docs/ZIG_TOOLCHAIN.md) — a validated **prototype**: one bundled
+  `zig cc` instead of four system cross-compilers, with what it would cost
 - [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)
 
 ## Status

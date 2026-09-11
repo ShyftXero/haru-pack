@@ -128,10 +128,16 @@ results are recorded here so nobody repeats them:
 | `linux-aarch64` | **fails** — `nimcrypto`'s `sha2_neon.nim` compiles with `-march=armv8-a+crypto` and zig's clang rejects it: `unknown CPU: 'armv8'` |
 | `macos-aarch64` | **fails** — zig's bundled macOS headers lack `fstore_t`, which Nim's posix module needs. Cross-compiling to macOS still needs the real Apple SDK |
 
-So zig covers two of the four and misses both of the ones that would matter — ARM64, and the
-macOS gap nothing else here can fill. Adopting it would add a second partially-overlapping
-toolchain to pin and verify rather than removing one, so it is deliberately not used. Tried
-2026-09-11.
+That first pass concluded zig was not worth it. That conclusion answered the wrong question
+— "can zig replace the set outright?" — and a second pass against the right one ("is one
+bundled compiler more ergonomic than four system packages?") found that with a small shim for
+one GCC-only flag, zig builds **every target this project cares about**, and the resulting
+aarch64 binary's SHA-256 matches the GCC build byte for byte on real hardware. macOS remains
+out of reach either way.
+
+It is still not used by any code here. The evidence, the shim, the costs and what adopting it
+would take are in [`ZIG_TOOLCHAIN.md`](ZIG_TOOLCHAIN.md) — read that rather than re-deriving
+it. Tried 2026-09-11.
 
 ## Cross-compile notes (Linux → Windows)
 - **thin / default**: fully supported from Linux. `haru-pack` fetches the **Windows** uv
