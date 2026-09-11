@@ -1820,3 +1820,81 @@ Source: docs/adr/0003-stub-config-and-canary.md §4.3. The pairs live post-decry
 launcher applies them before uv + the app and its own reserved vars win on a collision
 (INV-LAUNCH-09). Called "inject", never "project".
 Territory: src/haru_pack/build.py, src/haru_pack/cli.py
+
+---
+
+## STAGING-2 — reap, ram-only, and base-path relocate staging without becoming a delete primitive
+
+Phase 2 of the launcher rework (docs/adr/0004-reap-ram-staging.md) lets a build bake three
+staging choices into the cleartext stub-config: an on-exit detached cleanup (`--reap`), a
+best-effort RAM-backed staging root (`--ram-only`), and a relocated staging root
+(`--base-path`, consuming the Phase-1 `BASE_PATH` knob). The danger is that `--reap` is a
+delete primitive fed by a relocatable root, one input to which (`BASE_PATH` env) is
+attacker-settable. The invariants below keep the delete target pinned to a subtree the
+launcher itself created, and keep an unsafe root out at both build and run time. None of the
+three changes any security decision by its ABSENCE, which is why neither the footer version nor
+`stub_config_version` moves — the corpus and the absence-is-today's-behaviour default are held
+by the CANARY/STUB invariants above and by docs/adr/0004 §2.
+
+### INV-BASE-01
+Status: active
+Statement: The launcher resolves the staging root by the precedence `BASE_PATH` env
+(canary-resolved) > stub-config `base_path` > (`ram_only` ? RAM-backed root : the per-user
+cache), computed BEFORE staging; it stages and reaps only a `<root>/<key>-<digest>` subtree it
+creates, and it REFUSES a root that is empty, `/`, a filesystem/drive/UNC root, or the
+home-directory root — at build time for `--base-path` and defensively at runtime for both the
+baked `base_path` and the `BASE_PATH` env.
+Actors: anyone who can set the `BASE_PATH` env on the target (the value is not baked through
+the build), plus a packager who fat-fingers `--base-path /`. The reaper (INV-REAP-01) deletes
+what staging created, so a root that resolves to `/` or `$HOME` would be catastrophic.
+Assets: the property that relocating staging can never become arbitrary-create or (via reap)
+arbitrary-delete; a hostile `BASE_PATH` can move where the subtree lives but not what is
+deleted, and can never name a bare root.
+Red-path: In `stage.refuseUnsafeRoot` return `""` always, rebuild, run a binary whose
+stub-config sets `base_path = "/"` (or run any binary with `HARU_BASE_PATH=/`): without the
+guard the launcher tries to stage under `/` and the "refusing to stage under an unsafe base
+path" `ExitBadStub` never fires. Separately, in `build.resolve_base_path` drop the
+`_is_root_like` raise and `test_build_refuses_root_base_path` goes red. Separately, reorder
+`main.resolveStagingRoot` to consult `sc.basePath` before the env and
+`test_env_base_path_overrides_stub_base_path` goes red.
+Source: docs/adr/0004-reap-ram-staging.md §3/§6. Consumes the `BASE_PATH` knob ADR 0003 §3.4
+left wired-but-unconsumed; the per-knob env-name rule is INV-CANARY-01.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py, src/haru_pack/cli.py
+
+### INV-RAM-01
+Status: active
+Statement: With `ram_only` baked and no base-path override, the launcher stages under a
+RAM-backed root — `/dev/shm/haru-pack` on Linux when `/dev/shm` exists and is writable — and
+otherwise falls back to the persistent per-user cache with an honest stderr note; an explicit
+base_path always wins over ram-only.
+Actors: not an attacker — a packager who does not want the staged payload tree written to
+persistent disk, and who must not be given a false guarantee when no RAM filesystem exists.
+Assets: an honest mechanism (real tmpfs paths the interpreter can import from; memfd is
+unusable for a path-based import tree) and an honest fallback, so ram-only never silently
+promises RAM it did not get. It governs only where the STUB stages, never the app's own writes.
+Red-path: In `stage.ramBackedRoot` return `baseDir()` unconditionally, rebuild, run a binary
+whose stub-config sets `ram_only = true`: staging then lands in the per-user cache and
+`test_ram_only_stages_under_dev_shm` (which asserts `HARUPACK_STAGE` is under `/dev/shm`) goes
+red. Walked on this Linux host, where `/dev/shm` exists.
+Source: docs/adr/0004-reap-ram-staging.md §4. CONTEXT.md "RAM-backed staging (ephemeral)".
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py
+
+### INV-REAP-01
+Status: active
+Statement: With `reap` baked, after the app exits the launcher spawns a DETACHED,
+fire-and-forget process that deletes ONLY the `<root>/<key>-<digest>` subtree it created this
+run, then returns the child's exit code without waiting; the base path itself and anything
+beside the subtree are left intact, and a `HARUPACK_DEV_STAGE` tree is never reaped.
+Actors: not an attacker — a packager who wants staged bytes cleaned up on exit; the safety edge
+is that the delete target must be the launcher's own subtree, never a raw base_path or env value
+(shared with INV-BASE-01).
+Assets: cleanup of the staged subtree that keeps running after the stub dies (many GB), without
+ever deleting the root it lives under or a developer's dev-stage tree.
+Red-path: Comment out the `if reapWanted and reapTarget.len > 0: reapDetached(reapTarget)` call
+in `main.launch`, rebuild, run a binary whose stub-config sets `reap = true` and a base_path
+under a temp dir: the staged subtree is still present after exit and
+`test_reap_deletes_only_its_own_subtree` (which polls for the subtree to vanish while asserting
+the base dir and a sentinel survive) goes red. Walked 2026-09-10 on Linux.
+Source: docs/adr/0004-reap-ram-staging.md §5/§6. CONTEXT.md "detached reap" / "reap
+(build-time)".
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py

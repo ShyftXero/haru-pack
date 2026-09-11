@@ -136,6 +136,22 @@ proc runInstallSteps(uv, appDir: string, m: Manifest, steps: seq[InstallStep],
     ran = true
   if ran or steps.len > 0: writeFile(sentinel, "1")
 
+proc resolveStagingRoot(sc: StubConfig): string =
+  ## The staging-root precedence, computed BEFORE staging (docs/adr/0004 §3, INV-BASE-01):
+  ##
+  ##   BASE_PATH env (canary-resolved, Phase-1 mechanism)   [highest]
+  ##     > stub-config base_path (build-time default)
+  ##     > (ram_only ? RAM-backed root : the normal per-user cache from baseDir())
+  ##
+  ## Only the ROOT is chosen here; stageZip appends the create-and-delete-own subtree
+  ## `<root>/<key>-<digest>`. The caller refuses an unsafe root (refuseUnsafeRoot) before it
+  ## stages, so a hostile BASE_PATH can relocate staging but never becomes arbitrary-delete.
+  let envVal = getEnv(sc.envForKnob(kBasePath))   # BASE_PATH knob — now consumed (was Phase-1 TODO)
+  if envVal.len > 0: return envVal
+  if sc.basePath.len > 0: return sc.basePath
+  if sc.ramOnly: return ramBackedRoot()           # /dev/shm on Linux, else honest fallback
+  return baseDir()
+
 proc launch(): int =
   let self = getAppFilename()
   let exeDir = getAppDir()
@@ -144,6 +160,11 @@ proc launch(): int =
 
   # 1. locate staged payload root
   var stageRoot = ""
+  # Phase-2 reap state (docs/adr/0004 §4). Only ever set on the overlay-staged path below —
+  # a HARUPACK_DEV_STAGE tree belongs to the developer and is NEVER reaped (we did not create
+  # it). reapTarget is the exact subtree stageZip created/verified this run (INV-REAP-01).
+  var reapWanted = false
+  var reapTarget = ""
   # INV-LAUNCH-02: HARUPACK_DEV_STAGE stages an arbitrary directory and skips the
   # overlay, the digest check, decryption and every license check. In a shipped, signed
   # binary that is a signed proxy for arbitrary code execution, available to anyone who
@@ -184,9 +205,17 @@ proc launch(): int =
       # SECRET knob (INV-CANARY-01): the decryption key's env NAME is sc.envForKnob(kSecret)
       # (default HARU_SECRET), replacing the retired hardcoded HARUPACK_SECRET.
       payload = openContainer(payload, sc.envForKnob(kSecret))   # dies on failure
-    # TODO(phase-base): BASE_PATH knob — when getEnv(sc.envForKnob(kBasePath)) is set, use it
-    # as the stage root override in place of stage.baseDir() below.
-    stageRoot = stageZip(payload, shahex[0..15])
+    # BASE_PATH / ram_only (docs/adr/0004 §3, INV-BASE-01): resolve the staging ROOT by
+    # precedence, then REFUSE an unsafe root (/, a drive/UNC root, or the home root) before we
+    # create anything under it. stageZip appends the create-and-delete-own `<key>-<digest>`
+    # subtree, which is the only path --reap ever deletes (INV-REAP-01).
+    let root = resolveStagingRoot(sc)
+    let rootFault = refuseUnsafeRoot(root)
+    if rootFault.len > 0:
+      die("refusing to stage under an unsafe base path — " & rootFault, ExitBadStub)
+    stageRoot = stageZip(payload, shahex[0..15], root)
+    reapWanted = sc.reap                 # build-time --reap; independent of ram_only
+    reapTarget = stageRoot               # the exact subtree we just created/verified
 
   # 2. manifest
   let mfPath = stageRoot / "manifest.toml"
@@ -276,7 +305,15 @@ proc launch(): int =
   #    so a plain open('file.txt') always hits the file adjacent to the shipped exe)
   let childCwd = if m.cwdPolicy == "exe": exeDir else: runDir
   when defined(posix): signal(SIGINT, ignoreInParent)   # child owns Ctrl+C
-  return runChild(uv, a, childCwd)
+  let rc = runChild(uv, a, childCwd)
+
+  # 7. detached reap (build-time --reap, docs/adr/0004 §4, INV-REAP-01): after the app exits,
+  # hand the staged subtree to a fire-and-forget deleter and return WITHOUT waiting — many GB
+  # keep deleting after this stub has died. Only the subtree the launcher created this run is
+  # reaped; a dev-stage tree (reapTarget == "") is never touched.
+  if reapWanted and reapTarget.len > 0:
+    reapDetached(reapTarget)
+  return rc
 
 when isMainModule:
   # W16: parseManifest, parseJson and the expiry parse all raise, and zippy raises on a

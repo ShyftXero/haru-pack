@@ -191,3 +191,73 @@ def test_receipt_records_the_canary_map_but_not_the_secret(stub_toolchain, scrip
     assert secret not in out.read_bytes()
     # The cleartext stub-config publishes only the prefix, never the key.
     assert secret.decode() not in verify(out)["stub_config"]
+
+
+# ── Phase-2 staging: reap / ram-only / base-path (docs/adr/0004) ───────────────────────────
+# The build (Python) half of INV-BASE-01 / INV-RAM-01 / INV-REAP-01: the stub-config bytes and
+# receipt. The launcher (Nim) half — precedence, /dev/shm, the detached reap — is claimed
+# end-to-end in tests/test_reap.py and tests/test_ram_only.py; the --base-path build-time
+# refusal (resolve_base_path) is claimed in tests/test_ram_only.py. See the INVARIANTS.md entries.
+
+
+@pytest.mark.invariant("INV-BASE-01")
+def test_default_build_stub_config_is_byte_identical():
+    """No reap/ram-only/base-path -> the Phase-1 bytes exactly, so the v1 corpus and the
+    'no version bump' claim (docs/adr/0004 §2.2) hold. Red-path: emit the keys unconditionally
+    and this diverges from the Phase-1 shape asserted above."""
+    c = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
+    assert stub_config_bytes(c) == stub_config_bytes(c, reap=False, ram_only=False, base_path="")
+    assert b"reap" not in stub_config_bytes(c)
+    assert b"ram_only" not in stub_config_bytes(c)
+
+
+@pytest.mark.invariant("INV-REAP-01")
+def test_stub_config_emits_reap_only_when_set():
+    c = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
+    out = stub_config_bytes(c, reap=True).decode()
+    assert "\nreap = true\n" in out
+    # top-level key precedes the [canary] table (TOML)
+    assert out.index("reap = true") < out.index("[canary]")
+
+
+@pytest.mark.invariant("INV-RAM-01")
+def test_stub_config_emits_ram_only_when_set():
+    c = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
+    out = stub_config_bytes(c, ram_only=True).decode()
+    assert "\nram_only = true\n" in out
+    assert out.index("ram_only = true") < out.index("[canary]")
+
+
+@pytest.mark.invariant("INV-BASE-01")
+def test_stub_config_emits_and_escapes_base_path():
+    c = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
+    win_path = "C:" + chr(92) + "stage" + chr(92) + "app"
+    out = stub_config_bytes(c, base_path=win_path).decode()
+    # base_path is a TOML basic string with the backslashes escaped so a Windows path round-trips
+    expected = 'base_path = "C:' + chr(92) * 2 + "stage" + chr(92) * 2 + 'app"'
+    assert expected in out
+
+
+@pytest.mark.invariant("INV-REAP-01")
+def test_build_bakes_reap_into_stub_and_receipt(stub_toolchain, script_project, tmp_path):
+    out = tmp_path / "app"
+    info = stub_toolchain.build(script_project, out, tier="thin", reap=True)
+    assert "reap = true" in verify(out)["stub_config"]
+    assert info["staging"]["reap"] is True
+
+
+@pytest.mark.invariant("INV-RAM-01")
+def test_build_bakes_ram_only_into_stub_and_receipt(stub_toolchain, script_project, tmp_path):
+    out = tmp_path / "app"
+    info = stub_toolchain.build(script_project, out, tier="thin", ram_only=True)
+    assert "ram_only = true" in verify(out)["stub_config"]
+    assert info["staging"]["ram_only"] is True
+
+
+@pytest.mark.invariant("INV-BASE-01")
+def test_build_bakes_base_path_into_stub_and_receipt(stub_toolchain, script_project, tmp_path):
+    base = str(tmp_path / "stage")
+    out = tmp_path / "app"
+    info = stub_toolchain.build(script_project, out, tier="thin", base_path=base)
+    assert f'base_path = "{base}"' in verify(out)["stub_config"]
+    assert info["staging"]["base_path"] == base

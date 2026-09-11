@@ -1,7 +1,7 @@
 from __future__ import annotations
 import datetime as _dt
 import re as _re
-import secrets, shutil, string, subprocess, tempfile
+import os, secrets, shutil, string, subprocess, tempfile
 from pathlib import Path
 from . import tomlio, discovery, crypto
 from .paths import launcher_src_dir
@@ -111,11 +111,73 @@ def resolve_canary(env_canary: str = "", env_canary_random: bool = False,
     return canary
 
 
-def stub_config_bytes(canary: dict) -> bytes:
-    """The cleartext stub-config TOML section (docs/adr/0003 §2.1), UTF-8, in fixed knob
-    order. Tokens are validated env-name prefixes, so no TOML escaping is needed. Read before
-    decryption by launcher/stubconfig.parseStubConfig; sha-checked first (INV-STUB-01)."""
-    lines = ["stub_config_version = 1", "", "[canary]"]
+def _toml_basic_str(s: str) -> str:
+    """Minimal TOML basic-string escape for a base_path (a path may carry `\\` on a Windows
+    target). Only backslash and double-quote need escaping for a single-line basic string."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# ── base_path safety (docs/adr/0004 §5, INV-BASE-01) ──────────────────────────────────────
+# A staging root that is a filesystem/drive/UNC root or a home-directory root is refused. The
+# launcher creates AND (with --reap) deletes a create-and-delete-own subtree beneath this
+# root, so the root must never be a place whose pollution or deletion would be catastrophic.
+# The build refuses the obvious shapes here (fail fast, cross-OS aware — a --target windows
+# build on Linux must still reject `C:\`); the launcher re-refuses defensively at runtime,
+# where the target's real "/" and $HOME are knowable (refuseUnsafeRoot in stage.nim).
+_DRIVE_ROOT_RE = _re.compile(r"[A-Za-z]:[\\/]?\Z")     # C:  C:\  C:/
+_FS_ROOT_RE = _re.compile(r"[\\/]+\Z")                 # /  \  //  \\  (posix root / UNC-ish)
+
+
+def _is_root_like(path: str) -> bool:
+    p = path.rstrip("/\\") or path            # keep a lone "/" as "/"
+    if p in ("/", "\\"):
+        return True
+    if _FS_ROOT_RE.fullmatch(path):           # bare separators only -> a root
+        return True
+    if _DRIVE_ROOT_RE.fullmatch(path):        # Windows drive root, any build OS
+        return True
+    home = os.path.expanduser("~")
+    return bool(home and home != "~" and os.path.normpath(p) == os.path.normpath(home))
+
+
+def resolve_base_path(base_path: str) -> str:
+    """Validate the --base-path staging root (docs/adr/0004 §3/§5). '' means 'normal cache'
+    (the default, no refusal). A non-empty value that is empty-after-strip, a filesystem/drive/
+    UNC root, or the build host's home root is REFUSED at build time (INV-BASE-01). The value
+    is stored verbatim in the cleartext stub-config; the launcher applies the same refusal
+    against the TARGET's real roots at runtime."""
+    if not base_path:
+        return ""
+    if not base_path.strip():
+        raise BuildError("--base-path is blank. Omit it for the normal per-user cache, or "
+                         "give a real staging directory.")
+    if _is_root_like(base_path):
+        raise BuildError(
+            f"--base-path {base_path!r} resolves to a filesystem, drive, or home-directory "
+            f"root. The launcher stages AND (with --reap) deletes a subtree under this path, "
+            f"so it must be a dedicated directory, never a root (docs/adr/0004 §5).")
+    return base_path
+
+
+def stub_config_bytes(canary: dict, *, reap: bool = False, ram_only: bool = False,
+                      base_path: str = "") -> bytes:
+    """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2), UTF-8,
+    in fixed order. Canary tokens are validated env-name prefixes, so no escaping is needed.
+
+    The Phase-2 keys `reap`/`ram_only`/`base_path` are emitted ONLY when non-default, so a
+    build that uses none of them is byte-identical to the Phase-1 stub-config (the v1 corpus
+    and its exact-bytes test are unchanged). Their absence is today's behaviour, so no
+    stub_config_version bump is needed (docs/adr/0004 §2). Read before decryption by
+    launcher/stubconfig.parseStubConfig; sha-checked first (INV-STUB-01)."""
+    lines = ["stub_config_version = 1"]
+    # Top-level keys must precede the [canary] table (TOML). Emit only when non-default.
+    if reap:
+        lines.append("reap = true")
+    if ram_only:
+        lines.append("ram_only = true")
+    if base_path:
+        lines.append(f"base_path = {_toml_basic_str(base_path)}")
+    lines += ["", "[canary]"]
     lines += [f'{knob} = "{canary[knob]}"' for knob in CANARY_KNOBS]
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -564,6 +626,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           env_canary: str = "", env_canary_random: bool = False,
           stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
+          reap: bool = False, ram_only: bool = False, base_path: str = "",
           env_append=None, log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
@@ -614,6 +677,26 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                                       "source_url": stub_env_source_url_canary,
                                       "base_path": stub_env_base_path_canary}, log=log)
     injects = resolve_injects(env_append, encrypted=enc["enabled"], log=log)
+    # Phase-2 staging knobs (docs/adr/0004). base_path is refused at build time if it is a
+    # root; reap/ram-only are baked into the cleartext stub-config below (INV-BASE-01 /
+    # INV-RAM-01 / INV-REAP-01). HONEST DISCLAIMER, said out loud at build: --ram-only governs
+    # only where the STUB stages the payload tree — haru cannot control the packed app's OWN
+    # disk writes, and on Windows/macOS there is no guaranteed RAM filesystem.
+    base_path = resolve_base_path(base_path)
+    say = log or (lambda _m: None)
+    if ram_only:
+        say("--ram-only: best-effort RAM-backed staging. Linux stages under /dev/shm (tmpfs) "
+            "when available, else falls back to the persistent cache with a note. Windows/macOS "
+            "have no guaranteed RAM filesystem, so this is not guaranteed there. It governs only "
+            "where the STUB stages the payload tree — not the packed app's own disk writes.")
+    if reap:
+        say("--reap: after the app exits the stub spawns a detached, fire-and-forget deletion "
+            "of the staged subtree it created this run, then exits without waiting. Only that "
+            "subtree is removed — never the base path itself.")
+    if base_path:
+        say(f"--base-path: staging root default baked into the stub-config as {base_path!r}. "
+            "A canary-named BASE_PATH env var overrides it at runtime; the launcher refuses a "
+            "root/drive/home path defensively.")
     if injects:
         # Lives in the PAYLOAD manifest (post-decrypt), so --encrypt hides it (docs/adr/0003
         # §4). Carried through assemble_payload's manifest dump; the launcher reads `inject`.
@@ -650,7 +733,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
         info = attach(launcher, payload, out, flags=flags,
-                      stub_config=stub_config_bytes(canary))
+                      stub_config=stub_config_bytes(canary, reap=reap, ram_only=ram_only,
+                                                    base_path=base_path))
     try:
         out.chmod(0o755)
     except Exception:
@@ -664,6 +748,10 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 # auditing (INV-CANARY-02). The secret VALUE still lands in no artifact
                 # (INV-SECRET-02).
                 canary=canary,
+                # Phase-2 staging knobs (docs/adr/0004): not secret, and recording them lets an
+                # auditor see whether a binary reaps / stages to RAM / relocates its cache.
+                staging={"reap": bool(reap), "ram_only": bool(ram_only),
+                         "base_path": base_path},
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
     if shake_report:

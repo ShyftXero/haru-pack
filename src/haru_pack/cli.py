@@ -51,6 +51,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                shake=False, shake_keep=(), env_canary="", env_canary_random=False,
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
+               reap=False, ram_only=False, base_path="",
                env_append=None) -> None:
     """The build, as a plain function with real Python defaults.
 
@@ -95,6 +96,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                          stub_env_source_url_canary=stub_env_source_url_canary,
                          stub_env_base_path_canary=stub_env_base_path_canary,
+                         reap=reap, ram_only=ram_only, base_path=base_path,
                          env_append=list(env_append or []),
                          log=lambda m: print(
                              f"haru-pack: {m}",
@@ -301,6 +303,16 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
               metavar="TOKEN", help="override the SOURCE_URL knob's canary only"),
           stub_env_base_path_canary: str = typer.Option("", "--stub-env-base-path-canary",
               metavar="TOKEN", help="override the BASE_PATH knob's canary only"),
+          reap: bool = typer.Option(False, "--reap",
+              help="after the app exits, spawn a DETACHED process that deletes the staged "
+                   "subtree, then exit without waiting (fire-and-forget cleanup)"),
+          ram_only: bool = typer.Option(False, "--ram-only",
+              help="best-effort RAM-backed staging: Linux stages under /dev/shm when available "
+                   "(else falls back to the cache). Governs only where the STUB stages — not "
+                   "the app's own disk writes; not guaranteed on Windows/macOS"),
+          base_path: str = typer.Option("", "--base-path", metavar="DIR",
+              help="staging-root default baked into the stub-config (a canary-named BASE_PATH "
+                   "env var overrides it at runtime). Refused if it is a root/drive/home path"),
           env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
               help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
                    "Lives in the payload — use --encrypt to hide a secret value")):
@@ -319,6 +331,7 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                stub_env_source_url_canary=stub_env_source_url_canary,
                stub_env_base_path_canary=stub_env_base_path_canary,
+               reap=reap, ram_only=ram_only, base_path=base_path,
                env_append=env_append)
 
 @app.command()

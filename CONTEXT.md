@@ -38,9 +38,13 @@ so nothing the payload contains is written to persistent disk. For packagers con
 disk-based artifacts. Distinct from the normal **cache**, which is persistent and reused.
 
 ## detached reap
-The stub's fire-and-forget final act: it spawns a **separate, detached process** to delete
-the staged tree, then exits immediately. Cleanup of many gigabytes continues after the stub
-has died. Only for ephemeral staging — never the persistent cache.
+The stub's fire-and-forget final act when `--reap` is baked in: after the app exits it spawns
+a **separate, detached process** to delete the exact subtree it created this run, then exits
+immediately. Cleanup of many gigabytes continues after the stub has died. Independent of
+`--ram-only` (either, both, or neither): `--reap` alone deletes a subtree of the *persistent*
+cache; with `--ram-only` it deletes the RAM-backed one. It only ever removes the
+stub-created `<root>/<key>-<digest>` subtree — never a raw `BASE_PATH`, and never a refused
+root (`/`, a drive/UNC root, or a home directory).
 
 ## remote-fetch
 A **delivery modifier**, orthogonal to the bundling tier: the payload is fetched over HTTP at

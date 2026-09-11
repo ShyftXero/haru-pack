@@ -17,6 +17,14 @@ type
   StubConfig* = object
     version*: int
     canary*: array[Knob, string]
+    ## Phase-2 optional staging knobs (docs/adr/0004-reap-ram-staging.md §2). Their ABSENCE
+    ## is today's behaviour (persistent-cache staging, no reap), so they add NO new security
+    ## decision on absence and ride at stub_config_version = 1 (INV-BASE-01 / INV-RAM-01 /
+    ## INV-REAP-01). A Phase-1 launcher, which ignores unknown top-level keys, simply stages
+    ## the normal way — a safe default, never a downgraded protection.
+    reap*: bool          ## build-time --reap: detached on-exit cleanup of the staged subtree
+    ramOnly*: bool       ## build-time --ram-only: best-effort RAM-backed staging root
+    basePath*: string    ## build-time --base-path: staging-root default ("" = normal cache)
 
 const
   SupportedStubConfigVersion* = 1
@@ -39,9 +47,13 @@ proc canaryKey(k: Knob): string =
   of kBasePath:  "base_path"
 
 proc defaultStubConfig*(): StubConfig =
-  ## Every knob -> "HARU". Used for a v1 (single-payload) binary that carries no stub.
+  ## Every knob -> "HARU". Used for a v1 (single-payload) binary that carries no stub. The
+  ## Phase-2 staging knobs default to today's behaviour: no reap, no RAM-only, normal cache.
   result.version = SupportedStubConfigVersion
   for k in Knob: result.canary[k] = DefaultCanary
+  result.reap = false
+  result.ramOnly = false
+  result.basePath = ""
 
 proc isValidCanary(tok: string): bool =
   ## ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced at build time
@@ -98,6 +110,28 @@ proc parseStubConfig*(raw: string): StubConfig =
       raise newException(ValueError, "stub-config: [canary]." & key &
         " is not a valid env-name prefix: '" & tok & "'")
     result.canary[k] = tok
+  # Phase-2 optional staging knobs (docs/adr/0004 §2). Absent -> today's behaviour; present ->
+  # typed and validated. These are distinct top-level keys, NOT canary entries; any OTHER
+  # unknown top-level key stays reserved/ignored (§2.3 forward-extensibility seam). No version
+  # bump: their absence changes no security decision, only where/whether the stub stages/reaps.
+  result.reap = false
+  result.ramOnly = false
+  result.basePath = ""
+  if t.contains("reap"):
+    let n = t["reap"]
+    if n.kind != TomlValueKind.Bool:
+      raise newException(ValueError, "stub-config: reap must be a boolean")
+    result.reap = n.getBool()
+  if t.contains("ram_only"):
+    let n = t["ram_only"]
+    if n.kind != TomlValueKind.Bool:
+      raise newException(ValueError, "stub-config: ram_only must be a boolean")
+    result.ramOnly = n.getBool()
+  if t.contains("base_path"):
+    let n = t["base_path"]
+    if n.kind != TomlValueKind.String:
+      raise newException(ValueError, "stub-config: base_path must be a string")
+    result.basePath = n.getStr()
 
 proc envForKnob*(sc: StubConfig, k: Knob): string =
   ## The single runtime resolution rule (INV-CANARY-01): knob K is read from
