@@ -38,6 +38,11 @@ when defined(windows): import std/osproc
 type StageError* = object of CatchableError
 
 const
+  ## Ceiling on a single expanded payload member. The only thing haru-pack compresses today
+  ## is the `uv` binary (~56 MB linux, ~65 MB windows raw), so 512 MB is generous by an
+  ## order of magnitude while still refusing the absurd values a corrupt or tampered
+  ## `.size` sidecar can carry. Raise it deliberately if a bigger member is ever compressed.
+  MaxExpandedBytes* = 512 * 1024 * 1024
   StageFormat* = "haru-pack-stage/2"
   ReadyName* = ".ready"
   FilesName* = ".stage-files"
@@ -354,6 +359,17 @@ proc expandCompressedMembers(root: string) =
       want = parseInt(readFile(sizePath).strip())
     except ValueError:
       raise newException(StageError, "unreadable size sidecar for " & rel)
+    # The sidecar is a number from the payload, and the payload is not verified at runtime
+    # (INV-LAUNCH-01 is still `proposed`). Feeding it straight to `newString` means a
+    # tampered or corrupt value allocates that much: measured 2026-09-11, `newString(1 shl
+    # 50)` aborts the process with a bare "out of memory" — an OutOfMemDefect, which is not
+    # catchable, so none of the error handling below would ever run. A ceiling turns that
+    # into a refusal with a reason.
+    if want <= 0 or want > MaxExpandedBytes:
+      raise newException(StageError,
+        "size sidecar for " & rel & " says " & $want & " bytes, which is outside the " &
+        "range this launcher will expand (1 .. " & $MaxExpandedBytes & "). The payload is " &
+        "corrupt or was not produced by haru-pack.")
     let dest = full[0 ..< full.len - 3]           # strip ".xz"
     if fileExists(dest):
       raise newException(StageError,
@@ -363,6 +379,27 @@ proc expandCompressedMembers(root: string) =
       data = xzDecode(readFile(full), want)
     except XzError as e:
       raise newException(StageError, "could not expand " & rel & ": " & e.msg)
+
+    # Confirm the expansion produced the bytes the build compressed (INV-PAYLOAD-04). The
+    # build writes the digest of the ORIGINAL file beside the member, so this catches a
+    # decoder bug, a silently-corrupted member, and a mismatched .size — the cases where
+    # decompression "succeeds" and yields something else.
+    #
+    # What it does NOT do, stated plainly: defeat tampering. An attacker who can rewrite
+    # `uv.xz` can rewrite `uv.xz.sha256` alongside it. Closing that needs the digest in a
+    # signature-covered place the payload cannot reach — see INV-LAUNCH-01, still
+    # `proposed`. This is an integrity check against corruption, not an authenticity one.
+    let shaPath = full & ".sha256"
+    if fileExists(shaPath):
+      let wantSha = readFile(shaPath).strip().toLowerAscii
+      if wantSha.len != 64:
+        raise newException(StageError,
+          "digest sidecar for " & rel & " is not a sha256 hex digest")
+      let gotSha = sha256hex(data)
+      if gotSha != wantSha:
+        raise newException(StageError,
+          "expanded " & rel & " does not match its recorded digest (expected " &
+          wantSha[0 ..< 16] & "…, got " & gotSha[0 ..< 16] & "…). The payload is corrupt.")
     writeFile(dest, data)
     when defined(posix):
       # uv is executed, so it needs the bit back. Group/other write is stripped by

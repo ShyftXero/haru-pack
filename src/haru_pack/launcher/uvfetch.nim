@@ -13,9 +13,11 @@
 ##     (INV-SUPPLY-05);
 ##   * every request carries an explicit timeout.
 ##
-## HONEST LIMITS. (1) Nothing populates `uv_sha256` yet — writing it at build time lives
-## in the Python build/tier code, not here. Until that lands this is a mechanism with no
-## pin behind it, and the launcher says so on stderr every time it fetches. (2) puppy has
+## HONEST LIMITS. (1) `uv_sha256` IS populated as of 2026-09-11: `build.assemble_payload`
+## writes the pinned digest of the release asset for the target from `pins.toml` whenever
+## the tier fetches uv, and refuses to build if no pin exists (INV-SUPPLY-01). Before that
+## this was a mechanism with no pin behind it and the launcher warned on every fetch; the
+## warning path below now only fires for a payload built by an older haru-pack. (2) puppy has
 ## no streaming API, so the cap can only be checked from a HEAD's content-length and then
 ## on the body once it is in memory; a hostile server can still make us buffer more than
 ## the cap before we reject it. (3) The cap is on the compressed archive; a zip bomb that

@@ -60,6 +60,14 @@ proc xzDecode*(src: string, outSize: int): string =
   ## Raspberry Pi targets this project supports. Peak here is output + input instead.
   if outSize <= 0:
     raise newException(XzError, "refusing to decode with a non-positive output size")
+  # `src[0].addr` on an EMPTY string is an index-out-of-bounds Defect, not a CatchableError,
+  # so it aborts the launcher with a Nim traceback instead of haru-pack's own message. No
+  # attacker required: a truncated write, an interrupted copy, or a zero-filling filesystem
+  # is enough to leave a 0-byte member in the payload. Found by adversarial review
+  # 2026-09-11 by running exactly that case.
+  if src.len == 0:
+    raise newException(XzError,
+      "compressed member is empty (0 bytes) — the payload is truncated or corrupt")
   xz_crc32_init()
   let s = xz_dec_init(XZ_SINGLE, 0)
   if s == nil:

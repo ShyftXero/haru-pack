@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import source_without_comments
 from haru_pack import cli, tomlio
 
 REPO = Path(__file__).resolve().parent.parent
@@ -142,23 +143,8 @@ CUT_RELEASE = (REPO / "scripts" / "cut-release.sh").read_text(encoding="utf-8")
 SELF_BUILD = REPO / "scripts" / "self-build.sh"
 
 
-def uncommented(text: str) -> str:
-    """Lines with `#` comments stripped.
-
-    These assertions forbid specific strings, and the comment *explaining* why a string is
-    forbidden contains it — so grepping the raw file fails on the explanation. That has now
-    bitten four tests in this repo; strip the comments and check the code.
-    """
-    out = []
-    for line in text.splitlines():
-        if line.lstrip().startswith("#"):
-            continue
-        out.append(line.split("#", 1)[0] if "#" in line else line)
-    return "\n".join(out)
-
-
-CI_RUN = uncommented(CI_YML)
-CUT_RUN = uncommented(CUT_RELEASE)
+CI_RUN = source_without_comments(REPO / '.github' / 'workflows' / 'ci.yml')
+CUT_RUN = source_without_comments(REPO / 'scripts' / 'cut-release.sh')
 
 
 @pytest.mark.invariant("INV-CI-01")
@@ -222,7 +208,7 @@ def test_the_release_gate_self_builds():
 
 @pytest.mark.invariant("INV-CI-02")
 def test_the_self_build_covers_both_release_targets():
-    src = uncommented(SELF_BUILD.read_text(encoding="utf-8"))
+    src = source_without_comments(SELF_BUILD)
     assert "linux-x86_64 windows-x86_64" in src, "both release targets must be built"
     assert "-e haru-pack" in src, (
         "this project declares two console scripts, so the self-build must name one or "
@@ -236,3 +222,54 @@ def test_the_self_build_script_is_executable():
     import os
     assert SELF_BUILD.is_file()
     assert os.access(SELF_BUILD, os.X_OK), "scripts/self-build.sh is not executable"
+
+
+# ------------------------------------ guards added by the adversarial review of 2026-09-11
+
+@pytest.mark.invariant("INV-CI-02")
+def test_the_self_build_refuses_to_succeed_with_no_artifacts():
+    """It did succeed with none: `--targets ""` printed "self-build ok: 0 artifact(s)" and
+    exited 0, and `sha256sum` with an empty argument list hashed STDIN into SHA256SUMS. The
+    release gate believes the exit status, so that is a tagged release whose only asset
+    describes an empty set. Verified fixed 2026-09-11 — both cases now exit 1.
+
+    Red-path: remove the `${#BUILT[@]}` check or the target validation.
+    """
+    src = source_without_comments(SELF_BUILD)
+    assert '${#BUILT[@]}' in src, "the artifact count is never asserted"
+    assert "no targets to build" in src, "an empty target list is not refused"
+    assert "sha256sum --" in src, (
+        "sha256sum is called without `--`, so an empty list silently reads stdin"
+    )
+
+
+@pytest.mark.invariant("INV-CI-02")
+def test_the_self_build_asks_the_code_for_the_default_python():
+    """It used to sed build.py for a line ending in `or "N.N"`, which matches any such line —
+    a silent wrong-interpreter release if that source moved."""
+    src = source_without_comments(SELF_BUILD)
+    assert "DEFAULT_PYTHON" in src, "the default Python is not read from the code"
+    assert "sed -n 's/.*or " not in src, "still scraping the default out of build.py"
+    from haru_pack.build import DEFAULT_PYTHON
+    assert DEFAULT_PYTHON.count(".") == 1 and DEFAULT_PYTHON[0].isdigit()
+
+
+@pytest.mark.invariant("INV-SUPPLY-05")
+def test_a_thin_build_records_the_pinned_uv_digest():
+    """`uvfetch.nim` has checked a manifest `uv_sha256` before extracting a downloaded uv
+    since 2026-09-09, and its own note said "Nothing populates uv_sha256 yet" — a mechanism
+    with no pin behind it, warning on every fetch. The thin tier now writes the pinned
+    ARCHIVE digest from pins.toml, and refuses to build without one.
+
+    Red-path: delete the `manifest["uv_sha256"]` assignment in `assemble_payload`. This goes
+    red, and a --thin binary fetches and executes an unverified uv on the target.
+    """
+    import inspect
+    from haru_pack import build as build_mod
+    src = inspect.getsource(build_mod.assemble_payload)
+    assert 'manifest["uv_sha256"]' in src, "the thin tier records no uv digest"
+    assert "UV_SHA256.get" in src, "the digest does not come from the pins"
+    # and it must be the ARCHIVE digest, not the bundled binary's
+    assert "uv_asset()" in src, (
+        "uvfetch hashes the release asset, so the pin must be looked up by asset name"
+    )

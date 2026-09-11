@@ -56,3 +56,25 @@ def nim_launcher(tmp_path_factory):
     from _stage_helpers import compile_launcher
 
     return compile_launcher(tmp_path_factory.mktemp("nim-stub-p2") / "launcher")
+
+
+def source_without_comments(path) -> str:
+    """A source file with its `#` comments removed.
+
+    Several tests assert that a file does NOT contain a string — and the comment
+    *explaining* why it is forbidden contains it, so grepping the raw text fails on the
+    explanation. That trap bit four tests in this repo before it got a name. Nim (`##`,
+    `#`), YAML, shell and Python all use `#`, which is every file these tests read.
+
+    Exported as a fixture-free helper so it can be used at module import time (several
+    callers build module-level constants from it).
+
+    Strips WHOLE-LINE comments only. The first version also cut everything after a trailing
+    `#`, which ate `${#BUILT[@]}` out of a shell script and made a test claim the artifact
+    count was never asserted when it was — a false negative introduced by the helper written
+    to prevent false negatives. `#` appears inside shell parameter expansions, string
+    literals and URLs; a line-oriented rule is the one that is safe without a parser, and
+    every trap this exists for was a full-line comment anyway.
+    """
+    return "\n".join(line for line in Path(path).read_text(encoding="utf-8").splitlines()
+                     if not line.lstrip().startswith("#"))

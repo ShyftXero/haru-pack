@@ -16,29 +16,11 @@ from pathlib import Path
 
 import pytest
 
+from conftest import source_without_comments as code_of
 from haru_pack import bundle
 
 LAUNCHER = Path(__file__).resolve().parent.parent / "src/haru_pack/launcher"
 XZ_DIR = LAUNCHER / "xz"
-
-
-def code_of(path: Path) -> str:
-    """A Nim source with its comments removed.
-
-    Every code-shape assertion below runs through this. Grepping raw source for the thing
-    you are forbidding matches the comment *explaining* that it is forbidden, which makes
-    the test unfixable-looking and, worse, means it would also pass for the wrong reason.
-    Three of these tests failed that way on first run.
-    """
-    out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("#"):        # `#` and `##` doc comments
-            continue
-        if "#" in line:                      # trailing comment; no `#` inside our strings
-            line = line[: line.index("#")]
-        out.append(line)
-    return "\n".join(out)
 
 
 @pytest.mark.invariant("INV-PAYLOAD-04")
@@ -207,3 +189,73 @@ def test_the_real_launcher_compiles_for_host_and_windows(tmp_path):
             pytest.skip(f"no C toolchain for {name}")
         out = compile_launcher(nim, tgt, tmp_path / name)
         assert out.exists() and out.stat().st_size > 0
+
+
+# ------------------------------------ guards added by the adversarial review of 2026-09-11
+
+@pytest.mark.invariant("INV-PAYLOAD-04")
+def test_the_build_records_a_digest_of_the_original_bytes(tmp_path):
+    """The launcher confirms the expansion produced what was compressed. Without the sidecar
+    there is nothing to confirm against and INV-PAYLOAD-04's "byte-identical" is decoration.
+
+    Red-path: drop the `.sha256` write from `compress_uv`. This goes red, and the launcher's
+    check silently becomes a no-op (it skips when the sidecar is absent, so nothing else
+    would fail).
+    """
+    raw = b"the original bytes" * 4096
+    uv = tmp_path / "uv"
+    uv.write_bytes(raw)
+    _, _, digest = bundle.compress_uv(uv, preset=1)
+    sha = tmp_path / "uv.xz.sha256"
+    assert sha.exists(), "no digest sidecar was written"
+    assert sha.read_text().strip() == digest == hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.invariant("INV-PAYLOAD-04")
+def test_the_launcher_verifies_the_expansion_and_bounds_the_size():
+    """Two guards the review found missing, both in code that runs on a recipient's machine.
+
+    Verified by execution on 2026-09-11, not by reading:
+      * an EMPTY `.xz` member hit `src[0].addr` on an empty string — an IndexDefect, which
+        is not a CatchableError, so the launcher died with a Nim traceback rather than
+        haru-pack's message. No attacker needed: a truncated write produces it.
+      * a `.size` sidecar of `1 shl 50` reached `newString`, which aborts the process with a
+        bare "out of memory" (an uncatchable Defect).
+      * a one-character change to the `.sha256` sidecar is now refused with
+        "does not match its recorded digest" and exit 7 — walked end to end against a real
+        rebuilt binary.
+    """
+    stage = code_of(LAUNCHER / "stage.nim")
+    xzdec = code_of(LAUNCHER / "xzdec.nim")
+
+    assert "src.len == 0" in xzdec, (
+        "xzDecode does not guard an empty input; an empty member aborts the launcher with "
+        "an IndexDefect instead of a StageError"
+    )
+    assert "MaxExpandedBytes" in stage, (
+        "the expanded size is unbounded; a corrupt .size sidecar becomes an uncatchable "
+        "out-of-memory abort"
+    )
+    assert "does not match its recorded digest" in stage, (
+        "the expansion is not checked against the digest the build recorded"
+    )
+    # the check has to run BEFORE the file is written, or it protects nothing
+    assert stage.index("does not match its recorded digest") < stage.index("writeFile(dest"), (
+        "the digest is checked after the expanded file is already written"
+    )
+
+
+@pytest.mark.invariant("INV-PAYLOAD-04")
+def test_the_digest_claim_is_scoped_to_corruption_not_tampering():
+    """The sidecar sits beside the member, so an attacker who can rewrite one can rewrite
+    both. Saying otherwise would be exactly the overclaim this review was looking for, so
+    both the code and the invariant have to say what the check really covers."""
+    stage = (LAUNCHER / "stage.nim").read_text(encoding="utf-8")
+    assert "not an authenticity one" in stage or "does NOT" in stage, (
+        "stage.nim does not state the limit of the digest check"
+    )
+    inv = (Path(__file__).resolve().parent.parent / "INVARIANTS.md").read_text()
+    body = inv.split("### INV-PAYLOAD-04")[1].split("### INV-PAYLOAD-05")[0]
+    assert "corrupt" in body.lower(), (
+        "INV-PAYLOAD-04 does not scope its digest claim to corruption"
+    )

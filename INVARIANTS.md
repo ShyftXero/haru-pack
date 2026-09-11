@@ -1586,10 +1586,21 @@ Source: Named as a known gap when `--shake` landed, 2026-09-10, rather than left
 
 ### INV-PAYLOAD-04
 Status: active
-Statement: When `uv` is bundled it is stored XZ-compressed in the payload and expanded
-during staging to a binary **byte-identical to the publisher's release**, before the stage
-manifest is recorded — so the file the launcher executes is covered by stage verification
-exactly as an uncompressed one was.
+Statement: When `uv` is bundled it is stored XZ-compressed in the payload, and at stage time
+the launcher expands it, **checks the result against the sha256 of the original bytes that
+the build recorded beside it**, and refuses the tree if they differ — all before the stage
+manifest is recorded, so the file the launcher executes is covered by stage verification
+exactly as an uncompressed one was. The build side guarantees the recorded digest is the
+publisher's: `bundle_uv` verifies the release against `pins.toml` (`INV-SUPPLY-01`) and
+`compress_uv` hashes exactly those bytes.
+Scope of the runtime check — read this before citing the invariant: it detects **corruption**
+(a truncated or bit-rotted member, a mismatched `.size`, a decoder bug), NOT tampering. The
+digest sidecar sits next to the member, so an attacker who can rewrite `uv.xz` can rewrite
+`uv.xz.sha256` with it. Authenticity of the payload as a whole is `INV-LAUNCH-01`, which is
+still `proposed`. The original wording of this entry said the expansion is "byte-identical to
+the publisher's release" full stop, with nothing at runtime behind it — flagged by the
+adversarial review of 2026-09-11 as a claim the code did not back, which is the exact failure
+mode this file exists to prevent.
 Actors: the operator shipping over a metered or slow link; the recipient's AV and
 application-allowlisting stack; the auditor asking what `uv` is inside a signed artifact.
 Assets: ~8 MB of every non-thin binary, and the integrity chain around the one file the
@@ -1604,7 +1615,11 @@ Windows targets this project exists to serve — and pays decompression on *ever
 rather than once. Compressing the payload *member* instead gets the same bytes back:
 verified 2026-09-10, staged `vendor/uv` sha256 `ae65ed04fee535f3ab8d31da7c2f9fde156dc5afdd6b5b5125e535ccc49bba34`,
 identical to the release tarball's, and present in `.stage-files` under that digest.
-Red-path: three, and each was a real failure caught while building this:
+Red-path: five, and every one was a real failure caught by running it:
+(0) drop the `.sha256` write from `bundle.compress_uv` — the launcher's check silently
+becomes a no-op, because it skips when the sidecar is absent;
+(0b) change one character of a built binary's `uv.xz.sha256` and run it. Walked 2026-09-11:
+refused with "expanded vendor/uv.xz does not match its recorded digest", exit 7;
 (1) move the `expandCompressedMembers(root)` call in `stage.stageZip` to after
 `recordTree(root)` — the executed binary drops out of the recorded set;
 (2) add a BCJ filter (`lzma.FILTER_X86`) to `bundle.compress_uv`'s chain — Python still
@@ -1820,7 +1835,14 @@ payload, so packing itself exercises the parts most likely to break. Verified 20
 both targets build, both pass `haru-pack verify`, the Linux artifact runs and reports its own
 version, and the Windows artifact stages and executes its bundled uv under wine.
 Red-path: Remove the `./scripts/self-build.sh` call from the gate in `cut-release.sh`, or
-make its failure non-fatal. `test_the_release_gate_self_builds` goes red.
+make its failure non-fatal. `test_the_release_gate_self_builds` goes red. Separately, remove
+the `${#BUILT[@]}` guard or the target-name validation from `self-build.sh` and
+`test_the_self_build_refuses_to_succeed_with_no_artifacts` goes red.
+Note: it DID succeed having built nothing. `--targets ""` printed "self-build ok: 0
+artifact(s)", exited 0, and `sha256sum` with an empty argument list hashed STDIN into
+SHA256SUMS — so the gate would have passed and published a release whose only asset described
+an empty set. Found by the adversarial review of 2026-09-11; both cases now exit 1 before any
+work is done.
 Note: Default tier, not `--thick`, so each artifact is ~15 MB and fetches Python on first
 run. Thick self-builds would need Windows `cryptography` wheels resolved from Linux — a
 different question from "does the tool work on itself".

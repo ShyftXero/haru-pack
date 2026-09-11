@@ -16,10 +16,19 @@ from .entrypoints import (resolve_entrypoint, verify_object_ref, verify_script_f
 from .obfuscate import ObfuscationError, get_engine
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
-                     warm_cache_for_script, install_dev_tools, compress_uv)
+                     warm_cache_for_script, install_dev_tools, compress_uv,
+                     UV_SHA256, UV_VERSION)
 from . import shake as shake_mod
 
 class BuildError(RuntimeError): ...
+
+
+# The interpreter version a build stages when nothing else says otherwise. Named rather than
+# repeated as a literal so that scripts/self-build.sh can ASK for it — it used to sed this
+# file for a line ending in `or "N.N"`, which would silently build release artifacts against
+# the wrong Python if the source moved (adversarial review 2026-09-11). Moved 3.12 -> 3.13
+# on 2026-09-10; changing it here changes it everywhere.
+DEFAULT_PYTHON = "3.13"
 
 # INV-PAYLOAD-01: a payload is appended to a binary that gets distributed, and often
 # signed. Anything credential-shaped that lands in it is published. Build directories
@@ -405,7 +414,8 @@ def _resolve(project: Path, tier: str, python_cli: str,
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:
             manifest[k] = decl[k]
-    pyver = python_cli or decl.get("python", "") or disc.get("python", "") or "3.13"
+    pyver = (python_cli or decl.get("python", "") or disc.get("python", "")
+         or DEFAULT_PYTHON)
     e = decl.get("encryption", {})
     enc = {
         # INV-BUILD-02: an explicit --encrypt must enable encryption on its own. It was
@@ -512,6 +522,24 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
         # bundle_uv with a stub that stages no binary at all.
         if uv_exe and Path(uv_exe).is_file():
             compress_uv(uv_exe, log=log)
+    else:
+        # THIN tier: uv is downloaded on the customer's machine and then executed, so the
+        # launcher wants a digest to check it against BEFORE extracting it (INV-SUPPLY-05).
+        # `uvfetch.nim` has had that mechanism since 2026-09-09 with its own note saying
+        # "Nothing populates `uv_sha256` yet — writing it at build time lives in the Python
+        # build/tier code, not here", and it warned on every fetch that it had no pin. This
+        # is that. The value is the digest of the release ARCHIVE from pins.toml, which is
+        # what uvfetch hashes; it is deliberately NOT the digest of the bundled binary that
+        # `compress_uv` records for the other tiers.
+        asset = tgt.uv_asset()
+        digest = UV_SHA256.get(UV_VERSION, {}).get(asset)
+        if not digest:                                              # INV-SUPPLY-01
+            raise BuildError(
+                f"no pinned sha256 for uv {UV_VERSION} asset {asset}, so a --thin binary "
+                f"would fetch and execute an unverified uv on the target. Add it with:\n"
+                f"    python tools/add-pin.py uv {UV_VERSION} {asset}")
+        manifest["uv_sha256"] = digest
+        manifest["uv_version"] = UV_VERSION
     if tier == "thick":
         steps = manifest.get("bundle") or []
         if steps and not tgt.is_host and not wine:

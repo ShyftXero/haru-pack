@@ -145,6 +145,16 @@ def compress_uv(uv_path: Path, version: str = UV_VERSION, preset: int = XZ_PRESE
     dest = uv_path.with_name(uv_path.name + ".xz")
     dest.write_bytes(comp)
     dest.with_name(dest.name + ".size").write_text(str(len(raw)), encoding="utf-8")
+    # The digest of the ORIGINAL bytes, so the launcher can confirm the expansion produced
+    # them (INV-PAYLOAD-04). It is written beside the member rather than into the manifest
+    # because `stage.nim` expands before anything parses TOML, and the `uv_sha256` manifest
+    # key already means something else — the *archive* digest `uvfetch` checks on the thin
+    # tier. Two digests of two different artifacts; do not merge the keys.
+    #
+    # This catches corruption and decoder bugs. It does not defeat tampering, because the
+    # sidecar sits next to the member an attacker would be rewriting; see the note at the
+    # check in stage.nim and INV-LAUNCH-01.
+    dest.with_name(dest.name + ".sha256").write_text(digest, encoding="utf-8")
     uv_path.unlink()
     say(f"uv: {len(raw) / 1e6:.1f} MB -> {len(comp) / 1e6:.1f} MB compressed in the "
         f"payload; the launcher expands it to a byte-identical binary at stage time")

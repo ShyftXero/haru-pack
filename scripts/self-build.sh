@@ -37,8 +37,14 @@ TARGETS="linux-x86_64 windows-x86_64"
 # declares `requires-python = ">=3.9"`, so discovery would resolve 3.9 — which has no pinned
 # interpreter and refuses (INV-SUPPLY-01). Naming the default explicitly is what keeps this
 # working when the default moves; it moved 3.12 -> 3.13 on 2026-09-10.
-PYVER="$(sed -n 's/.*or "\([0-9]\+\.[0-9]\+\)"$/\1/p' src/haru_pack/build.py | head -1)"
-[ -n "$PYVER" ] || PYVER="3.13"
+#
+# ASKED OF THE CODE, not scraped out of it. The first version sed'd build.py for a line
+# ending in `or "N.N"`, which matches any such line and would have silently built a release
+# against the wrong interpreter if that source moved (adversarial review 2026-09-11).
+PYVER="$(uv run --quiet python -c 'from haru_pack.build import DEFAULT_PYTHON; print(DEFAULT_PYTHON)' 2>/dev/null || true)"
+[ -n "$PYVER" ] || die "could not read haru_pack.build.DEFAULT_PYTHON.
+The release artifacts must be built against the interpreter version this project actually
+defaults to; guessing one is how a release ships against the wrong Python."
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -61,6 +67,20 @@ command -v uv >/dev/null 2>&1 || die "uv is not on PATH; cannot run this tree's 
 command -v nim >/dev/null 2>&1 \
     || die "nim is not on PATH — the launcher cannot be compiled, so nothing can be packed.
 Run \`haru-pack bootstrap\` first."
+
+# A release gate that can succeed having built nothing is worse than no gate: it reports
+# "ok", cut-release.sh believes the exit status, and `gh release create` publishes a
+# SHA256SUMS describing an empty set. `--targets ""` did exactly that — `sha256sum` with no
+# arguments read stdin and hashed nothing (adversarial review 2026-09-11). So the target
+# list is validated before any work, and the artifact count is checked after it.
+[ -n "${TARGETS// /}" ] || die "no targets to build.
+\`--targets\` was empty, which would produce a release with no binaries and still exit 0."
+for tgt in $TARGETS; do
+    printf '%s' "$tgt" | grep -Eq '^[a-z0-9]+-[a-z0-9_]+$' \
+        || die "target '$tgt' is not of the form <os>-<arch> (e.g. linux-x86_64).
+Refusing rather than asking haru-pack to interpret it, because a typo here silently means a
+release built for something other than what was intended."
+done
 
 mkdir -p "$OUT"
 info "== packing haru-pack $VERSION with haru-pack =="
@@ -138,7 +158,13 @@ for name in "${BUILT[@]}"; do
 done
 
 # ---------------------------------------------------------------- checksums
-( cd "$OUT" && sha256sum "${BUILT[@]}" > SHA256SUMS )
+# The count is asserted, not assumed: this is the last chance to notice that the loop above
+# produced nothing, and `sha256sum` with an empty argument list reads STDIN rather than
+# failing, which is what made the empty case look successful.
+[ "${#BUILT[@]}" -gt 0 ] || die "built 0 artifacts — nothing to publish.
+The gate must not report success here; a release whose only asset is a checksum file for an
+empty set is worse than a failed build."
+( cd "$OUT" && sha256sum -- "${BUILT[@]}" > SHA256SUMS )
 info ""
 info "== artifacts =="
 ( cd "$OUT" && ls -la "${BUILT[@]}" SHA256SUMS && echo "" && cat SHA256SUMS )
