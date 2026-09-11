@@ -141,7 +141,11 @@ def make_project(pkg: str, imp: str, ver: str, kind: str, suite: list[Path], dep
         "rc = pytest.main(['-q', '--no-header', '-p', 'no:cacheprovider', str(suite)])\n"
         f"if rc == 0:\n    print({MARKER!r}, {pkg!r}, 'passed its own suite inside the binary')\n"
         "sys.exit(rc)\n")
-    dep_line = ", ".join(f'"{d}"' for d in [f"{pkg}=={ver}", *deps])
+    # json.dumps, not f'"{d}"': a PEP 508 marker carries double quotes
+    # (`exceptiongroup; python_version < "3.11"`), and naive wrapping closes the TOML string
+    # early — an "Unclosed array" that failed the build for pydantic / pydantic-core. JSON
+    # string escaping (`\"`) is exactly TOML basic-string escaping.
+    dep_line = ", ".join(json.dumps(d) for d in [f"{pkg}=={ver}", *deps])
     (proj / "pyproject.toml").write_text(
         '[project]\nname = "exam"\nversion = "0.1.0"\n'
         'requires-python = ">=3.12"\n'
@@ -165,11 +169,26 @@ def offline_env(cold: Path) -> dict:
     return env
 
 
+_ANSI = __import__("re").compile(r"\x1b\[[0-9;]*m")
+
+
 def _passed_count(text: str) -> int:
     import re
-    clean = re.sub(r"\x1b\[[0-9;]*m", "", text)     # pytest colours its summary line
-    m = re.search(r"(\d+) passed", clean)
+    m = re.search(r"(\d+) passed", _ANSI.sub("", text))
     return int(m.group(1)) if m else 0
+
+
+def _reason(text: str) -> str:
+    """A human-readable one-line failure reason. pytest wraps everything in ANSI colour and
+    ends with a bare "N errors" summary that says nothing; the useful line is the exception.
+    Store that instead, so `flex/exam-results.json` — the committed proof — reads plainly."""
+    lines = [ln.strip() for ln in _ANSI.sub("", text).splitlines() if ln.strip()]
+    for pat in ("ModuleNotFoundError", "ImportError", "Error:", "error:",
+                "requires", "not a file or directory"):
+        hits = [ln for ln in lines if pat.lower() in ln.lower()]
+        if hits:
+            return hits[-1][:280]
+    return (lines[-1] if lines else "")[:280]
 
 
 def run_exam(pkg: str, imp: str, haru: str, work: Path,
@@ -200,7 +219,7 @@ def run_exam(pkg: str, imp: str, haru: str, work: Path,
         r["error"] = f"build timed out after {build_timeout}s"
         return r
     if not out.exists():
-        r["error"] = "build: " + (b.stderr or b.stdout).strip()[-400:]
+        r["error"] = "build: " + _reason(b.stderr or b.stdout)
         return r
     r["mb"] = round(out.stat().st_size / 1e6, 1)
     # Run the binary from a NEUTRAL directory OUTSIDE the repo, with its cache there too. If it
@@ -227,7 +246,7 @@ def run_exam(pkg: str, imp: str, haru: str, work: Path,
     if x.returncode == 0 and MARKER in x.stdout:
         r["passed"] = True
     else:
-        r["error"] = (blob.strip().splitlines() or [""])[-1][:300]
+        r["error"] = _reason(blob)
     return r
 
 
