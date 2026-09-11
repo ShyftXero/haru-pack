@@ -25,8 +25,9 @@ Outcomes:
     HUNG      no exit inside the timeout                      (FINDING)
     SILENT    exit 0 but the app never ran                    (FINDING, the worst kind)
 
-A case passes when the outcome is in its `expect` set. CRASHED, HUNG and SILENT are never
-acceptable, whatever the case — that is the whole standard.
+A case passes when the outcome is in its `expect` set. The FATAL outcomes — CRASHED,
+HUNG, SILENT, SILENT-WEDGE and STALLED — are never acceptable, whatever the case declared:
+that is the whole standard.
 
 THE PERSONAS
 
@@ -93,13 +94,17 @@ import hashlib
 import io
 import json
 import os
+import pty
+import random
 import re
+import select
 import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -139,6 +144,9 @@ MARKER = "BUSYBODY_OK"
 #   SILENT-WEDGE  a contradictory config built cleanly, said nothing, and produced a
 #                 damaged artifact. Fatal for the same reason SILENT is: the operator was
 #                 given no reason to look, and the failure surfaces at the customer.
+#   STALLED       several processes were alive and none of them was making progress. Only
+#                 an observer OUTSIDE every one of them can say this, which is why it is
+#                 not a value classify() can return — see the herd persona.
 #   ESCAPED       the PACKED PROJECT executed code on the build host through a path that is
 #                 not documented as executing anything, or was not named in the build log.
 #   SMUGGLED      bytes that were never in the project reached the distributed artifact — a
@@ -149,7 +157,7 @@ MARKER = "BUSYBODY_OK"
 #
 # WARNED is not here either, and cannot be: it means haru-pack resolved a conflict AND said
 # which side lost. That is the behaviour the wedge persona is asking for, not a defect.
-FATAL = ("CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "ESCAPED", "SMUGGLED")
+FATAL = ("CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "STALLED", "ESCAPED", "SMUGGLED")
 
 # SANCTIONED is deliberately NOT fatal, for the same reason EXPOSED is not: it means a
 # project-controlled capability haru-pack DOCUMENTS ran, and the build log named it before
@@ -160,7 +168,7 @@ CASES = []
 
 
 def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",
-         serial: bool = False, per_fixture: bool = True):
+         serial: bool = False, per_fixture: bool = True, light: bool = False):
     """Register a chaos case.
 
     `expect`  outcomes that are acceptable.
@@ -180,12 +188,15 @@ def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",
               attacks a DECLARATION and builds its own artifact, so running it 25 times
               would repeat one answer 25 times and inflate the census — the exact thing
               --analyze exists to expose.
+    `light`   preserve only the top-level files of this case's work directory, not the
+              whole tree. A herd case's work dir holds one shared stage plus N transient
+              staging copies of it, and preserve() copytrees directories whole.
     """
     def deco(fn):
         CASES.append({"name": fn.__name__, "persona": persona,
                       "expect": tuple(expect) if isinstance(expect, (list, tuple)) else (expect,),
                       "why": why, "inv": inv, "remedy": remedy, "serial": serial,
-                      "per_fixture": per_fixture, "fn": fn})
+                      "per_fixture": per_fixture, "light": light, "fn": fn})
         return fn
     return deco
 
@@ -197,6 +208,127 @@ def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",
 # than the product.
 JOBS_DEFAULT = 4
 JOBS_MAX = 8
+
+# The default wait for a case that does not ask for its own. --timeout sets this; it was
+# parsed and never read before 2026-09-11, so every wait in the file was whatever literal
+# happened to be nearest. A flag that looks plumbed and is not is worse than no flag.
+DEFAULT_TIMEOUT_S = 180
+
+
+class Ctx:
+    """What a case can reach back to: its seed, a place to announce a fault, the heartbeat.
+
+    Module-level rather than a parameter because every case takes (exe, work) and widening
+    all of them to reach this would be churn for no signal.
+
+    THE JOURNAL IS NOT HERE ON PURPOSE. A case may run in a worker process under --jobs,
+    and run_one's contract is that the parent is the only journal writer, so the append
+    order stays deterministic with one fsync-per-line writer. A worker therefore announces
+    a fault to a FILE in its own work directory; the parent folds those lines into the
+    journal when the record comes back. The file is the durable half: it is written and
+    fsynced before the fault, so it survives the worker being killed by it, which is the
+    entire point of announcing beforehand.
+
+    Every method is a no-op when no case is in progress. The unit tests exec this module
+    with importlib and there is no run then; a context that raised outside a run would make
+    a case that announces its faults untestable.
+    """
+
+    work = None             # set by run_one for the duration of one case; else None
+    run_dir = None
+    seed = 0
+    case = ""
+    fixture = ""
+
+    PERTURBATIONS = "perturbations.jsonl"
+
+    @classmethod
+    def enter(cls, work, seed: int, case: str, fixture: str, run_dir=None) -> None:
+        cls.work, cls.seed, cls.case, cls.fixture = work, seed, case, fixture
+        cls.run_dir = run_dir
+
+    @classmethod
+    def clear(cls) -> None:
+        cls.work, cls.run_dir, cls.case, cls.fixture = None, None, "", ""
+
+    @classmethod
+    def rng(cls, salt: str = "") -> random.Random:
+        """A stream determined by (run seed, case, fixture, salt) and nothing else.
+
+        hashlib, not the hash() builtin: hash() is salted per process, so the same --seed
+        would draw a different stream every run and the one thing a seed is for — landing
+        a fault at the same moment twice — would silently not work. It also has to hold
+        across a process boundary, because under --jobs the case runs in a worker.
+        """
+        basis = "|".join((str(cls.seed), cls.case, cls.fixture, salt))
+        digest = hashlib.sha256(basis.encode("utf-8")).digest()[:8]
+        return random.Random(int.from_bytes(digest, "big"))
+
+    @classmethod
+    def perturb(cls, action: str, **fields) -> None:
+        """Announce a fault BEFORE performing it, never after.
+
+        A fault whose moment was chosen from a seed is unattributable if it is recorded
+        after the fact: a kill at 0.4s and a kill at 4.0s leave the same case name with
+        different outcomes and nothing says which moment was chosen. Recorded beforehand,
+        the harness's own jitter can never be read as a product defect.
+        """
+        if cls.work is None:
+            return
+        rec = {"at": round(time.time(), 3), "kind": "perturb", "case": cls.case,
+               "fixture": cls.fixture, "seed": cls.seed, "action": action, **fields}
+        with open(Path(cls.work) / cls.PERTURBATIONS, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    @classmethod
+    def observe(cls, kind: str, **fields) -> None:
+        """Record something the harness SAW rather than something it did.
+
+        Same durable channel as perturb() and deliberately not the same record type: a
+        perturbation is a fault this harness injected, and a stall is a fact about the
+        product. Filing an observation as a perturbation would make the seeded records
+        untrustworthy — a reader could no longer tell which entries the harness caused.
+        """
+        if cls.work is None:
+            return
+        rec = {"at": round(time.time(), 3), "kind": kind, "case": cls.case,
+               "fixture": cls.fixture, "seed": cls.seed, **fields}
+        with open(Path(cls.work) / cls.PERTURBATIONS, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    @classmethod
+    def announced(cls, work) -> list:
+        """The fault announcements one case left behind, oldest first."""
+        p = Path(work) / cls.PERTURBATIONS
+        if not p.is_file():
+            return []
+        out = []
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip():
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+        return out
+
+    @classmethod
+    def beat(cls) -> None:
+        # A case that can outlast busybody_ledger.HEARTBEAT_STALE_S (120s) must beat from
+        # inside itself. The driver beats only BETWEEN cases, so a herd case that runs
+        # longer goes stale while it is still working — and a stale heartbeat is exactly
+        # how reap_orphans and prune_runs decide a run is dead and delete its work dirs.
+        # A plain rewrite, mirroring Journal.beat: last writer wins, and freshness is the
+        # only thing the file means, so a worker writing it is not a second log writer.
+        if cls.run_dir is None:
+            return
+        try:
+            (Path(cls.run_dir) / "heartbeat").write_text(str(time.time()))
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- outcome classification
@@ -345,14 +477,19 @@ def classify(rc, out: str, err: str, timed_out: bool) -> str:
     return "REFUSED"
 
 
-def run_exe(exe: Path, cwd: Path, env=None, timeout: int = 120, args=(),
+def run_exe(exe: Path, cwd: Path, env=None, timeout: int | None = None, args=(),
             rlimits=None, argv0=None) -> dict:
     """Run a packed binary and classify what happened.
 
     `rlimits` applies resource limits in the child ({resource.RLIMIT_AS: (soft, hard)}),
     which is how the app-level personas starve an application without touching the host.
     `argv0` overrides argv[0] without renaming the file.
+
+    `timeout` of None means DEFAULT_TIMEOUT_S, which --timeout sets. It must never reach
+    subprocess as None: that is not "the default", it is no ceiling at all, and a hung
+    launcher would hang the whole sweep instead of reporting HUNG.
     """
+    timeout = DEFAULT_TIMEOUT_S if timeout is None else timeout
     pre = None
     if rlimits:
         import resource
@@ -879,6 +1016,550 @@ def two_cold_starts_at_once(exe: Path, work: Path) -> dict:
             "stdout": " ; ".join(detail), "stderr": (outs[0][2] or "")[-300:]}
 
 
+# ================================================================ herd
+
+# Every case above this line is one process, or two. The failure they structurally
+# cannot reach is a whole-system stall, because a stall is emergent: from inside a child
+# the only available fact is "I am waiting", and waiting is also what a healthy child
+# does while another one stages. Nobody inside can tell those apart, so the herd needs
+# an observer that is not one of the processes it judges.
+#
+# haru-pack has exactly one shared mutable resource — the stage directory under
+# $XDG_CACHE_HOME/haru-pack, keyed by payload digest. `twin` already races N=2 on it and
+# asserts atomicity, so the shape was right and only the scale and the observer were
+# missing.
+#
+# THREE CASES, not 3*N. --triage ranks fingerprint groups by count, so sixteen cases
+# failing on one stall would outrank a genuine unique finding sixteen to one. Each case
+# here reduces over its own children and returns exactly ONE record; which children were
+# cascades of the stall is evidence inside that record, not sixteen more records.
+#
+# Cost, stated so it is not a surprise: staging takes no lock, so each child extracts
+# its own .tmp- copy and then races an atomic move. Peak disk under one work directory
+# is therefore N times the staged tree — at the thick tier roughly 200 MB each, ~3 GB at
+# N=16. That is half of why --herd-n exists; the other half is reproducing on a box with
+# fewer cores.
+
+HERD_N = 16          # --herd-n sets this, the way --timeout sets DEFAULT_TIMEOUT_S
+
+# How long all three stall conditions must hold CONTINUOUSLY before the watchdog says
+# STALLED.
+#
+# PROVISIONAL, but no longer only against a proxy. What this number wants is the longest
+# genuine no-progress stretch of a healthy 16-way cold start, and the thick tier — the
+# slowest, so the one that sets the bound — still has not been measured: a thick fixture
+# cannot be built on this box at all, because there is no pinned sha256 for the CPython
+# it wants and haru-pack refuses to stage an unverified interpreter (correctly).
+#
+# MEASURED 2026-09-11 against a REAL default-tier fixture, all three herd cases, 16-way,
+# from a cold cache: longest quiet stretch 0.0s, over 9 to 13 ticks per case, at 9.6-15.2s
+# wall each. Same answer as the proxy below, now on the real launcher doing real staging.
+# The remaining gap is the thick tier's interpreter extraction, which is strictly slower.
+#
+# What WAS measured, 2026-09-11 on this box (20 cores, 62 GB, NVMe), is a PROXY with the
+# same phases: 16 concurrent processes, each copying a 47 MB zip into its own
+# <key>.tmp-<pid> directory under one shared base, extracting it (4516 files), sha256-ing
+# every extracted file and renaming the tree into place — stageZip minus the interpreter
+# start, uv and the network. Watched by this exact StallWatch. Two runs, cold and warm
+# page cache: 30s and 11s wall, 10 and 6 samples, and a longest quiet stretch of 0.0s in
+# both. No two consecutive samples were ever quiet, on either run.
+#
+# So the proxy does not measure the healthy quiet period; it bounds it below the sampling
+# interval, which was 1.3-1.7s (the byte walk alone costs 345-662ms at 16 x 4516 files,
+# and the tick is that plus tick_s). And the proxy is missing the two slowest phases a
+# real cold start has, so even that bound is a LOWER one. Hence 40s: an order of
+# magnitude above anything observed, not 2x.
+# TODO: measure the thick tier. `--persona herd --herd-n 16 --tier thick` three times,
+# read the "longest quiet stretch" figure the verdict record already prints, and set this
+# above the largest of the three. Blocked today on the missing CPython pin above, so the
+# number stands on the default-tier measurement plus an order of magnitude of headroom.
+#
+# Erring high costs detection latency. Erring low costs the case its meaning, and the
+# harness has that lesson written down: tight_address_space first used 256 MB, under
+# what a bare interpreter needs, so every package failed identically and the case
+# discriminated nothing while looking thorough. A threshold under the real quiet period
+# of a healthy cold start does the same thing pointing the other way — it cries stall on
+# a working run, and a case that always fires is a case nobody reads.
+#
+# The limit of the method, measured while validating it: an application that deliberately
+# idles is indistinguishable from a stall by these three signals. A fixture that only
+# slept produced 6s of continuous quiet on a 4-way healthy herd. So the herd cases
+# hold for fixtures that stage, print and exit — which is every busybody fixture — and a
+# packaged app that waits on a network or a prompt for longer than this does not belong
+# in this persona at any threshold.
+STALL_QUIET_S = 40.0
+
+
+def _cpu_ticks(pid: int) -> int | None:
+    """utime+stime for one pid in clock ticks, or None if the pid is gone.
+
+    /proc, not resource.getrusage: rusage reports only children that have already been
+    waited on, which is exactly the set a stall does not contain. The comm field is
+    parenthesised and may itself contain spaces and parens, so the fields are taken after
+    the LAST ')' — splitting the whole line on whitespace misreads a process named `a b)`.
+    """
+    try:
+        blob = Path(f"/proc/{pid}/stat").read_text()
+        f = blob[blob.rindex(")") + 2:].split()
+        return int(f[11]) + int(f[12])            # stat fields 14 and 15, 1-indexed
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _staged_bytes(base: Path) -> int:
+    """Total bytes under the launcher's staging area: the .tmp-* dirs and the stage root.
+
+    Errors are swallowed on purpose. moveDir and removeDir run underneath this walk, so a
+    file that vanishes between readdir and lstat is normal operation rather than a fault,
+    and raising here would make the watchdog the least reliable thing in the run.
+    """
+    total = 0
+    for root, _dirs, names in os.walk(base, onerror=lambda e: None, followlinks=False):
+        for n in names:
+            try:
+                total += os.lstat(os.path.join(root, n)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def _tmp_dirs(base: Path) -> list:
+    """In-flight staging directories. stage.nim names them <key>.tmp-<pid>."""
+    try:
+        return [d for d in base.iterdir() if ".tmp-" in d.name and d.is_dir()]
+    except OSError:
+        return []
+
+
+def _tmp_owner(d: Path) -> int | None:
+    """The pid a staging directory names as its author, if the name still parses."""
+    try:
+        return int(d.name.rsplit(".tmp-", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+class StallWatch:
+    """Says STALLED when nothing is progressing. A THREAD in the harness process.
+
+    A thread, not a subprocess, for three reasons:
+
+      * The harness parent is not computing while a herd runs — it sits in a poll/sleep
+        loop here and in communicate() everywhere else, and both release the GIL, so a
+        1s sampling thread is scheduled on time. If the parent were CPU-bound this would
+        have to be a process.
+      * It is already OUTSIDE every child, which is the only property that matters. The
+        observer must not be one of the processes it is judging.
+      * A subprocess would observe the same three things through the same /proc and
+        lstat() calls and would then need IPC to hand the verdict back. It buys isolation
+        from a harness crash, and a harness crash is not the failure this looks for.
+
+    Three conditions, AND-ed, held continuously for `quiet_s`:
+
+      * every child is still alive          (an exit IS progress, and the collector
+                                             classifies it)
+      * no child's CPU time advanced        (all of them, not one)
+      * the staged byte total did not grow  (the tree is not being built)
+
+    The conjunction is what makes three individually unreliable signals safe together.
+    The byte walk can miss growth under churn and /proc is a clock tick coarse, but
+    neither can declare a stall alone: sixteen processes burning CPU are never quiet,
+    whatever the walk says.
+    """
+
+    def __init__(self, base: Path, procs, quiet_s: float | None = None,
+                 tick_s: float = 1.0):
+        self.base = Path(base)
+        self.quiet_s = STALL_QUIET_S if quiet_s is None else quiet_s
+        self.tick_s = tick_s
+        self.stalled_at = None      # time.monotonic() of the declaration; None until then
+        self.stall_id = ""
+        self.stall_blame = ""
+        self.evidence = ""
+        self.quiet_max = 0.0       # longest quiet stretch seen, stall or not: THE number
+        self.ticks = 0             # STALL_QUIET_S has to be calibrated against
+        self.late = 0              # ticks that arrived far later than they were asked to
+        self._scan_s = 0.0
+        self._procs = list(procs)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def drop(self, proc) -> None:
+        """Stop watching one child. For a child the CASE killed on purpose.
+
+        Without this, a deliberate kill silently disarms the watchdog for the rest of the
+        case: "every child alive" can never hold again once one is intentionally dead, so
+        the case that most needs an observer would quietly not have one.
+        """
+        with self._lock:
+            self._procs = [p for p in self._procs if p is not proc]
+
+    def _roster(self) -> list:
+        with self._lock:
+            return list(self._procs)
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="stallwatch", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.tick_s * 5)
+
+    def _run(self) -> None:
+        prev_cpu, prev_bytes, quiet_since = None, None, None
+        last = time.monotonic()
+        while not self._stop.is_set():
+            now = time.monotonic()
+            # Our own scan time is not lateness. Anything past 3x the interval we asked
+            # for is the scheduler, and that resets the quiet stretch — see _attribute.
+            if self.ticks and now - last > (self.tick_s + self._scan_s) * 3:
+                self.late += 1
+                quiet_since = None
+            last = now
+            self.ticks += 1
+            # HEARTBEAT_STALE_S is 120 and these cases outlive it. A stale heartbeat is
+            # how reap_orphans and prune_runs decide a run is dead and delete its work
+            # directories — out from under the case that is still using them.
+            Ctx.beat()
+
+            roster = self._roster()
+            alive = [p for p in roster if p.poll() is None]
+            t_scan = time.monotonic()
+            cpu = {p.pid: _cpu_ticks(p.pid) for p in alive}
+            nbytes = _staged_bytes(self.base)
+            self._scan_s = time.monotonic() - t_scan
+
+            quiet = (bool(roster) and len(alive) == len(roster)
+                     and prev_cpu is not None and cpu == prev_cpu
+                     and all(v is not None for v in cpu.values())
+                     and prev_bytes is not None and nbytes <= prev_bytes)
+            if quiet:
+                quiet_since = now if quiet_since is None else quiet_since
+                held = now - quiet_since
+                self.quiet_max = max(self.quiet_max, held)
+                if held >= self.quiet_s and self.stalled_at is None:
+                    self._declare(now, held, nbytes, len(alive))
+            else:
+                quiet_since = None
+            prev_cpu, prev_bytes = cpu, nbytes
+            self._stop.wait(self.tick_s)
+
+    def _declare(self, now: float, held: float, nbytes: int, alive: int) -> None:
+        self.stalled_at = now
+        # Shared by every sub-result that resolves after this instant, so a reader can
+        # tie sixteen cascades back to the one stall that caused them.
+        self.stall_id = hashlib.sha256(
+            f"{self.base}|{Ctx.case}|{Ctx.fixture}|{now}".encode()).hexdigest()[:12]
+        self.stall_blame, self.evidence = self._attribute(held, nbytes, alive)
+        # NOT Ctx.perturb: perturb records a fault the harness INJECTED, and a stall is
+        # something it merely watched happen. Ctx.observe writes to the same fsynced file
+        # so the record survives this process being killed, and the parent journals it
+        # under its own record type.
+        Ctx.observe("stall", stall_id=self.stall_id, quiet_s=round(held, 1),
+                    staged_bytes=nbytes, alive=alive, blame=self.stall_blame,
+                    evidence=self.evidence)
+
+    def _attribute(self, held: float, nbytes: int, alive: int) -> tuple:
+        """"launcher" only on launcher-side evidence. Otherwise "unknown".
+
+        The one thing that counts as evidence: a staging directory whose byte count is
+        static and whose OWNER IS DEAD. stage.nim names it <key>.tmp-<pid>, so an orphan
+        names its own author, and "the survivors are waiting on a tree nobody is
+        building" is then a claim about launcher-side state rather than about the box.
+        Static comes for free from the stall condition — the orphan sits inside the byte
+        total that did not grow for the whole quiet stretch — so only the death of its
+        owner has to be checked here.
+
+        Everything else is "unknown", including — checked first, before anything else —
+        this sampler not being scheduled. A watchdog that reports its own starvation on a
+        loaded machine as a product stall is tight_address_space again: it fires, it
+        looks thorough, and it discriminates nothing.
+        """
+        seen = (f"{alive} child(ren) alive, no CPU and no new bytes for {held:.0f}s, "
+                f"{nbytes} byte(s) staged")
+        if self.late:
+            return "unknown", (f"{seen}; this sampler was itself late on {self.late} "
+                               f"tick(s) of {self.ticks}, so this may be our own "
+                               f"scheduling rather than the launcher")
+        orphans = []
+        watched = {p.pid for p in self._roster()}
+        for d in _tmp_dirs(self.base):
+            pid = _tmp_owner(d)
+            if pid is None or pid in watched:
+                continue
+            if not Path(f"/proc/{pid}").exists():
+                orphans.append(f"{d.name} ({_staged_bytes(d)}B, owner pid {pid} gone)")
+        if orphans:
+            return "launcher", f"{seen}; orphaned staging dir(s): {', '.join(orphans)}"
+        return "unknown", (f"{seen}; no orphaned staging directory, so nothing here says "
+                           f"the launcher rather than the box")
+
+
+def herd_deadline() -> int:
+    """One deadline for the whole herd, not one per child.
+
+    N sequential waits of DEFAULT_TIMEOUT_S would let a single 16-way case run for 48
+    minutes. Sixteen cold starts do genuinely take longer than one — they serialise on
+    the disk — so this scales with N and never drops below the default wait.
+    """
+    return max(DEFAULT_TIMEOUT_S, 20 * HERD_N)
+
+
+def stage_key(exe: Path) -> str:
+    """The stage key this binary will use, computed without running it.
+
+    main.nim calls stageZip(payload, hexOf(ft.payloadSha)[0..15]) and stage.nim names the
+    in-flight directory <key>.tmp-<pid> under baseDir(). The key comes from the FOOTER
+    digest, so this holds for an encrypted payload too — the final directory name does
+    not, since that carries the digest of the decrypted bytes.
+
+    Recomputed here rather than learned by running the binary once, because a case that
+    warms the cache to find out where the cache is is no longer a cold start.
+    """
+    info = overlay.verify(exe)
+    at, ln = info["payload_off"], info["payload_len"]
+    return hashlib.sha256(exe.read_bytes()[at:at + ln]).hexdigest()[:16]
+
+
+def herd_start(exe: Path, work: Path, cache: Path, n: int) -> list:
+    """n children, started as close together as this can manage, on ONE cache key.
+
+    Output goes to a FILE per child, not a pipe. With N=16 a child that fills its 64 KB
+    stdout pipe blocks in write() until the parent drains it, and the parent drains one
+    child at a time — so a perfectly healthy herd would present this watchdog with all
+    three of its stall conditions (alive, no CPU, no new bytes) and busybody would report
+    its own collection strategy as a haru-pack stall. A file cannot fill.
+
+    Returns (proc, logfile, handle) triples; herd_collect closes the handles.
+    """
+    cache.mkdir(parents=True, exist_ok=True)
+    env = clean_env(cache)
+    kids = []
+    for i in range(n):
+        log = work / f"child-{i:02d}.out"
+        fh = log.open("wb")
+        kids.append((subprocess.Popen([str(exe)], cwd=work, env=env,
+                                      stdin=subprocess.DEVNULL, stdout=fh,
+                                      stderr=subprocess.STDOUT), log, fh))
+    return kids
+
+
+def herd_collect(kids: list, watch: StallWatch, deadline_s: int | None = None) -> list:
+    """Wait for every child, then classify each one on its own output.
+
+    Records WHEN each child resolved, which is the whole post_stall contract: once the
+    watchdog has declared a stall at T, a child that resolves after T did so in a system
+    that was already stuck, and reading its failure as a fresh fault is how one stall
+    becomes sixteen bugs.
+    """
+    deadline = time.monotonic() + (herd_deadline() if deadline_s is None else deadline_s)
+    done = {}
+    while len(done) < len(kids) and time.monotonic() < deadline:
+        for i, (p, _log, _fh) in enumerate(kids):
+            if i not in done and p.poll() is not None:
+                done[i] = time.monotonic()
+        if len(done) < len(kids):
+            time.sleep(0.25)
+
+    subs = []
+    for i, (p, log, fh) in enumerate(kids):
+        timed_out = i not in done
+        if timed_out:
+            p.kill()
+            p.wait(timeout=30)
+            done[i] = time.monotonic()
+        fh.close()
+        blob = log.read_text("utf8", "replace") if log.exists() else ""
+        outcome = classify(p.returncode, blob, "", timed_out)
+        cascade = watch.stalled_at is not None and done[i] >= watch.stalled_at
+        subs.append({"i": i, "rc": p.returncode, "outcome": outcome,
+                     "blame": blame(blob, "") if outcome != "RAN" else "none",
+                     "post_stall": cascade,
+                     "stall_id": watch.stall_id if cascade else "",
+                     "at": done[i], "tail": blob.strip()[-200:]})
+    return subs
+
+
+# Worst-of, the reduction twin uses, with the order spelled out because a herd has more
+# outcomes to rank than twin did. STALLED dominates: it is a statement about the whole
+# system, and every child outcome recorded after it is downstream of it.
+_HERD_ORDER = ("RAN", "REFUSED", "APP-CRASHED", "CRASHED", "SILENT", "HUNG", "STALLED")
+
+
+def _worse(a: str, b: str) -> str:
+    rank = {name: i for i, name in enumerate(_HERD_ORDER)}
+    return a if rank.get(a, len(rank)) >= rank.get(b, len(rank)) else b
+
+
+def herd_verdict(subs: list, watch: StallWatch, t0: float, ignore=()) -> dict:
+    """Reduce N children and one watchdog to one record.
+
+    `ignore` holds the index of a child the case killed itself: its outcome is the case's
+    own doing, and the SURVIVORS are the claim being made.
+    """
+    killed = set(ignore)
+    judged = [s for s in subs if s["i"] not in killed]
+    worst = "RAN"
+    for s in judged:
+        worst = _worse(worst, s["outcome"])
+    if watch.stalled_at is not None:
+        worst = "STALLED"
+    tally = {}
+    for s in judged:
+        tally[s["outcome"]] = tally.get(s["outcome"], 0) + 1
+    detail = [f"{len(judged)} judged: "
+              + ", ".join(f"{k}x{v}" for k, v in sorted(tally.items()))]
+    if killed:
+        detail.append("killed by this case: "
+                      + ", ".join(f"#{s['i']} {s['outcome']}" for s in subs
+                                  if s["i"] in killed))
+    detail.append(f"longest quiet stretch {watch.quiet_max:.0f}s of the "
+                  f"{watch.quiet_s:.0f}s a stall needs, over {watch.ticks} tick(s)")
+    if watch.stalled_at is not None:
+        detail.append(f"STALL {watch.stall_id} blamed on {watch.stall_blame}: "
+                      f"{watch.evidence}")
+    cascades = [s for s in judged if s["post_stall"]]
+    if cascades:
+        detail.append(f"{len(cascades)} child(ren) resolved after the stall and are "
+                      f"cascades of it, not separate faults")
+    bad = next((s for s in judged if s["outcome"] != "RAN"), None)
+    return {"outcome": worst,
+            "rc": bad["rc"] if bad else (judged[0]["rc"] if judged else None),
+            "seconds": round(time.monotonic() - t0, 1),
+            "blame": watch.stall_blame if worst == "STALLED"
+                     else (bad["blame"] if bad else "none"),
+            # post_stall marks a record as a CONSEQUENCE of a stall, which sinks it below
+            # the fresh findings at --triage. A declared stall makes STALLED the verdict
+            # here and that record IS the fresh finding, so this is False by construction
+            # today. The per-child flags above are where the cascade evidence lives; this
+            # field keeps the distinction if a later case ever tolerates a stall in its
+            # expect set.
+            "post_stall": watch.stalled_at is not None and worst != "STALLED",
+            "stall_id": watch.stall_id,
+            "stdout": " | ".join(detail),
+            "stderr": (bad or {}).get("tail", "")}
+
+
+@case("herd", ("RAN",),
+      "Sixteen first runs at the same instant on one cold cache, watched from outside by "
+      "a thread that samples liveness, per-child CPU time and the staged byte total once "
+      "a second. twin proves two processes can share a stage; this asks whether sixteen "
+      "can, which is the shape a CI job that starts one binary per worker actually has. "
+      "The failure it exists for is the one no child can report: everybody alive, nobody "
+      "burning CPU, nothing being written.",
+      inv="INV-STAGE-01",
+      remedy="RAN from all sixteen is the pass. STALLED is the serious one, and the record "
+             "carries what the watchdog saw, including whether an orphaned .tmp- "
+             "directory made it a launcher-side claim. Note what INV-STAGE-01 does and "
+             "does not cover: its Statement governs what a stage must satisfy before it "
+             "is executed, which is exactly what the survivors' verdict asserts here, "
+             "but NO current invariant Statement mentions concurrency or atomicity — "
+             "that claim lives only in twin's remedy prose. If this stalls, the thing to "
+             "write is the missing invariant about N stagers on one key, not a footnote "
+             "under INV-STAGE-01.",
+      light=True)
+def sixteen_cold_starts_at_once(exe: Path, work: Path) -> dict:
+    t0 = time.monotonic()
+    cache = work / "herdcache"
+    kids = herd_start(exe, work, cache, HERD_N)
+    watch = StallWatch(cache / "haru-pack", [p for p, _, _ in kids]).start()
+    try:
+        subs = herd_collect(kids, watch)
+    finally:
+        watch.stop()
+    return herd_verdict(subs, watch, t0)
+
+
+@case("herd", ("RAN",),
+      "Sixteen cold starts, one of them SIGKILLed mid-stage at a moment drawn from the "
+      "run seed — butterfingers composed with twin, which no single-fault case can be. "
+      "killed_mid_stage proves one process recovers from its own interrupted staging; "
+      "this asks whether fifteen bystanders survive somebody else's, and the seed is "
+      "here so a stall found once can be landed again deliberately.",
+      inv="INV-STAGE-01",
+      remedy="The survivors must each end up with a complete, verified stage: RAN is the "
+             "pass, and the victim's own outcome is excluded from the verdict because "
+             "this case killed it. A REFUSED survivor means a dead stager's leftovers "
+             "became reachable by another process, which is INV-STAGE-01's territory — a "
+             "tree that cannot be accounted for is discarded and rebuilt, never "
+             "inherited. STALLED means the survivors waited on the dead child; reproduce "
+             "it with the seed and delay the journal's perturb record carries.",
+      light=True)
+def sixteen_cold_starts_one_killed_mid_stage(exe: Path, work: Path) -> dict:
+    t0 = time.monotonic()
+    cache = work / "herdcache"
+    rng = Ctx.rng("kill")
+    # 0.8s is past exec and into staging; 6s is still inside it for a thick payload
+    # (killed_mid_stage has used a fixed 1.5s since it was written). The victim is drawn
+    # too — killing child 0 every time would only ever test the one that started first.
+    delay = round(rng.uniform(0.8, 6.0), 2)
+    kids = herd_start(exe, work, cache, HERD_N)
+    victim = rng.randrange(len(kids))
+    watch = StallWatch(cache / "haru-pack", [p for p, _, _ in kids]).start()
+    try:
+        time.sleep(delay)
+        # BEFORE the kill, never after: a fault whose moment came from a seed is
+        # unattributable if it is recorded afterwards.
+        Ctx.perturb("kill_mid_stage", delay_s=delay, victim=victim, n=len(kids),
+                    signal="SIGKILL")
+        target = kids[victim][0]
+        target.send_signal(signal.SIGKILL)
+        watch.drop(target)          # or "every child alive" never holds again
+        subs = herd_collect(kids, watch)
+    finally:
+        watch.stop()
+    return herd_verdict(subs, watch, t0, ignore=(victim,))
+
+
+@case("herd", ("RAN", "REFUSED"),
+      "Sixteen starts against a staging directory whose owner died before it ever wrote "
+      ".ready: the name stage.nim would have chosen, a half-extracted root/, mode 0700, "
+      "and a pid that is genuinely gone. Today's staging takes no lock — every process "
+      "builds in its own .tmp-<pid> and races an atomic move — so the orphan should be "
+      "ignored outright. The case exists to keep it that way: the moment a lock or a "
+      "wait-for-the-winner appears, waiting forever on a dead owner's claim is the bug "
+      "that arrives with it, and no single process can see it happen.",
+      inv="INV-STAGE-01",
+      remedy="RAN (the orphan ignored) and REFUSED with one line naming the directory to "
+             "remove are both acceptable — INV-STAGE-01 already requires a tree with no "
+             ".ready to be refused rather than executed, which is the half of this case "
+             "that a current invariant covers; the no-waiting half is not covered by any "
+             "Statement today. STALLED means something waits on a dead owner and must "
+             "instead take the claim over or refuse. SILENT means the orphan's "
+             "half-extracted tree ran, which is trust-on-first-use back in a new place.",
+      light=True)
+def sixteen_starts_against_an_orphaned_stage(exe: Path, work: Path) -> dict:
+    t0 = time.monotonic()
+    cache = work / "herdcache"
+    base = cache / "haru-pack"
+    base.mkdir(parents=True, exist_ok=True)
+    base.chmod(0o700)                  # hardenDir's mode; 0777 is world_writable_cache
+    # A pid that has already been waited on, rather than a number we hope is unused. It
+    # can in principle be recycled before the children start, which would make the case
+    # weaker but never falsely positive: a live owner is the ordinary race twin tests.
+    corpse = subprocess.Popen(["/bin/true"])
+    corpse.wait()
+    tmp = base / f"{stage_key(exe)}.tmp-{corpse.pid}"
+    (tmp / "root" / "app").mkdir(parents=True)
+    (tmp / "root" / "app" / "half.py").write_text("# extraction stopped here\n")
+    (tmp / "root" / "manifest.toml").write_text('entrypoint = "app/half.py"\n')
+    for d in (tmp, tmp / "root"):
+        d.chmod(0o700)                 # no .ready and no .stage-files, deliberately
+    kids = herd_start(exe, work, cache, HERD_N)
+    watch = StallWatch(base, [p for p, _, _ in kids]).start()
+    try:
+        subs = herd_collect(kids, watch)
+    finally:
+        watch.stop()
+    r = herd_verdict(subs, watch, t0)
+    r["stdout"] = f"orphan {tmp.name} (owner pid {corpse.pid} dead) | " + r["stdout"]
+    return r
+
+
 # ================================================================ timetraveller
 
 @case("timetraveller", ("RAN",),
@@ -920,6 +1601,8 @@ OUTCOME_MEANING = {
                "encrypted binary at rest, or a tree readable by other users. A defect"),
     "REFUSED-UNRELATED": ("the build refused, but for something other than the wedge — the "
                           "case never reached what it meant to test"),
+    "STALLED": ("every process was alive and none was progressing; declared by the herd "
+                "persona's watchdog, never by a process about itself"),
     "CONTAINED": ("a hostile project was built and the attack did not land: no canary fired "
                   "and nothing of the attacker's reached the artifact"),
     "SANCTIONED": ("project-controlled code ran through a path haru-pack DOCUMENTS as "
@@ -972,7 +1655,7 @@ def write_report(results: list, exe_name: str, path: Path, run_id: str = "",
     for k, v in OUTCOME_MEANING.items():
         L.append(f"  {k:11} {v}")
     L.append("")
-    L.append("  Always a finding, whatever the case expected: CRASHED, HUNG, SILENT.")
+    L.append(f"  Always a finding, whatever the case expected: {', '.join(FATAL)}.")
     L.append("")
 
     L.append("-" * W)
@@ -1068,7 +1751,7 @@ def severity_for(c: dict, r: dict, ok: bool) -> str:
     """
     if ok:
         return "note"
-    if r["outcome"] in ("CRASHED", "SILENT", "HUNG", "SILENT-WEDGE"):
+    if r["outcome"] in FATAL:
         return "critical"      # a traceback at the user, the wrong code running, or a wedge
     if r["outcome"] == "APP-CRASHED":
         return "note"          # the app declined the box it was given; not haru-pack's doing
@@ -1087,11 +1770,15 @@ def severity_for(c: dict, r: dict, ok: bool) -> str:
     return "warning"           # refused where it should have run, or the reverse
 
 
-def preserve(run_dir: Path, case_name: str, work: Path) -> str:
+def preserve(run_dir: Path, case_name: str, work: Path, light: bool = False) -> str:
     """Copy a failing case's wreckage somewhere it will still exist tomorrow.
 
     Unconditional for findings: `--keep` is a flag people remember only after the
     interesting run, and you cannot triage a crash you threw away.
+
+    `light` copies the top-level files and skips the directories. A herd case's work dir
+    holds one shared stage tree plus N transient staging copies of it, and copying that
+    whole is hundreds of megabytes of the same bytes to say one thing.
     """
     dest = run_dir / "findings" / case_name
     if dest.exists():
@@ -1103,6 +1790,8 @@ def preserve(run_dir: Path, case_name: str, work: Path) -> str:
             if child.is_file() and child.stat().st_size < 300 * 1024 * 1024:
                 shutil.copy2(child, dest / child.name)
                 kept.append(child.name)
+            elif child.is_dir() and light:
+                kept.append(child.name + "/ (skipped: light case)")
             elif child.is_dir():
                 shutil.copytree(child, dest / child.name, symlinks=True,
                                 ignore=shutil.ignore_patterns("*.tar.gz", "*.whl", "*.so"),
@@ -1127,11 +1816,17 @@ def print_history() -> int:
     if not runs:
         print("no runs yet")
         return 0
-    print(f"{'run':22} {'state':12} {'cases':>5} {'findings':>8}  planned")
-    print(f"{'-' * 22} {'-' * 12} {'-' * 5:>5} {'-' * 8:>8}  -------")
+    print(f"{'run':22} {'state':12} {'cases':>5} {'findings':>8} {'casc':>5}  planned")
+    print(f"{'-' * 22} {'-' * 12} {'-' * 5:>5} {'-' * 8:>8} {'-' * 5:>5}  -------")
     for r in runs:
         planned = len(r["planned"] or []) if r["planned"] else "?"
-        print(f"{r['run']:22} {r['state']:12} {r['cases']:>5} {r['findings']:>8}  {planned}")
+        print(f"{r['run']:22} {r['state']:12} {r['cases']:>5} {r['findings']:>8} "
+              f"{r.get('cascades', 0):>5}  {planned}")
+    if any(r.get("cascades") for r in runs):
+        print()
+        print("casc = results that failed AFTER a stall had already been declared. They are")
+        print("counted apart from findings because they are one fault's consequences, not")
+        print("that many independent faults. --triage lists them under their own heading.")
     interrupted = [r for r in runs if r["state"] == "INTERRUPTED"]
     if interrupted:
         print()
@@ -1144,15 +1839,55 @@ def print_history() -> int:
     return 0
 
 
+def _seen_date(at) -> str:
+    """The date a group was first seen, or "unknown" — never a fabricated 1970."""
+    if not at:
+        return "unknown"
+    return time.strftime("%Y-%m-%d", time.localtime(at))
+
+
+def _triage_group(i: int, g: dict) -> None:
+    """One group, rendered. Factored so the fresh and cascade sections cannot drift."""
+    print("-" * 78)
+    print(f"[{i}] {g['count']} occurrence(s)   severity: {g['severity']}   "
+          f"outcome: {g['outcome']}")
+    print(f"    fingerprint : {g['fingerprint']}")
+    print(f"    first seen  : {_seen_date(g.get('first_seen'))}"
+          + (f"   last: {_seen_date(g.get('last_seen'))}"
+             if _seen_date(g.get("last_seen")) != _seen_date(g.get("first_seen")) else ""))
+    print(f"    cases       : {', '.join(g['cases'])}")
+    print(f"    personas    : {', '.join(g['personas'])}")
+    shown = g["runs"][:6]
+    print(f"    seen in runs: {', '.join(shown)}"
+          + (f"  (+{len(g['runs']) - 6} more)" if len(g["runs"]) > 6 else ""))
+    if g.get("inv"):
+        print(f"    invariant   : {g['inv']}")
+    if g.get("sample"):
+        print("    sample message:")
+        for line in g["sample"].splitlines()[:4]:
+            print(f"        {line[:70]}")
+    if g.get("remedy"):
+        print("    what to do:")
+        for line in _wrap(" ".join(g["remedy"].split()), 68):
+            print(f"        {line}")
+
+
 def print_triage() -> int:
     groups = ledger_rollup()
     path = ledger_path()
     if not groups:
         print(f"no findings recorded in {path}")
         return 0
+    # Split on the flag, not on the sort order: the ordering key already sinks cascades,
+    # but reading the split off the order would break silently the day the key changes.
+    fresh = [g for g in groups if not g.get("post_stall")]
+    cascades = [g for g in groups if g.get("post_stall")]
     print("=" * 78)
-    print(f"busybody triage — {sum(g['count'] for g in groups)} finding(s), "
-          f"{len(groups)} distinct")
+    print(f"busybody triage — {sum(g['count'] for g in fresh)} finding(s), "
+          f"{len(fresh)} distinct")
+    if cascades:
+        print(f"plus {sum(g['count'] for g in cascades)} cascade(s), "
+              f"{len(cascades)} distinct")
     print(f"ledger: {path}")
     print("=" * 78)
     print()
@@ -1160,26 +1895,23 @@ def print_triage() -> int:
     print("out, so repeats of one root cause appear as ONE group with a count and a")
     print("first-seen date. Fix the group, not the occurrences. Biggest group first.")
     print()
-    for i, g in enumerate(groups, 1):
+    n = 0
+    for g in fresh:
+        n += 1
+        _triage_group(n, g)
+    if cascades:
         print("-" * 78)
-        print(f"[{i}] {g['count']} occurrence(s)   severity: {g['severity']}   "
-              f"outcome: {g['outcome']}")
-        print(f"    fingerprint : {g['fingerprint']}")
-        print(f"    cases       : {', '.join(g['cases'])}")
-        print(f"    personas    : {', '.join(g['personas'])}")
-        shown = g["runs"][:6]
-        print(f"    seen in runs: {', '.join(shown)}"
-              + (f"  (+{len(g['runs']) - 6} more)" if len(g["runs"]) > 6 else ""))
-        if g.get("inv"):
-            print(f"    invariant   : {g['inv']}")
-        if g.get("sample"):
-            print("    sample message:")
-            for line in g["sample"].splitlines()[:4]:
-                print(f"        {line[:70]}")
-        if g.get("remedy"):
-            print("    what to do:")
-            for line in _wrap(" ".join(g["remedy"].split()), 68):
-                print(f"        {line}")
+        print()
+        print("CASCADES — after a declared stall, not independent findings")
+        print()
+        print("Each of these resolved once a stall had already been declared, so it failed")
+        print("for the stall rather than for itself. They are listed for shape — how many")
+        print("processes went down with one stall, and which — and they rank below every")
+        print("fresh group no matter how many of them there are. Fix the stall above.")
+        print()
+        for g in cascades:
+            n += 1
+            _triage_group(n, g)
     print("-" * 78)
     return 0
 
@@ -1328,6 +2060,13 @@ def stdout_closed_early(exe: Path, work: Path) -> dict:
     except subprocess.TimeoutExpired:
         p1.kill()
         rc, err, to = None, "", True
+    finally:
+        # stderr is read but never closed otherwise, on either path. One leaked pipe per
+        # run is harmless; under --jobs the GC notices it inside a worker and reports it
+        # against whichever case that worker was running, which is a ResourceWarning
+        # pointing at innocent code.
+        if p1.stderr is not None:
+            p1.stderr.close()
     # No marker is reachable — stdout is gone — so judge on rc and stderr alone.
     outcome = ("HUNG" if to else
                classify(rc, "", err, False) if any(m in err for m in TRACEBACK_MARKERS)
@@ -1335,6 +2074,105 @@ def stdout_closed_early(exe: Path, work: Path) -> dict:
     return {"outcome": outcome, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
             "blame": blame("", err), "stdout": "(closed by the test)",
             "stderr": (err or "").strip()[-400:]}
+
+
+# case that needed one would be asserting something about the terminal rather than about
+# haru-pack.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]"           # CSI: colour, cursor, erase
+                   r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: window title
+                   r"|\x1b[()][A-Za-z0-9]|\x1b[=>]")      # charset and keypad modes
+
+
+def _plain(text: str) -> str:
+    """What is actually readable: escapes removed, a pty's CR-LF normalised."""
+    return _ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "")
+
+
+def _run_on_a_pty(exe: Path, cwd: Path, env: dict, timeout: int) -> tuple:
+    """Run with stdout AND stderr on a real terminal. Returns (rc, raw text, timed_out).
+
+    A pty, not an environment variable: isatty() is the thing under test and nothing but
+    a real terminal makes it true. stdin stays on /dev/null — no claim here needs a tty
+    stdin, stdin_is_closed next door covers closed stdin, and a tty stdin that nobody
+    ever writes to is a hang waiting to be misread as a finding.
+    """
+    master, slave = pty.openpty()
+    p = subprocess.Popen([str(exe)], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                         stdout=slave, stderr=slave)
+    os.close(slave)          # the child now holds the only slave fd, so the read below
+    chunks = []              # sees a real end-of-file the moment it exits
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            if not select.select([master], [], [], 0.5)[0]:
+                continue
+            try:
+                data = os.read(master, 65536)
+            except OSError:
+                break        # EIO on a pty master IS end-of-file; it is not an error
+            if not data:
+                break
+            chunks.append(data)
+    finally:
+        os.close(master)
+    try:
+        rc, to = p.wait(timeout=max(1, int(deadline - time.monotonic()))), False
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait(timeout=30)
+        rc, to = None, True
+    return rc, b"".join(chunks).decode("utf8", "replace"), to
+
+
+@case("mute", ("RAN",),
+      "The same binary twice on one cache: once with stdout on a real pty (pty.openpty, "
+      "so isatty is genuinely true) and once on a pipe. The app's marker has to survive "
+      "both. This is the shape INV-UI-01 was written about — rich reads `[...]` as a "
+      "style tag and drops an unrecognised one SILENTLY, so a message is eaten rather "
+      "than mangled, and the piped path is the one nobody is watching. `| head -1` is "
+      "stdout_closed_early's job; this is `> file`, and the one thing that must not "
+      "differ between them is the text.",
+      inv="INV-UI-01",
+      remedy="SILENT is the finding: exit 0 with no marker on one of the two paths means "
+             "the message was lost on that path, and INV-UI-01's red path is exactly "
+             "that — markup on by default renders [project.scripts] as nothing at all. "
+             "Formatting may legitimately differ (rich honours NO_COLOR and a non-tty "
+             "stdout, and a tty gets width-dependent wrapping); TEXT may not. The record "
+             "reports whether the two agree once escape sequences are stripped, so a "
+             "divergence is visible without failing the case on a terminal width.")
+def the_message_survives_a_tty_and_a_pipe(exe: Path, work: Path) -> dict:
+    t0 = time.monotonic()
+    env = clean_env(work / "c")
+    # The pipe run goes first so the pty run reuses its stage: this case is about the
+    # shape of stdout, not about staging, and staging twice doubles a slow case. Popen
+    # rather than run(), and stdin on /dev/null on BOTH sides, so that the only thing
+    # differing between the two runs is whether stdout is a terminal.
+    p = subprocess.Popen([str(exe)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, cwd=work, env=env, text=True)
+    try:
+        pipe_out, pipe_err = p.communicate(timeout=DEFAULT_TIMEOUT_S)
+        pipe_rc, pipe_to = p.returncode, False
+    except subprocess.TimeoutExpired:
+        p.kill()
+        pipe_out, pipe_err = p.communicate()
+        pipe_rc, pipe_to = None, True
+    tty_rc, tty_raw, tty_to = _run_on_a_pty(exe, work, env, DEFAULT_TIMEOUT_S)
+    # Stripped BEFORE classifying, and on BOTH sides: a marker wearing a colour code
+    # would otherwise read as SILENT and this case would report ANSI as a launcher
+    # defect. Comparing a stripped tty against an unstripped pipe would also call every
+    # run a divergence, which is the same mistake one step later.
+    tty_out, pipe_plain = _plain(tty_raw), _plain(pipe_out or "")
+    pipe, tty = (classify(pipe_rc, pipe_plain, pipe_err, pipe_to),
+                 classify(tty_rc, tty_out, "", tty_to))
+    same = tty_out.strip() == pipe_plain.strip()
+    outcome = _worse(pipe, tty)
+    detail = (f"pipe={pipe} rc={pipe_rc} | tty={tty} rc={tty_rc} | same text after "
+              f"stripping escapes: {same} | tty {len(tty_raw)} raw / {len(tty_out)} "
+              f"plain chars vs pipe {len(pipe_plain)}")
+    return {"outcome": outcome, "rc": pipe_rc,
+            "seconds": round(time.monotonic() - t0, 1),
+            "blame": blame(pipe_plain + tty_out, pipe_err) if outcome != "RAN" else "none",
+            "stdout": detail, "stderr": (pipe_err or "").strip()[-300:]}
 
 
 # ---------------------------------------------------------------- impatient
@@ -1692,7 +2530,7 @@ def _build(proj: Path, out: Path, *args, timeout: int = 900) -> tuple:
 
 
 def _wedge(work: Path, decl: str, *, sides: tuple, damage, build_args=(),
-           app: str = "", extra: dict | None = None) -> dict:
+           app: str = "", extra: dict | None = None, target: str = "") -> dict:
     """Build a wedged project and classify what haru-pack did about it.
 
     `sides`  the two halves of the contradiction, as substrings that a good diagnostic would
@@ -1701,10 +2539,17 @@ def _wedge(work: Path, decl: str, *, sides: tuple, damage, build_args=(),
     `damage` callable(exe) -> str. Runs the artifact and returns a description of the
              predicted damage, or "" if the artifact is actually fine. Only consulted when
              the build succeeded quietly.
+    `target` build this path INSIDE the project instead of the project directory. The
+             declaration directory is `project if project.is_dir() else project.parent`, so
+             pointing at `app.py` still reads a sibling `pyproject.toml` for its
+             `[tool.haru-pack]` table while discovery treats the target as a PEP 723
+             script — which is the only way to exercise the pyproject home without also
+             owing discovery a `[project.scripts]` entry or a `__main__.py`, and therefore
+             without a case about config precedence failing for a reason about discovery.
     """
     proj = _wedge_project(work, decl, app=app, extra=extra)
     out = work / "wedged"
-    rc, so, se = _build(proj, out, *build_args)
+    rc, so, se = _build(proj / target if target else proj, out, *build_args)
     blob = (so + se)
     low = blob.lower()
 
@@ -1937,6 +2782,273 @@ def three_names_for_one_artifact(exe: Path, work: Path) -> dict:
         sides=("from-haru-toml", "wedged"),
         damage=damage,
         extra={"pyproject.toml": '[project]\nname = "from-pyproject"\nversion = "0"\n'},
+    )
+
+
+# The pyproject home, the CLI, and the keys nobody validates.
+#
+# The eight cases above feed contradictions through `haru_pack.toml`. These seven attack
+# the rest of the ladder — `discovery < [tool.haru-pack] in pyproject.toml < haru_pack.toml
+# < CLI flags` — which is where an operator actually edits, because it is the file that
+# already declares everything else about their project.
+#
+# Each one reads its answer out of manifest.toml at the payload zip root rather than from
+# the build log. The log names no directive at all, so "it built and said nothing" cannot
+# be distinguished from "it built and honoured me" without opening the artifact. Those are
+# the same bytes the launcher parses at stage time, so what they assert is a property of
+# the SHIPPED binary.
+#
+# Source: docs/BRAINSTORM.md section 1b, 2026-09-11 — lotek asked for an eager-admin
+# persona and INV-BUILD-07's Assets paragraph was already the oracle for it.
+
+def payload_manifest(exe: Path) -> dict:
+    """The manifest.toml out of an artifact's payload, without running the artifact.
+
+    Only valid for an unencrypted payload, which is every case here.
+    """
+    import tomllib          # own group: stdlib from 3.11, and this file targets newer
+
+    info = overlay.verify(exe)
+    at, ln = info["payload_off"], info["payload_len"]
+    with zipfile.ZipFile(io.BytesIO(exe.read_bytes()[at:at + ln])) as z:
+        return tomllib.loads(z.read("manifest.toml").decode("utf-8"))
+
+
+def manifest_entrypoint(exe) -> list:
+    """The entrypoint argv the artifact records, or [] if there is no artifact."""
+    try:
+        return list(payload_manifest(exe).get("entrypoint") or []) if exe else []
+    except (OSError, KeyError, ValueError):
+        return []
+
+
+PYPROJECT = '[project]\nname = "wedged"\nversion = "0.0.1"\n\n'
+
+
+@case("wedge", ("REFUSED",),
+      "A [tool.haru_pack] table with an UNDERSCORE in pyproject.toml — one character away "
+      "from the name haru-pack reads, and the spelling a developer who thinks in Python "
+      "identifiers writes first. Refusing is the only safe answer: the alternative is a "
+      "binary whose entire configuration was addressed to nobody. This is the calibration "
+      "case for the six below it. INV-BUILD-07 guards it explicitly, so it should pass, "
+      "and if it does not then nothing else these cases report can be trusted either.",
+      inv="INV-BUILD-07",
+      remedy="The guard is the `if \"haru-pack\" not in tool and \"haru_pack\" in tool` "
+             "branch in build._declarations, and INV-BUILD-07's Red-path names deleting "
+             "it. A quiet build here means it is gone: restore it, and check that "
+             "test_an_underscored_tool_table_is_refused_not_ignored is still red without "
+             "it.",
+      per_fixture=False)
+def an_underscored_tool_table(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        ep = manifest_entrypoint(out)
+        return (f"the table was addressed to nobody and the build said so to nobody: "
+                f"artifact entrypoint {ep or 'unreadable'}")
+    return _wedge(
+        work,
+        "# no sidecar: the pyproject table is the whole declaration\n",
+        sides=("haru_pack",),
+        damage=damage,
+        target="app.py",
+        extra={"pyproject.toml": PYPROJECT + '[tool.haru_pack]\nentrypoint = "app.py"\n'},
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED"),
+      "A directive key misspelled the way this one actually gets misspelled: `entry-point` "
+      "for `entrypoint`, inside a correctly-named [tool.haru-pack] table, naming a second "
+      "script that exists. Nothing in the ladder validates keys — _declarations merges the "
+      "table wholesale and _resolve reads the handful of names it knows with decl.get() — "
+      "so the directive rides all the way into a merged dict nobody ever asks about and "
+      "the build exits 0. The artifact runs the DISCOVERED entrypoint instead, which is "
+      "the developer three months later wondering why a directive did nothing.",
+      inv="INV-BUILD-07",
+      remedy="Refuse, the way the underscored table is refused and for the same reason: "
+             "validate the merged dict's top-level keys in build._declarations against the "
+             "set actually read — entrypoint, name, kind, app_subdir, cwd_policy, "
+             "verbose_uv, python, encryption, shake, bundle, pre_install, post_install, "
+             "uv_run_args, plus sources in Sources.resolve — and name the nearest match: "
+             "'unknown directive \"entry-point\"; did you mean \"entrypoint\"?'. "
+             "INV-BUILD-07's Statement covers the underscored TABLE and says nothing about "
+             "an unknown KEY inside a correctly-named one, so the Statement needs widening "
+             "to 'a directive haru-pack does not read is never silently ignored', with a "
+             "claiming test per spelling.",
+      per_fixture=False)
+def a_directive_key_with_a_plausible_typo(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        ep = manifest_entrypoint(out)
+        return ("" if ep == ["cli.py"] else
+                f"the directive named cli.py and the artifact runs {ep or 'nothing'}")
+    return _wedge(
+        work,
+        "# the typo lives in the pyproject table\n",
+        sides=("entry-point", "entrypoint"),
+        damage=damage,
+        target="app.py",
+        extra={"pyproject.toml": PYPROJECT + '[tool.haru-pack]\nentry-point = "cli.py"\n',
+               "cli.py": APP},
+    )
+
+
+@case("wedge", ("RAN", "WARNED"),
+      "The two directive homes disagree: [tool.haru-pack] in pyproject.toml names one "
+      "entrypoint and a haru_pack.toml sidecar beside it names another, which is the "
+      "ordinary state of a tree someone is mid-way through moving. The documented ladder "
+      "puts the sidecar above pyproject.toml — it is the local override — so the artifact "
+      "must name the sidecar's script. This pins documented precedence rather than hunting "
+      "a bug: a ladder nobody tests is a ladder that silently inverts.",
+      inv="INV-BUILD-07",
+      remedy="If the artifact names the pyproject entrypoint, the merge order in "
+             "build._declarations has inverted: pyproject is read first and the sidecar's "
+             "dict.update must land on top of it. Fix the order, not the documentation — "
+             "the sidecar is the only option for a tree with no pyproject.toml and the "
+             "local override for one that has it.",
+      per_fixture=False)
+def two_directive_homes_disagree(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        ep = manifest_entrypoint(out)
+        return ("" if ep == ["sidecar.py"] else
+                f"the sidecar outranks pyproject, but the artifact runs {ep or 'nothing'}")
+    return _wedge(
+        work,
+        'entrypoint = "sidecar.py"\n',
+        sides=("sidecar.py", "pyproject.py"),
+        damage=damage,
+        target="app.py",
+        extra={"pyproject.toml": PYPROJECT + '[tool.haru-pack]\nentrypoint = "pyproject.py"\n',
+               "sidecar.py": APP,
+               "pyproject.py": APP},
+    )
+
+
+@case("wedge", ("RAN", "WARNED"),
+      "A directive contradicted by the CLI flag that duplicates it: the sidecar declares "
+      "one entrypoint and `-e` on the command line names another. The ladder puts flags at "
+      "the top, so the flag must win — an operator overriding a checked-in declaration for "
+      "one build is the whole reason flags outrank files.",
+      inv="INV-BUILD-07",
+      remedy="explicit_ep = entry_point or decl.get(\"entrypoint\") in build._resolve is "
+             "what puts the flag first. If the declaration wins instead, that expression "
+             "has been reordered and every --entry-point override is silently ignored.",
+      per_fixture=False)
+def a_directive_contradicted_by_its_cli_flag(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        ep = manifest_entrypoint(out)
+        return ("" if ep == ["flag.py"] else
+                f"-e flag.py was overridden by the declaration: artifact runs "
+                f"{ep or 'nothing'}")
+    return _wedge(
+        work,
+        'entrypoint = "declared.py"\n',
+        sides=("flag.py", "declared.py"),
+        damage=damage,
+        build_args=("-e", "flag.py"),
+        extra={"declared.py": APP, "flag.py": APP},
+    )
+
+
+@case("wedge", ("REFUSED", "WARNED"),
+      "Two tier flags that cannot both hold: --thin and --thick on one command line. "
+      "cli._run_build resolves them with two unguarded ifs, so thick wins by being second "
+      "and nothing is said about it. The operator asked for the smallest possible binary "
+      "and for the largest, and got the largest with no indication which request lost — "
+      "which is the same shape as every other case here, one level up, in the flags rather "
+      "than in the file.",
+      inv="INV-CHAOS-07",
+      remedy="Refuse when both are passed, naming both: 'both --thin and --thick were "
+             "given; they select different tiers'. The two ifs in cli._run_build are "
+             "`if thin: tier = \"thin\"` then `if thick or chonky: tier = \"thick\"`, so "
+             "last-write-wins is an accident of ordering rather than a documented "
+             "precedence — unlike the config ladder, nothing states that thick beats thin.",
+      per_fixture=False)
+def contradictory_tier_flags(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        try:
+            tier = str(payload_manifest(out).get("tier", "?"))
+        except (OSError, KeyError, ValueError):
+            tier = "?"
+        return (f"built tier {tier!r} without mentioning that --thin was overruled"
+                if tier != "thin" else "")
+    return _wedge(
+        work,
+        "# the contradiction is in the flags, not the file\n",
+        sides=("--thin", "--thick"),
+        damage=damage,
+        build_args=("--thin", "--thick"),
+    )
+
+
+@case("wedge", ("REFUSED",),
+      "A declared entrypoint outside the project tree, in the two spellings an operator "
+      "reaches for: `../shared/cli.py` (the app lives one level up beside its siblings) "
+      "and `sub/../../shared/cli.py` (the same file, reached through a directory that "
+      "really exists). Only the project's own tree is copied into the payload, so either "
+      "one names a file that will not be there — a guaranteed first-run failure on the "
+      "customer's machine, decidable at build time.",
+      inv="INV-BUILD-04",
+      remedy="_PLAIN_NAME in entrypoints.resolve_entrypoint rejects a leading '..' or '/', "
+             "which is what refuses the first spelling. The second is not a spelling "
+             "problem and cannot be fixed in that regex: verify_script_file resolves "
+             "Path(project) / spec and asks is_file(), so an interior '..' that lands on a "
+             "real file outside the tree passes. Resolve the candidate and require it to "
+             "stay under decl_dir — the containment check archives._is_within already "
+             "applies to archive members (INV-SUPPLY-03) — and refuse with the resolved "
+             "path in the message. Note this is the same class as "
+             "app_subdir_escapes_the_payload, in a different field: that one is guarded by "
+             "validate_manifest and this one is not.",
+      per_fixture=False)
+def a_declared_entrypoint_outside_the_tree(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        ep = manifest_entrypoint(out)
+        escaped = [x for x in ep if ".." in str(x)]
+        return (f"the artifact records an entrypoint outside its own payload: {escaped}"
+                if escaped else "")
+    return _wedge(
+        work,
+        'entrypoint = "sub/../../shared/cli.py"\n',
+        sides=("shared/cli.py", "outside"),
+        damage=damage,
+        extra={"sub/keep.py": "# a directory that really exists\n",
+               "../shared/cli.py": APP},
+    )
+
+
+@case("wedge", ("RAN", "WARNED"),
+      "A [[bundle]]-style list in BOTH homes. The documented merge is per top-level key "
+      "and not deep, so the sidecar's list REPLACES the pyproject one rather than "
+      "extending it. Worth pinning precisely because the tempting implementation is the "
+      "wrong one: concatenating would let an operator add a bundle step but never remove "
+      "an inherited one, and the step they thought they had deleted would keep running in "
+      "every artifact.",
+      inv="INV-BUILD-07",
+      remedy="The merge is `merged.update(...)` per home in build._declarations, which is "
+             "replacement by construction. If the artifact's manifest carries both lists "
+             "concatenated, someone has made the merge deep — INV-BUILD-07's Note states "
+             "the opposite, so either the code or that Note is now wrong.",
+      per_fixture=False)
+def a_bundle_list_in_both_homes(exe: Path, work: Path) -> dict:
+    def damage(out: Path):
+        try:
+            got = payload_manifest(out).get("bundle") or []
+        except (OSError, KeyError, ValueError):
+            return "the artifact's manifest could not be read"
+        names = [str(b.get("dest", b)) for b in got] if isinstance(got, list) else [str(got)]
+        if names == ["from-sidecar"]:
+            return ""
+        if "from-pyproject" in names and "from-sidecar" in names:
+            return (f"both homes' bundle lists survived into the artifact ({names}) — the "
+                    f"merge concatenated where it documents replacement")
+        return f"the artifact's bundle list is {names}, not the sidecar's"
+    return _wedge(
+        work,
+        'entrypoint = "app.py"\n\n[[bundle]]\nsrc = "keep.txt"\ndest = "from-sidecar"\n',
+        sides=("from-sidecar", "from-pyproject"),
+        damage=damage,
+        target="app.py",
+        extra={"pyproject.toml": PYPROJECT + '[tool.haru-pack]\nentrypoint = "app.py"\n'
+                                 '\n[[tool.haru-pack.bundle]]\nsrc = "keep.txt"\n'
+                                 'dest = "from-pyproject"\n',
+               "keep.txt": "bundled\n"},
     )
 
 
@@ -3101,7 +4213,7 @@ def the_project_chooses_where_its_dependencies_come_from(exe: Path, work: Path) 
 # ---------------------------------------------------------------- parallel execution
 
 def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
-            work_root_str: str, keep: bool) -> dict:
+            work_root_str: str, keep: bool, seed: int = 0) -> dict:
     """Run one (case, fixture) pair and return its record. Safe to call in a worker process.
 
     Everything this needs arrives as arguments rather than through module state, and nothing
@@ -3111,12 +4223,15 @@ def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
     deterministic and the fsync-per-line contract intact with one writer.
 
     Args are strings because a work item crosses a process boundary; Path survives pickling
-    but strings make it obvious that this is a message, not a reference.
+    but strings make it obvious that this is a message, not a reference. `seed` comes the
+    same way rather than through module state, for the same reason: under --jobs the case
+    runs in a worker that never saw the parent's globals.
     """
     c = next(x for x in CASES if x["name"] == case_name)
     exe, run_dir = Path(exe_str), Path(run_dir_str)
     work = Path(tempfile.mkdtemp(prefix=f"bb-{case_name}-",
                                  dir=work_root_str or None))
+    Ctx.enter(work, seed, case_name, fixture_name, run_dir)
     try:
         try:
             r = c["fn"](exe, work)
@@ -3125,19 +4240,30 @@ def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
                  "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
         r.setdefault("blame", blame(r.get("stdout", ""), r.get("stderr", "")))
         r["scratch_bytes"] = dir_bytes(work)
+        # Read the announcements back before the work dir goes away. The file on disk is
+        # the copy that survives this process being killed; this list is only so the
+        # parent can journal them in order without touching the work dir.
+        r["announced"] = Ctx.announced(work)
 
         ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
         msg = (r.get("stderr") or r.get("stdout") or "").strip()
         rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
                **r, "ok": ok, "expect": list(c["expect"]), "fixture": fixture_name,
+               "seed": seed,
+               # Always present rather than sometimes-absent, so no consumer needs .get():
+               # a cascade is a result that resolved after a stall was already declared.
+               "post_stall": bool(r.get("post_stall")),
+               "stall_id": r.get("stall_id", ""),
                "severity": severity_for(c, r, ok),
                "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
         if not ok:
-            rec["artifacts"] = preserve(run_dir, f"{fixture_name}--{case_name}", work)
+            rec["artifacts"] = preserve(run_dir, f"{fixture_name}--{case_name}", work,
+                                        light=c.get("light", False))
         if keep:
             rec.setdefault("artifacts", str(work))
         return rec
     finally:
+        Ctx.clear()
         # Same rule as the serial path, and the same function: the work dir goes away here,
         # not at the end of the run. With 8 workers, deferring it would multiply the peak
         # footprint by 8 on top of already holding the whole sweep. A worker cannot share
@@ -3230,6 +4356,16 @@ def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: 
             if not ok:
                 rec["artifacts"] = preserve(run_dir, f"stack-{i:04d}", work)
             results.append(rec)
+            # Announcements first, in the order the case made them: each was written and
+            # fsynced to the work dir BEFORE its fault, and this puts them in the journal
+            # ahead of the result they explain. A reader who sees a kill at 2.54s and then
+            # a REFUSED knows which moment produced it.
+            for note in rec.pop("announced", None) or []:
+                # The note's own kind, not a fixed one: "perturb" is a fault the harness
+                # injected and "stall" is one it observed, and a reader has to be able to
+                # tell those apart.
+                jr.write(note.get("kind") or "perturb",
+                         **{k: v for k, v in note.items() if k != "kind"})
             jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
             jr.beat()
             n_sel, n_fired = len(combo), len(fired)
@@ -3247,7 +4383,7 @@ def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: 
         ledger_append([{k: v for k, v in r.items()
                         if k in ("name", "persona", "outcome", "severity", "fingerprint",
                                  "inv", "remedy", "artifacts", "fixture", "selected",
-                                 "fired", "seed", "run_index")}
+                                 "fired", "seed", "run_index", "post_stall", "stall_id")}
                        | {"run": run_id, "at": time.time(),
                           "message": (r.get("stderr") or r.get("stdout") or "")[:500]}
                        for r in bad])
@@ -3273,7 +4409,7 @@ def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: 
 
 
 def main() -> int:
-    global WORK_ROOT, SCRATCH_CAP_GB
+    global WORK_ROOT, SCRATCH_CAP_GB, DEFAULT_TIMEOUT_S, HERD_N
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--persona", default="", help="comma-separated personas")
@@ -3285,7 +4421,14 @@ def main() -> int:
                          "package), or a path to an existing binary")
     ap.add_argument("--keep-runs", type=int, default=10,
                     help="how many past run directories to retain")
-    ap.add_argument("--timeout", type=int, default=180)
+    ap.add_argument("--timeout", type=int, default=180,
+                    help="default wall-clock ceiling for a case that does not set its own")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed for faults whose MOMENT is chosen rather than fixed (the "
+                         "herd persona's mid-stage kill). Distinct from --compose-seed, "
+                         "which selects which traits stack")
+    ap.add_argument("--herd-n", type=int, default=16, metavar="N",
+                    help="how many processes the herd persona races on one stage key")
     ap.add_argument("--keep", action="store_true", help="keep each case's wreckage")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--triage", action="store_true",
@@ -3335,6 +4478,12 @@ def main() -> int:
         print("--keep implies --jobs 1 (every work dir is retained; parallel would make "
               "the peak arrive sooner without helping you read them)", file=sys.stderr)
         jobs = 1
+
+    # The two flags that used to be decorative. --timeout was parsed and never read at
+    # all; every wait in the file was whichever literal sat nearest. HERD_N below the
+    # minimum cannot race, so 2 is a floor rather than an error.
+    DEFAULT_TIMEOUT_S = a.timeout
+    HERD_N = max(2, a.herd_n)
 
     if a.work_root:
         WORK_ROOT = Path(a.work_root).expanduser().resolve()
@@ -3453,6 +4602,16 @@ def main() -> int:
                 raise InfraFailure(
                     f"{rec['persona']}/{rec['name']} on {rec['fixture']}: {reason}")
             results.append(rec)
+            # Announcements first, in the order the case made them: each was written and
+            # fsynced to the work dir BEFORE its fault, and this puts them in the journal
+            # ahead of the result they explain. A reader who sees a kill at 2.54s and then
+            # a REFUSED knows which moment produced it.
+            for note in rec.pop("announced", None) or []:
+                # The note's own kind, not a fixed one: "perturb" is a fault the harness
+                # injected and "stall" is one it observed, and a reader has to be able to
+                # tell those apart.
+                jr.write(note.get("kind") or "perturb",
+                         **{k: v for k, v in note.items() if k != "kind"})
             jr.write("case", **{k: v for k, v in rec.items() if k != "why"})
             if len(results) % 25 == 0:
                 live = dir_bytes(WORK_ROOT or Path(tempfile.gettempdir()))
@@ -3489,7 +4648,8 @@ def main() -> int:
             parallel_cases, serial_cases = [], picked
 
         if parallel_cases:
-            items = [(fname, str(exe), c["name"], str(run_dir), str(WORK_ROOT or ""), a.keep)
+            items = [(fname, str(exe), c["name"], str(run_dir), str(WORK_ROOT or ""),
+                      a.keep, a.seed)
                      for fname, exe in fixtures for c in parallel_cases]
             print(f"  {len(items)} run(s) across {jobs} worker(s)"
                   + (f", then {len(serial_cases) * len(fixtures)} timing-sensitive run(s) "
@@ -3507,7 +4667,7 @@ def main() -> int:
             first = fixtures[0][1] if fixtures else Path("/nonexistent")
             for c in fixture_free:
                 record(run_one("(config)", str(first), c["name"], str(run_dir),
-                               str(WORK_ROOT or ""), a.keep))
+                               str(WORK_ROOT or ""), a.keep, a.seed))
 
         if serial_cases:
             if parallel_cases:
@@ -3517,7 +4677,7 @@ def main() -> int:
                     print(f"-- {fname} ({exe.stat().st_size / 1e6:.0f}MB)")
                 for c in serial_cases:
                     record(run_one(fname, str(exe), c["name"], str(run_dir),
-                                   str(WORK_ROOT or ""), a.keep))
+                                   str(WORK_ROOT or ""), a.keep, a.seed))
 
     except InfraFailure as e:
         aborted = True
@@ -3545,7 +4705,7 @@ def main() -> int:
             ledger_append([{k: v for k, v in r.items()
                             if k in ("name", "persona", "outcome", "severity",
                                      "fingerprint", "inv", "remedy", "artifacts",
-                                     "fixture")}
+                                     "fixture", "seed", "post_stall", "stall_id")}
                            | {"run": run_id, "at": time.time(),
                               "message": (r.get("stderr") or r.get("stdout") or "")[:500]}
                            for r in bad])

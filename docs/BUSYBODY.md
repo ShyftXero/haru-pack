@@ -42,7 +42,7 @@ Neither needs a model. Neither needs you to open the raw records.
 
 ## wedge — the persona that attacks the config
 
-The other twelve personas abuse a binary that was already built. `wedge` attacks the
+The other thirteen personas abuse a binary that was already built. `wedge` attacks the
 **declaration**, and it is a different class of bug: a config contradiction that builds
 cleanly ships an artifact whose behaviour nobody predicted from reading the config, and the
 build is the last point at which the person who can fix it is still watching.
@@ -99,6 +99,47 @@ against busybody, not a pass for haru-pack. Fixing the two cases to isolate thei
 what exposed the expiry defect.
 
 **A case must isolate its wedge, or it measures whichever guard happens to fire first.**
+
+### Seven more, further up the ladder — 2026-09-11
+
+The eight cases above feed contradictions through `haru_pack.toml`. Seven more attack the
+rest of the ladder — `discovery < [tool.haru-pack] in pyproject.toml < haru_pack.toml < CLI
+flags` — which is where an operator actually edits, because `pyproject.toml` is the file
+that already declares everything else about their project.
+
+Each reads its answer out of `manifest.toml` at the payload zip root rather than out of the
+build log. The log names no directive at all, so "it built and said nothing" cannot be told
+apart from "it built and honoured me" without opening the artifact. Those are the same bytes
+the launcher parses at stage time.
+
+Three of the seven are calibration — they pass, and if they ever stop passing nothing else
+here can be trusted: an underscored `[tool.haru_pack]` table is refused (`INV-BUILD-07`
+guards it); the sidecar outranks the pyproject table when both name an entrypoint; a `-e`
+flag outranks a declaration; and a `[[bundle]]` list in both homes is replaced rather than
+concatenated, which is what the per-top-level-key merge documents.
+
+**The other three reported `SILENT-WEDGE` on their first run, and all three are real.**
+
+1. **An unknown directive key is silently ignored.** `entry-point` for `entrypoint`, inside
+   a correctly-named table: exit 0, and the artifact records discovery's answer. Nothing in
+   the ladder validates keys — `_declarations` merges the table wholesale and `_resolve`
+   reads the names it knows with `decl.get()`. `INV-BUILD-07`'s Statement covers the
+   underscored *table* and says nothing about an unknown *key* inside a correct one, while
+   its Assets paragraph — "a config table read by nobody is worse than a missing one,
+   because the operator believes it took effect" — is the oracle for both.
+2. **Containment is defeated by spelling.** `../shared/cli.py` is refused by `_PLAIN_NAME`,
+   but `sub/../../shared/cli.py` builds cleanly and the manifest records it.
+   `verify_script_file` resolves `Path(project) / spec` and asks `is_file()`, so an interior
+   `..` landing on a real file outside the tree passes. This is the same class as
+   `app_subdir_escapes_the_payload` in a different field — that one is guarded by
+   `validate_manifest`, and this one is not.
+3. **Contradictory tier flags resolve silently.** `--thin --thick` yields thick because
+   `cli._run_build` has two unguarded ifs and thick is second. Nothing states that thick
+   beats thin, so last-write-wins here is an accident of ordering rather than a documented
+   precedence — unlike the config ladder.
+
+Each case's `remedy` names the fix. None of them is fixed yet: these are findings the
+harness is reporting, not work it has done.
 
 ### Wedge cases run once
 
@@ -671,18 +712,26 @@ Anything breaks if you hit it hard enough. What matters is **how**.
 A launcher that refuses a tampered payload with one clear line is working correctly. A
 launcher that prints a Nim traceback full of build-machine paths, or hangs, or — worst —
 exits 0 having quietly done the wrong thing, is not. Every case declares which of those it
-expects, and three outcomes are findings no matter what any case expected.
+expects, and five outcomes are findings no matter what any case expected.
 
 | Outcome | Meaning | Verdict |
 |---|---|---|
 | `RAN` | exit 0, app's marker in stdout | depends on the case |
 | `REFUSED` | non-zero, haru-pack diagnostic — a guard fired | usually good |
+| `WARNED` | a contradictory config built, and the build said which side lost | acceptable |
 | `CRASHED` | a raw language-level traceback reached the user | **always a finding** |
 | `HUNG` | no exit within the timeout | **always a finding** |
 | `SILENT` | exit 0, but the app never ran | **always a finding, the worst kind** |
+| `SILENT-WEDGE` | a contradictory config built quietly and the artifact carries the damage | **always a finding** |
+| `STALLED` | several processes alive, none of them progressing | **always a finding** |
 
 `SILENT` is worst because it is the one a human does not notice. A crash gets reported; a
-binary that exits 0 having run someone else's code does not.
+binary that exits 0 having run someone else's code does not. `SILENT-WEDGE` is the same
+shape one step earlier, at the build. `STALLED` is the one no process can report about
+itself — see below.
+
+The report prints this list from `FATAL` rather than from a literal, because it went stale
+once already: `SILENT-WEDGE` was fatal for a day before the legend said so.
 
 ## The personas
 
@@ -762,6 +811,31 @@ working and neither should observe a half-built tree.
 
 Cases: two cold starts simultaneously.
 
+### herd — sixteen of them, at once
+
+`twin` races two. This races `--herd-n` of them, default 16, on one cold cache, and adds
+the only thing that can see what two cannot: an observer outside every child.
+
+The stage cache is haru-pack's one shared mutable resource — `$XDG_CACHE_HOME/haru-pack`,
+keyed by payload digest — and staging takes no lock, so each process extracts into its own
+`<key>.tmp-<pid>` and races an atomic move. What N makes reachable and two does not: a
+stampede where sixteen processes each extract the same tree independently, a convoy on the
+move, and sixteen processes waiting on a claim whose owner died without ever writing
+`.ready`.
+
+Cases: sixteen cold starts at once · sixteen where one is killed mid-stage at a **seeded**
+moment (butterfingers composed with twin, which no single-persona case does) · sixteen
+against a stage whose owner is already dead.
+
+Three cases, **not** three times N. `--triage` ranks fingerprint groups by count, so
+sixteen cases failing on one stall would outrank a genuine unique finding sixteen to one.
+Each case reduces over its own children and returns exactly one record; which children
+were cascades is evidence inside that record, not sixteen more records.
+
+All three are marked `light=True`: their work directory holds one shared stage plus N
+transient copies of it, and `preserve()` copies directories whole, so a finding would
+otherwise archive hundreds of megabytes of the same bytes.
+
 ### timetraveller — moves the clock, lies about location
 
 Spoofs `HARUPACK_GEO`, sets licence variables that should not apply.
@@ -776,9 +850,14 @@ docs honest in the direction they are most likely to drift.
 
 ## App-level personas — the ones that vary by package
 
-The seven personas above attack the **launcher**, which is byte-identical in every binary
-haru-pack produces. That is why sweeping them across 25 packages produced 575 runs and only
-23 fingerprints. These five attack the **packaged application** instead.
+The eight personas above attack the **launcher**, which is byte-identical in every binary
+haru-pack produces. That is why sweeping the seven that existed on 2026-09-10 across 25
+packages produced 575 runs and only 23 fingerprints. These five attack the **packaged
+application** instead.
+
+`herd` is the exception among the eight: it is payload-invariant like the rest, but what it
+varies is haru-pack's own concurrent state rather than the package, so it discriminates
+without needing the sweep at all.
 
 ### cartographer — messes with *where*
 
@@ -798,6 +877,13 @@ Closed stdin, and stdout slammed shut mid-write (the `| head -1` case). The stdi
 covers the licence prompt, which is guarded on `isatty` — a hang there would be the serious
 outcome.
 
+A third case runs the same binary twice, once under a real pty and once through a pipe, and
+compares what survives. The rich output wrapper renders differently when stdout is not a
+terminal (`INV-UI-01`), and the failure worth catching is not "the colours differ" but "the
+*message* differs" — a wrapper that eats a diagnostic when piped is a diagnostic nobody in
+CI will ever read. Both sides are stripped of escape sequences before comparison, so the
+case asserts the text and not the formatting.
+
 ### impatient — signals to the *app*
 
 Ctrl-C and SIGTERM after staging, so the signal lands on the application rather than on
@@ -808,6 +894,107 @@ a comment said so and nothing tested it until now.
 
 Few file descriptors, a tight address space, a read-only `TMPDIR`. The most
 package-dependent of the lot, and the one that required real work to make so.
+
+## The stall — the failure nothing can report about itself
+
+Every other outcome is a statement one process makes about itself by exiting. `HUNG` is
+"this process did not exit inside its timeout", which is all a single wait can ever see.
+
+"Everybody is alive, nobody is burning CPU, nothing is being written" is invisible from
+inside each of the processes it is happening to. Each one is fine. None of them has an exit
+status yet. So `classify()` cannot produce `STALLED` and deliberately does not: if one
+process's timeout could declare it, every slow case on a loaded box would declare it too
+and the class would mean nothing.
+
+**The watchdog.** A thread in the harness process, sampling about once a second: whether
+each child is alive, its CPU time from `/proc/<pid>/stat`, and the total byte count under
+the staging area. A stall is declared only when all three hold **continuously** — every
+child alive, no child's CPU advanced, the tree did not grow. It is a thread rather than a
+subprocess because the parent is sitting in a wait that releases the GIL, it is already
+outside every child (the only property that matters), and a subprocess would read the same
+`/proc` and then need IPC to hand the verdict back.
+
+It calls `Ctx.beat()` every tick, because `HEARTBEAT_STALE_S` is 120 seconds, these cases
+outlive that, and a stale heartbeat is exactly how `reap_orphans` and `prune_runs` decide a
+run is dead and delete its work directories.
+
+**Blame, honestly.** `launcher` only on launcher-side evidence — a `.tmp-<pid>` directory
+whose byte count is static while its owner is dead. If the sampler itself was late, the
+verdict is `unknown` and says so. A watchdog that reports its own scheduling starvation as
+a product defect is the `tight_address_space` mistake again, and this one would be worse:
+that case merely discriminated nothing, this one would invent a finding.
+
+**The threshold is provisional, and the source says so.** `STALL_QUIET_S = 40` carries its
+measurements beside it. Measured 2026-09-11 against a real default-tier fixture, all three
+cases, 16-way from a cold cache: longest quiet stretch **0.0s**, over 9 to 13 ticks each.
+The thick tier is strictly slower and has **not** been measured, because a thick fixture
+cannot be built on that box at all — there is no pinned sha256 for the CPython it wants and
+haru-pack correctly refuses to stage an unverified interpreter. So 40 is an order of
+magnitude above everything observed rather than a calibrated number, and the TODO beside it
+names the measurement that replaces it.
+
+A limit of the method, recorded because it does not go away with a better threshold: an
+application that deliberately idles is indistinguishable from a stall by these three
+signals. A fixture that only slept produced 6s of continuous quiet on a healthy 4-way herd.
+These cases hold for fixtures that stage, print and exit — which is every busybody fixture
+— and a packaged app that waits on a network or a prompt does not belong in this persona at
+any threshold.
+
+### post_stall — one stall is one finding
+
+Once a stall is declared, every child that resolves afterwards fails too, and it fails *for
+the stall* rather than for itself. Those results are tagged `post_stall` with a shared
+`stall_id`.
+
+Without that tag the arithmetic goes wrong in a specific way. Sixteen cascading children
+share a persona, a case and an outcome, so they normalise to one fingerprint — and
+`ledger_rollup` used to rank groups by count alone, which put that sixteen-count group
+**above** the single-count record of the fault that caused it. One bug presented as the top
+sixteen problems, with its cause ranked seventeenth. It is the same error as reading
+"575/575 passed" as 25× the assurance, pointing the other way.
+
+So `post_stall` joins the grouping key, and the ordering key sinks every cascade group below
+every fresh one whatever the counts. `--triage` prints them under their own `CASCADES`
+heading with the numbering running on, and `--history` counts them in a separate column —
+because if only one of those two views were fixed they would disagree sixteen to one about
+one stall and neither number could be trusted.
+
+The cascades are **kept**, not dropped. The shape of a cascade — how many processes went
+down with one stall, and which — is the primary evidence that there was a stall. Dropping
+them at append time would be one line and would throw that away forever; and marking them
+`ok=True` would erase them from the report and from the exit code, which hides the cascade
+instead of attributing it. It stays out of the *fingerprint* basis for a separate reason: a
+cascade of a real fault would fingerprint differently from the same fault seen cleanly, so
+that fault's history would split in two, and every fingerprint already on disk would be
+orphaned.
+
+## The seed, and announcing a fault before performing it
+
+Faults used to land at fixed moments — mid-stage, after staging. That is one point on a
+continuous axis, and a SIGKILL 40 ms after the staging directory appears is a different
+fault from one 4 seconds in. `--seed` draws the moment and the victim instead, from a stream
+keyed on `(seed, case, fixture, salt)` through sha256 — not the `hash()` builtin, which is
+salted per process, so the same seed would draw a different stream every run and the one
+thing a seed is for would silently not work. It also has to hold across a process boundary,
+because under `--jobs` the case runs in a worker.
+
+`--seed` is separate from `--compose-seed`: that one selects which traits stack, this one
+decides when a chosen fault fires.
+
+**The rule that makes it usable: the fault is announced BEFORE it is performed.** Recorded
+afterwards, a kill at 0.4s and a kill at 4.0s leave the same case name with different
+outcomes and nothing says which moment was chosen — so the harness's own timing jitter
+starts reading as a product defect, which is the confusion the `CASE-ERROR` split exists to
+prevent.
+
+A case announces through a file in its own work directory, fsynced before the action, rather
+than through the journal. Two reasons, and the second is the real one: under `--jobs` the
+parent is the only journal writer, which is what keeps the append order deterministic; and a
+record that has to survive the fault it announces cannot live in the process the fault
+kills. The parent folds those lines into the journal ahead of the result they explain, so
+a reader sees the kill at 2.54s and then the outcome it produced. A record the harness
+merely *observed* — a stall — goes through the same durable channel under its own record
+type, never as a perturbation, so a reader can always tell which entries the harness caused.
 
 ## Two things this taught, both worth keeping
 
@@ -929,6 +1116,17 @@ passed. `--keep` is a flag people remember only after the interesting run.
 If you are holding that file and nothing else, that is meant to be enough.
 
 ## Adding a case
+
+Two flags worth knowing before you write one. `per_fixture=False` means the case says
+nothing about the packed package — it builds its own artifact, or attacks the harness's own
+bookkeeping — so it runs once per run instead of once per fixture. `light=True` means
+`preserve()` should copy only the top-level files of the work directory, for a case whose
+directory holds a stage tree rather than diagnostics.
+
+A case that injects a fault whose *moment* it chose must draw it from `Ctx.rng()` and
+announce it with `Ctx.perturb()` **before** acting. A case that merely observes something
+uses `Ctx.observe()`; the two are different record types on purpose.
+
 
 Cases are plain Python functions in `tools/busybody.py`, not data. They mutate binaries and
 environments, so code is the honest representation.
