@@ -2417,6 +2417,12 @@ Note: `INV-PAYLOAD-01` is satisfied throughout. Its Statement is about files *ma
 credential pattern*, and the link names do not match one. That is a narrow invariant doing
 exactly what it says, which is why this entry exists beside it rather than as an amendment
 to it.
+Note: **Not addressed by the `INV-BASE-01` symlink fixes** (`0d804ed`, `ffa2dbc`, both on
+main). Those resolve symlinks in the launcher's *staging-root* refusal — run time, on the
+customer's machine, against whoever sets `HARU_BASE_PATH`. This entry is build time, on the
+operator's machine, against whoever wrote the packed tree. Re-run 2026-09-11 against main
+with both fixes in place: all nine `trojan` findings unchanged, and `build.py` still calls
+`shutil.copytree(source, app, ignore=_IGNORE)` untouched.
 
 ### INV-TRUST-07
 Status: proposed

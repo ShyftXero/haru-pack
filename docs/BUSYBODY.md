@@ -396,6 +396,34 @@ choosenim, and without the check they would have read as four clean passes.
 **A case must isolate its attack, or it measures whichever guard happens to fire first.**
 That sentence has now been paid for twice.
 
+### Re-run against the symlink fixes — 2026-09-11, and nothing moved
+
+Two `INV-BASE-01` commits landed on main between this persona being written and being
+re-run: `0d804ed` resolves symlinks in the staging-root refusal, `ffa2dbc` makes that
+refusal cross-platform. Both are real fixes to a real bypass. Neither changes a single
+outcome here.
+
+```
+10 cases, 1 behaved as expected, 9 findings — identical to the first run.
+```
+
+They are a **different boundary**, and the distinction is worth holding onto because the
+word "symlink" hides it:
+
+| | `INV-BASE-01` | `INV-TRUST-06` |
+|---|---|---|
+| when | run time, on the customer's machine | build time, on the operator's machine |
+| who | whoever sets `HARU_BASE_PATH` | whoever wrote the packed tree |
+| what | a staging root that resolves to `/` or `$HOME` | `assets/logo.png` that resolves to `~/.ssh/id_rsa` |
+| where | `stage.nim`, `refuseUnsafeRoot` | `build.py`, `shutil.copytree(..., ignore=_IGNORE)` |
+
+Checked rather than assumed: `build.py` on `origin/main` still reads
+`shutil.copytree(source, app, ignore=_IGNORE)` with no symlink handling, and
+`payload.py` still selects members with `p.is_file()`, which is true for a symlink to a
+file. Every branch in the repo was searched for a payload-copy change; there is none.
+
+**"We fixed symlinks" is not a property a codebase has.** It is a property of one call site.
+
 ### What to fix first
 
 Ranked by what an operator loses, not by effort:
