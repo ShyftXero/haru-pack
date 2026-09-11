@@ -1,7 +1,8 @@
 # haru-pack glossary
 
-The precise vocabulary for the launcher stub's runtime configuration. Glossary only — no
-implementation, no decisions (those live in INVARIANTS.md and docs/adr/).
+The precise vocabulary for the launcher stub's runtime configuration, plus any term that
+has come to mean more than one thing. Glossary only — no implementation, no decisions (those
+live in INVARIANTS.md and docs/adr/).
 
 ## canary
 An env-var **prefix token the stub intentionally watches for** at runtime. The name is
@@ -86,3 +87,37 @@ rules**; a rule is a set of `field=value` assertions against the resolver JSON (
 A packager choice, fixed at build with `--reap`, that bakes an always-on on-target action:
 after the app exits, the stub spawns a **detached reap** of the staged subtree. Defined at
 build, not toggled at runtime. Reaping an unencrypted thin build is the packager's call.
+
+## wedge
+
+**One word, three senses.** Two of them are code, one is how Eli says it out loud. Worth
+disambiguating before acting, because "find me a wedge" and "create a wedge" can mean either
+mechanism and they are tested by different personas.
+
+**1. A config wedge — `wedge` the persona, `SILENT-WEDGE` the outcome.** A *declaration*
+where two directives cannot both be honoured: an entrypoint the payload builder deliberately
+excludes, an `app_subdir` containing `..`, `--thin --thick`, a licence that expires before it
+is built. Governed by `INV-CHAOS-07`. The persona attacks the declaration rather than a built
+binary, and its findings are graded by what the *artifact* carries: `REFUSED` (the build
+stopped and named both sides), `WARNED` (it built and said which side lost), or
+`SILENT-WEDGE` (it built, said nothing, and shipped the damage). The last is the one the
+persona exists for.
+
+**2. A stalled herd — `STALLED` the outcome, `herd` the persona.** Several processes alive
+and none of them progressing: a stampede or a convoy on the stage cache, or N processes
+waiting on a claim whose owner is dead. Governed by `INV-CHAOS-09`. **This sense was called
+`WEDGED` until 2026-09-11** and was renamed precisely because sense 1 already owned the word
+in this repo. It is the sense lotek meant when it described the failure mode as "the wedge" —
+a whole-system stall, emergent from concurrency, that no single case observes.
+
+**3. "The program is wedged" — the colloquial sense.** Stuck, jammed, not coming back.
+Usually sense 2, because that is what a wedged *program* looks like from outside, but not
+always: a build that silently shipped a contradictory config has also wedged something, one
+stage earlier.
+
+**Which to reach for.** If the complaint is about a binary that will not make progress at
+runtime, that is `herd` / `STALLED`. If it is about a declaration that cannot be honoured as
+written, that is the `wedge` persona. Both live in `tools/busybody.py`; see
+`docs/BUSYBODY.md`. When it is genuinely ambiguous, the runtime sense is the likelier ask —
+and a stall can only be *observed*, never injected, so "create a wedge" almost always means
+sense 1, which is a file you can write.
