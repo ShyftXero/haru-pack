@@ -73,6 +73,29 @@ proc stripTrailingSep(p: string): string =
   while result.len > 1 and (result[^1] == '/' or result[^1] == '\\'):
     result.setLen(result.len - 1)
 
+proc physicalPrefix(path: string): string =
+  ## Resolve symlinks on the longest EXISTING ancestor of `path`, then re-attach the
+  ## not-yet-created tail lexically. A purely lexical root check is fooled by a symlink: a
+  ## `BASE_PATH=/tmp/x` where `/tmp/x -> $HOME` (or `-> /`) passes every string comparison in
+  ## `refuseUnsafeRoot` yet stages — and, with `--reap`, reaps — a subtree at the real,
+  ## forbidden location. Only an EXISTING path can be resolved to its physical form, so we
+  ## realpath the deepest existing ancestor and re-append whatever the launcher has not created
+  ## yet (INV-BASE-01 symlink hardening, 2026-09-11).
+  if path.len == 0: return path
+  var existing = stripTrailingSep(path)
+  var tail = ""
+  while existing.len > 0 and
+        not (fileExists(existing) or dirExists(existing) or symlinkExists(existing)):
+    let (parent, name) = splitPath(existing)
+    if parent.len == 0 or parent == existing: break
+    tail = (if tail.len == 0: name else: name / tail)
+    existing = stripTrailingSep(parent)
+  if existing.len == 0: return path
+  var real = existing
+  try: real = expandFilename(existing)     # follows symlinks; requires existence
+  except CatchableError: real = existing
+  result = (if tail.len == 0: real else: real / tail)
+
 proc refuseUnsafeRoot*(root: string): string =
   ## "" if `root` is an acceptable staging root; otherwise a one-line diagnostic. A staging
   ## root that is empty, the filesystem root '/', a Windows drive/UNC root, or the user's home
@@ -101,6 +124,22 @@ proc refuseUnsafeRoot*(root: string): string =
   let home = stripTrailingSep(getHomeDir())
   if p == home or pn == normalizedPath(home):
     return "staging root is the home-directory root: " & root
+  # Symlink hardening: the lexical checks above are blind to symlinks. Resolve the existing
+  # part of the path to its PHYSICAL location and re-run the same refusals, so a benign-looking
+  # `BASE_PATH` that resolves through a symlink to '/', a drive root, or $HOME is refused too
+  # (proven bypassable before this: /tmp/x -> $HOME was ACCEPTED). INV-BASE-01.
+  let phys = stripTrailingSep(physicalPrefix(p))
+  if phys != p:
+    let pp = normalizedPath(phys)
+    if phys == "/" or pp == "/":
+      return "staging root resolves through a symlink to the filesystem root '/': " & root
+    when defined(windows):
+      if phys.len >= 2 and phys.len <= 3 and phys[1] == ':':
+        return "staging root resolves to a drive root: " & root
+      if pp.len >= 2 and pp.len <= 3 and pp[1] == ':':
+        return "staging root resolves to a drive root: " & root
+    if phys == home or pp == normalizedPath(home):
+      return "staging root resolves through a symlink to the home-directory root: " & root
   return ""
 
 proc isDirWritable(dir: string): bool {.used.} =   # {.used.}: consumed only on the Linux path
@@ -148,6 +187,12 @@ proc reapDetached*(target: string) =
   ## INV-REAP-01). `target` is ALWAYS the exact staged subtree the launcher created this run
   ## (`<root>/<key>-<digest>`), never a raw base_path or env value.
   if target.len == 0: return
+  # TOCTOU defence: the launcher created `target` as a real directory, but the app ran for an
+  # unbounded time between creation and this reap. If `target` is now a SYMLINK, a local
+  # attacker swapped it — do not follow it. We only ever reap a real directory we made. (GNU
+  # `rm -rf -- link` already removes the link rather than its target, but not every target's
+  # `rm` is GNU, so refuse explicitly.) INV-BASE-01 / INV-REAP-01.
+  if symlinkExists(target): return
   when defined(posix):
     # Double-fork + setsid: the grandchild is reparented to init and OUTLIVES this stub. We
     # wait only for the FIRST child (which exits immediately after forking the deleter), never

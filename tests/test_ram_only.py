@@ -21,6 +21,7 @@ See docs/adr/0004-reap-ram-staging.md and the INVARIANTS.md entries.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import shutil
 
 import pytest
@@ -147,6 +148,31 @@ def test_home_env_base_path_refused_even_via_dotdot(nim_launcher, tmp_path, suff
     r = run(exe, tmp_path, env_extra={"HARU_BASE_PATH": str(home) + suffix})
     assert r.returncode == EXIT_BAD_STUB, (r.returncode, r.stdout, r.stderr)
     assert "unsafe base path" in r.stderr, r.stderr
+    assert "PAYLOAD_UV_RAN" not in r.stdout
+
+
+@pytest.mark.invariant("INV-BASE-01")
+@pytest.mark.parametrize("target", ["home", "root"])
+def test_symlinked_env_base_path_to_a_refused_root_is_refused(nim_launcher, tmp_path, target):
+    """A lexical root check is blind to SYMLINKS. A BASE_PATH `/tmp/x` where `/tmp/x -> $HOME`
+    (or `-> /`) passes every string comparison in refuseUnsafeRoot, yet stages — and with
+    --reap, REAPS — a `<key>-<digest>` subtree at the forbidden real location. Proven bypassable
+    2026-09-11: refuseUnsafeRoot('/tmp/link->$HOME') returned ACCEPTED. The fix resolves the
+    existing prefix to its PHYSICAL location (physicalPrefix -> expandFilename) and re-runs the
+    refusals, so the symlink is refused.
+
+    Red-path: delete the `physicalPrefix` block from refuseUnsafeRoot and the launcher stages
+    under $HOME / '/' (returncode 0) instead of refusing -> this goes red.
+    """
+    dest = (tmp_path / "home") if target == "home" else Path("/")
+    link = tmp_path / "benign-looking-link"
+    link.symlink_to(dest)
+    src = make_payload(tmp_path / "p")
+    exe = tmp_path / "app.exe"
+    pack(nim_launcher, build_payload_zip(src), exe, stub_config=stub_toml2())
+    r = run(exe, tmp_path, env_extra={"HARU_BASE_PATH": str(link)})
+    assert r.returncode == EXIT_BAD_STUB, (r.returncode, r.stdout, r.stderr)
+    assert "unsafe base path" in r.stderr and "symlink" in r.stderr, r.stderr
     assert "PAYLOAD_UV_RAN" not in r.stdout
 
 

@@ -1998,6 +1998,16 @@ path" `ExitBadStub` never fires. Separately, in `build.resolve_base_path` drop t
 `test_env_base_path_overrides_stub_base_path` goes red.
 Source: docs/adr/0004-reap-ram-staging.md §3/§6. Consumes the `BASE_PATH` knob ADR 0003 §3.4
 left wired-but-unconsumed; the per-knob env-name rule is INV-CANARY-01.
+Note: The refusal resolves SYMLINKS, not just `.`/`..`. A lexical-only check was proven
+bypassable 2026-09-11: `refuseUnsafeRoot("/tmp/x")` where `/tmp/x -> $HOME` returned ACCEPTED,
+so a symlinked `BASE_PATH` staged (and, with `--reap`, reaped) a subtree at the forbidden real
+location — blast radius bounded to the own subtree, but the guard's intent defeated and a
+TOCTOU window opened. `physicalPrefix` now resolves the longest existing ancestor via
+`expandFilename` before the root/drive/home checks, and `reapDetached` refuses a target that has
+since become a symlink (defence-in-depth against a swap between create and the detached delete).
+Red-path: delete the `physicalPrefix` block in `refuseUnsafeRoot` and
+`test_symlinked_env_base_path_to_a_refused_root_is_refused` goes red (the launcher stages under
+`$HOME` / `/`). See CHANGELOG.md 2026-09-11.
 Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py, src/haru_pack/cli.py
 
 ### INV-RAM-01
