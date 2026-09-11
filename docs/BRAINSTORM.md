@@ -53,6 +53,101 @@ imports it, `haru-pack build` it, run it in an airgapped subdir, record pass/fai
 One afternoon; immediately finds the "needs post-install" and "native wheel per-platform"
 classes.
 
+
+## 1b. Second round from lotek's BusyBody — what transfers, what doesn't (2026-09-11)
+
+lotek sent back a list of what to steal next, having seen us take its journal / heartbeat /
+ledger / severity machinery. Its headline: our cases run standalone, deterministic, one-each,
+so the failure mode we structurally cannot reach is a **whole-system stall that no single case
+observes because it is emergent from concurrency**. Triaged four ways, cheapest first.
+
+### Take: a `--seed`, and faults that land at a seeded moment
+Every fault we inject lands at a **fixed** point — `killed_mid_stage` kills mid-stage,
+`impatient` signals *after* staging. Those are one point each on an axis that is continuous,
+and the axis is where the interesting bugs live: a SIGKILL 40 ms after the `.tmp-` directory
+is created is a different fault from one 4 s in, and today we only ever fire the second.
+
+busybody has no `--seed` at all. Adding one is small and it is the prerequisite for anything
+nondeterministic, the herd below included. The part worth copying verbatim is lotek's
+discipline: **journal the perturbation before performing it.** Without that, a seeded kill
+produces one case name with two outcomes and the journal cannot say which moment it chose —
+and our own jitter starts masquerading as a haru-pack defect, which is the exact confusion
+the `CASE-ERROR` split exists to prevent.
+
+lotek's framing of this ("a persona that executes its script perfectly was *too competent* —
+the one thing no real operator is") applies to us only halfway. Our runtime operator is a
+shell invoking `./myapp`; the perfect executor really is the realistic case there. The human
+fumbling that matters for haru-pack happens at **build** time — wrong flag, stale lockfile,
+typo'd directive — which is the persona below.
+
+### Take, and it's the best of the four: `settings-tinkerer` — but it needs a new case kind
+The eager admin who lives in Settings flipping toggles until something desyncs. We grew the
+surface for exactly this on 2026-09-10 (`[tool.haru-pack]` directives, `INV-BUILD-07`) and
+nobody attacks it. Better, the oracle is already written down — INV-BUILD-07's own Assets
+paragraph says *"a config table read by nobody is worse than a missing one, because the
+operator believes it took effect"*, and `SILENT` is already a first-class outcome we call the
+worst kind. A build that exits 0 having ignored a directive is the packaging translation of
+lotek's Save that 200s and never persists.
+
+The blocker is structural and worth naming before anyone calls this cheap: **all twelve
+personas have the signature `(exe: Path, work: Path)`, and the exe is built once, before any
+case runs.** No current case can express a build-time fault. This persona needs a second case
+kind that receives a *project directory*, runs `haru-pack build` itself, and treats the build's
+exit code, its stderr and the resulting exe as evidence. Cases are cheap; the hook is not.
+
+Cases once it exists: two directives that contradict each other · a directive that contradicts
+the CLI flag duplicating it · an unknown key (`entry-point` for `entrypoint`) · a directive
+edited after the lockfile · case and whitespace variants · a directive naming a file outside
+the project. INV-BUILD-07 is `active` with a red path, but its tests are cooperative pytest
+ones; nothing has been hostile to it.
+
+Because we ship refusals that hand over the fix, the discriminator here is three-way, not two:
+refuse *with the fix* (correct), refuse uselessly (a docs defect), ignore silently (the
+finding). Only the third is a `SILENT`.
+
+### Take, re-aimed: `herd` + a watchdog — the wedge class, which we genuinely cannot see
+lotek composes N personas at chosen ratios against one shared board. We have no board, no
+queue and no worker pool — a launcher stages and execs. But we do have exactly one shared
+mutable resource under a lock: **the stage cache directory, keyed by digest.** `twin` already
+races N=2 on it and asserts atomicity, so the shape is right and the scale is wrong.
+
+What N=16 can produce that N=2 cannot: a stampede where sixteen processes each extract the
+same 60 MB independently; sixteen waiters on a `.tmp-` directory whose owner was SIGKILLed and
+never wrote `.ready`; lock convoy. And no child can diagnose any of it. Our per-process
+`communicate(timeout=180)` eventually reports `HUNG`, but it cannot distinguish *slow because
+of 16-way contention* from *wedged, permanently* — that distinction needs an observer outside
+every child, sampling CPU and the byte count under each `.tmp-` every second and declaring a
+wedge when all children are alive and none is progressing for K seconds.
+
+The cheap half of this steal is the tagging, and it is the half we would miss. Once a wedge is
+declared, **everything after it is `post_wedge`, not a fresh finding.** Our ledger fingerprints
+and `--triage` ranks groups largest-first, so one stall would otherwise enter as fifteen `HUNG`
+fingerprints and rank a single bug fifteen times — the same arithmetic error as reading
+"575/575 passed" as 25× the assurance.
+
+Cost is real: a case kind that owns N children plus a watchdog process, a `WEDGED` outcome, a
+`post_wedge` field in the journal and the ledger. Worth it because of what the top-25 sweep
+taught — this discriminates on **haru-pack's own concurrent state, not on the payload**, so it
+runs against the synthetic fixture in seconds and never needs the 35-minute sweep.
+
+### Decline: WebUI-first
+There is no web UI. haru-pack is a CLI and a Nim launcher, and building a UI in order to have
+one to drive would be the tail wagging the dog. The transferable half — *drive the surface a
+human actually touches, not the API underneath* — maps to the rich terminal output that landed
+under `INV-UI-01`, and the silent-success failure there is a progress line claiming a stage was
+verified when it was not, or the wrapper eating a message when stdout is not a TTY. That is one
+`mute`-adjacent case comparing what a TTY sees against what a pipe sees. Not a new harness.
+
+### Order, if this gets built
+`--seed` and journal-before-act (small, unblocks the rest) → the build-time case kind and
+`settings-tinkerer` (best value, invariant already written) → `herd` + watchdog + `post_wedge`
+(most expensive, only class we cannot currently observe at all) → TTY-vs-pipe (small).
+
+And the reciprocal, if anyone is routing this back: a composed run with a watchdog needs to
+attribute a stall to the harness or to the product, which is what our `blame` field
+(`launcher` / `app` / `unknown`) and the `APP-CRASHED` outcome exist for. A watchdog that calls
+its own scheduling starvation a product wedge is the `tight_address_space` mistake — a
+threshold that looks thorough and discriminates nothing.
 ## 2. More feature ideas
 - **`haru-pack doctor <project>`** — static pre-flight: detects playwright/spacy/nltk/torch
   (post-install needed), native exts (per-platform bundle), reads-`__file__` smells,
