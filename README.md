@@ -330,6 +330,21 @@ commercial. What the licensing feature does and does not enforce:
   tamper-evidence needs a signature ([`INV-LAUNCH-03`](INVARIANTS.md), not yet implemented),
   or Authenticode on a signed Windows build.
 
+### Packing a tree you did not write is running it
+
+`haru-pack build .` is not a read-only operation on your source. At `--thick` it resolves
+and installs your project, which calls its build backend. A `[[bundle]]` step in
+`haru_pack.toml` runs at build time with your environment. A symlink in the tree is followed
+out of it. A `[tool.uv] index-url` in the project decides where the wheels inside your signed
+binary came from.
+
+All of that is fine for your own repository and is how the features work. It is **not** fine
+for a repository you cloned, a branch that arrived in CI, or an application an agent wrote
+that nobody read. Today there is no boundary there at all: `INV-TRUST-01` through `-07` are
+`proposed`, six of the seven were demonstrated by the busybody `trojan` persona on
+2026-09-11, and none of them are defended yet. Treat packing an untrusted tree the way you
+would treat running its `setup.py` — because you are.
+
 ## Prior art
 haru-pack is not the first tool to stage `uv` from a native launcher.
 [`ofek/pyapp`](https://github.com/ofek/pyapp) established the shape (and

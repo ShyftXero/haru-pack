@@ -184,6 +184,208 @@ pyarmor's unlicensed/trial runtime is size-limited and not for redistribution; h
 detects the trial banner and says so in the build log. It will not decide licensing for you,
 but it will not let you ship a trial artifact believing it is licensed.
 
+## trojan — the project you were asked to package
+
+Every other persona attacks a finished binary or the environment around a build. This one
+attacks from inside: it **is** the source tree handed to `haru-pack build`.
+
+`THREAT_MODEL.md` did not have that actor. Its table listed the operator as "not hostile —
+busy", which is true, and then assumed the operator wrote what they were packing, which is
+not. `haru-pack build` gets run against repositories cloned from the internet, against
+branches that arrive in CI, and against applications an agent wrote that nobody read line by
+line. In all three the build host executes code the operator did not write, and the artifact
+is signed with the operator's identity. The threat model's own worst case says haru-pack's
+failure mode is "our tool becomes a distribution channel" — this persona is the half of that
+sentence nothing was testing.
+
+```sh
+python tools/busybody.py --persona trojan
+python tools/busybody.py --case a_symlink_walks_a_private_key_into_the_payload
+```
+
+### Hostile, and inert
+
+These cases write attack source. That is a thing to be careful with, so the rules are
+absolute and stated in `tools/busybody_hostile.py` at the top of the file:
+
+- **Capability is proven by touching a marker, never by causing harm.** A program that could
+  run `rm -rf` writes one empty file and exits. The finding is identical; the blast radius
+  is not.
+- **`TMPDIR` is redirected into the case's work directory**, which is where every marker
+  lands — the realistic drop location, and one the hostile program finds through
+  `tempfile.gettempdir()` rather than through cooperation from the harness.
+- **No network.** The index-redirection case points at `127.0.0.1:9`, the discard port.
+- **Every planted string carries the `busybody_trojan_` prefix**, so one that ever escapes
+  is greppable on sight and obviously synthetic.
+- **The credentials are strings**, in a directory under `work/`, not keys.
+
+`$HOME` is deliberately **not** redirected, and that is a scar. The first shakedown run did
+redirect it, and all four cases came back `REFUSED` — by choosenim, which could not find
+`~/.choosenim` and failed long before the payload copy. Four clean passes, zero attacks
+reached. A sandbox that hides the compiler tests nothing.
+
+### Four outcomes, two of them fatal
+
+| outcome | meaning |
+|---|---|
+| `CONTAINED` | the hostile construct was neutralised and no marker fired. Good. |
+| `REFUSED` | the build stopped and **named** the construct. Best case. |
+| `SANCTIONED` | project-controlled code ran through a path haru-pack *documents* as executing project-controlled code, **and the build log named it first**. Not a defect. |
+| `ESCAPED` | project-controlled code ran on the build host through a path documented as executing nothing, or without the log naming it. **A finding.** |
+| `SMUGGLED` | bytes never in the project reached the distributed artifact. **A finding.** |
+
+`ESCAPED` and `SMUGGLED` are in `FATAL`. `SANCTIONED` exists for the same reason `EXPOSED`
+does in `reverse_engineer`: a documented capability, honestly reported, is not a bug, and
+collapsing it into `ESCAPED` would train the reader to skip the one outcome that separates
+"we chose this" from "nobody knew".
+
+The verdict on a bundle step therefore turns on **naming**, not on execution. Bundle steps
+are a feature and the operator's own project needs them. What was missing is the sentence
+that lets an operator tell their step from someone else's.
+
+### What it found on its first run — 2026-09-11
+
+```
+10 cases, 1 behaved as expected, 9 findings — all critical.
+  SMUGGLED x3   bytes that were never in the project reached the artifact
+  CRASHED  x4   the build unwound at the operator instead of refusing
+  ESCAPED  x2   the packed project executed code on the build host
+  SANCTIONED    post_install, named in the log before it shipped
+```
+
+Three were confirmed by hand before the harness existed.
+
+**A symlink walks a private key into the payload** — `SMUGGLED`, and the cleanest of the
+set. `_IGNORE` is `shutil.ignore_patterns`, which matches *the name of the entry being
+copied*, never the target of a link; `copytree`'s default `symlinks=False` dereferences.
+So `assets/logo.png` pointing at an out-of-tree `.ssh/id_rsa` is copied as a regular file
+containing the key. Three planted credentials arrived as `app/assets/logo.png`,
+`app/assets/theme.css` and `app/README.md`.
+
+`INV-PAYLOAD-01` is satisfied throughout — no file *matching a credential pattern* was
+copied — and defeated in substance. That is what a narrow invariant looks like from the
+outside, and why `INV-TRUST-06` is a new entry beside it rather than an amendment to it.
+
+**Three tree shapes make the build unwind instead of refusing** — `CRASHED`. A dangling
+symlink, a symlink loop and a symlink to `/dev/zero` each produce a rich-rendered `shutil.py`
+traceback with absolute build-host paths. The device-node case reads `/dev/zero` into the
+payload until a resource limit stops it — a limit **busybody** imposed, not haru-pack.
+`INV-TRUST-07`.
+
+**A filename escapes on the target, not here** — `SMUGGLED`. `..\..\..\Startup\evil.bat`
+is one legal POSIX filename and three levels of escape on Windows, and
+`build_payload_zip` stores names with `as_posix()`. Two such members went into the payload.
+`THREAT_MODEL` B7 records target-side extraction as `[R]`, relayed and unverified; this is
+the half of B7 that can be checked on this machine, because a payload can be read without
+being run.
+
+**The project supplies the payload's control files** — `SMUGGLED`. `validate_manifest`
+rejects an `app_subdir` containing `..`, an absolute path or a drive letter — the `wedge`
+persona's first finding — and `.` is none of those. It resolves the application tree onto
+the payload root, and the project's own `vendor/uv` was the one in the payload.
+
+The pattern there is worth naming: the validator was written against **the string `..`**
+rather than against the property *stays strictly below the payload root*, so the next
+spelling walked through it. `INV-TRUST-04`.
+
+**The packed project executes code on the build host, twice over** — `ESCAPED`, and the two
+that matter most.
+
+A `[[bundle]]` step's argv comes from a `haru_pack.toml` inside the packed tree and runs at
+build time with the operator's environment. `build.py` runs the steps in a bare
+`for step in steps: run_bundle_step(...)` with nothing printed first, so cloning a repository
+and running `haru-pack build .` is code execution by that repository's author, silently.
+`INV-TRUST-01`. The fix asked for is **visibility, not refusal**: bundle steps are a feature
+and the operator's own project needs them. What is missing is the line that lets an operator
+tell their step from someone else's.
+
+The second has **no `haru_pack.toml` in it at all**. A `pyproject.toml` whose `[build-system]`
+names an in-tree backend via `backend-path` is enough: at `--thick`,
+`bundle.warm_cache_and_lock` runs `uv sync --project`, which installs the project, which
+imports and calls that backend. Auditing haru-pack's own config format would never have seen
+it. `INV-TRUST-02`.
+
+**And one case could not finish its sentence.** `the_project_chooses_where_its_dependencies_
+come_from` plants `[tool.uv] index-url` pointing at the discard port. `uv sync` exits 2 — but
+haru-pack raises `CalledProcessError` with uv's stderr captured and thrown away, so the log
+cannot say *whether uv honoured the project's index or failed for some other reason*. The
+case reports what it can prove: the build unwound with a traceback and no diagnostic. The
+redirect itself stays unconfirmed until uv's output is surfaced, and that is recorded in
+`INV-TRUST-05` rather than guessed at.
+
+### Two bugs in busybody, found the same way as always
+
+Both were caught by the results looking too clean, which is the only reliable tell.
+
+**A single-script project never reaches `copytree`.** `discover()` returns
+`source=<the .py file>` for a directory holding one script, and `build.py` then takes the
+`source.is_file()` branch — a `copy2` of that one file. The rest of the tree is never
+copied, so a symlink, a device node and a backslash filename are all invisible. Six cases
+reported `CONTAINED` for attacks that had not been attempted. Every plant is a project now,
+with a `pyproject.toml` and an executable package, because that is what puts the payload
+copy on the path at all.
+
+**Grepping the finished binary does not see the payload.** Payload members are DEFLATE'd, so
+a secret inside a packed file is simply not present in the exe's bytes. The symlink case
+reported `CONTAINED` for a key a hand test had already proved was in the payload.
+
+That one is not only this persona's problem: `auditor`'s
+`no_planted_secret_survives_into_the_binary` had the same blind spot, and this doc claimed
+the raw-bytes grep was "stronger than scanning zip members". It is stronger for a leak via
+the manifest, a Nim literal or a warmed uv cache, and blind to a leak through a packed file
+— which is the most likely one. Both cases now use one scanner that does both surfaces and
+says which one each hit came from.
+
+**And a refusal that unwinds is not a refusal.** `classify()` matches its traceback markers
+against raw text, which is right for a packed binary and wrong for `haru-pack build`: the
+CLI renders exceptions through rich, which writes the header as bold even under `NO_COLOR`,
+so `Traceback (most recent call last)` is never contiguous. Three cases were scored
+`REFUSED` while printing forty lines of stdlib frames at the operator. The strip is local to
+`trojan` on purpose — changing the shared classifier would silently re-score every other
+persona's history, and that is a decision with a before-and-after to measure, not a
+drive-by.
+
+### `names`, borrowed whole from `wedge`
+
+Each attack declares substrings a refusal must mention for the case to have reached what it
+meant to test. A build that refuses without naming any of them is `REFUSED-UNRELATED` — a
+note against busybody, never a pass for haru-pack. The first shakedown produced four, all
+choosenim, and without the check they would have read as four clean passes.
+
+**A case must isolate its attack, or it measures whichever guard happens to fire first.**
+That sentence has now been paid for twice.
+
+### What to fix first
+
+Ranked by what an operator loses, not by effort:
+
+1. **`INV-TRUST-02`** — a packed project's build backend runs on the build host. Everything
+   built on that host afterwards is suspect, including signed artifacts. Either resolve
+   wheel-only, sandbox the install, or say plainly in the docs that packing a tree is
+   running it.
+2. **`INV-TRUST-06`** — a symlink walks credentials out of the operator's machine and into a
+   binary they are about to distribute and sign. One decision: refuse, skip, or store as a
+   link.
+3. **`INV-TRUST-01`** — print every project-supplied argv before executing it. Cheap, and it
+   converts a silent capability into a consensual one.
+4. **`INV-TRUST-07`** — wrap the payload copy so a hostile tree shape produces a diagnostic
+   rather than forty lines of `shutil.py`. Also the fix for the ordinary case: a repository
+   with a broken symlink in it.
+5. **`INV-TRUST-04`** — validate `app_subdir` against the property, not the spelling.
+6. **`INV-TRUST-05`** — surface uv's stderr, then re-run the case that could not finish its
+   sentence, and pass the operator's index configuration explicitly.
+
+Nothing above is implemented. The entries are `proposed` because that is what `proposed`
+means here.
+
+### What it does not prove
+
+Ten cases are ten ideas someone had on one afternoon. The persona says nothing about the
+attacks nobody thought of, and `CONTAINED` means *this attack did not land*, not *the tree
+is trusted*. The honest summary of the current state is the one in `THREAT_MODEL.md`: there
+is no boundary between the packed project and the build host, and `INV-TRUST-01` through
+`-07` are all `proposed` because nothing defends them yet.
+
 ## Composition — why the personas stack
 
 A persona that runs alone asks a closed question. *Does staging cope with umask 077?* has the
