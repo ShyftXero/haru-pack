@@ -1,5 +1,7 @@
 from __future__ import annotations
-import shutil, subprocess, tempfile
+import datetime as _dt
+import re as _re
+import os, secrets, shutil, string, subprocess, tempfile
 from pathlib import Path
 from . import tomlio, discovery, crypto
 from .paths import launcher_src_dir
@@ -11,6 +13,7 @@ from .sources import Sources
 from .targets import Target
 from .entrypoints import (resolve_entrypoint, verify_object_ref, verify_script_file,
                           verify_console_script, is_object_ref, EntryPointError)
+from .obfuscate import ObfuscationError, get_engine
 from .bundle import (bundle_uv, bundle_python, warm_cache_and_lock,
                      warm_cache_windows, run_bundle_step, run_bundle_steps_wine,
                      warm_cache_for_script, install_dev_tools, compress_uv)
@@ -32,6 +35,261 @@ _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv", "*.egg
                                  "dist", "build", ".git", "haru_pack.toml", ".mypy_cache",
                                  ".pytest_cache", ".ruff_cache", "*.exe",
                                  *_SECRET_PATTERNS)
+
+# The values `main.nim` actually implements. It reads the policy with a string default and
+# compares it to "exe", so anything else silently means "launch" — a typo and a deliberate
+# choice produce identical binaries, and the one place the difference shows up is a customer
+# resolving a relative path from the wrong directory.
+CWD_POLICIES = ("launch", "exe")
+
+# ── Stub-config + per-knob canary (docs/adr/0003-stub-config-and-canary.md §2/§3/§5) ──
+# The closed knob catalogue, in the fixed order the cleartext stub-config section writes them.
+# Matches launcher/stubconfig.nim `Knob{kSecret,kUvVer,kSourceUrl,kBasePath}` and its lowercase
+# `[canary]` keys — adding a knob is a format change on BOTH halves, on purpose (INV-CANARY-02).
+CANARY_KNOBS = ("secret", "uv_ver", "source_url", "base_path")
+DEFAULT_CANARY = "HARU"
+# ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced here at build time,
+# re-validated by the launcher's parseStubConfig, so neither half trusts the other blindly.
+_CANARY_RE = _re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# inject (env-append) reserved keys (docs/adr/0003 §4.3). The launcher sets its own reserved
+# vars AFTER the inject loop and so WINS on a collision (INV-LAUNCH-09); an inject that lands on
+# one of these would be silently dropped. A silently-ineffective inject is exactly the class
+# INV-BUILD-01/02 exist to forbid, so the build refuses it outright rather than shipping a lie.
+_RESERVED_INJECT_KEYS = frozenset({
+    "UV_CACHE_DIR", "UV_PYTHON", "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_DOWNLOADS",
+    "UV_OFFLINE", "UV_PROJECT_ENVIRONMENT", "PYTHONPYCACHEPREFIX", "PYTHONPATH",
+})
+# Secret-shaped inject detection (docs/adr/0003 §4.3) — deterministic, so the warning is
+# reproducible. Same honesty as --embed-secret (INV-SECRET-02): an unencrypted payload ships the
+# value recoverable in plaintext, and haru-pack says so rather than letting the operator assume.
+_SECRET_KEY_MARKERS = ("SECRET", "TOKEN", "PASSWORD", "PASSWD", "APIKEY", "API_KEY",
+                       "PRIVATE_KEY", "ACCESS_KEY")
+_SECRET_VALUE_RE = _re.compile(r"[A-Za-z0-9+/=_-]{20,}\Z")
+
+
+def _random_canary() -> str:
+    """One random `[A-Z][A-Z0-9]{7}` token (8 chars) for --env-canary-random."""
+    return (secrets.choice(string.ascii_uppercase)
+            + "".join(secrets.choice(string.ascii_uppercase + string.digits)
+                      for _ in range(7)))
+
+
+def resolve_canary(env_canary: str = "", env_canary_random: bool = False,
+                   per_knob: dict | None = None, log=None) -> dict:
+    """Resolve the per-knob canary map (docs/adr/0003 §5). Precedence, per knob independently:
+
+        --stub-env-<knob>-canary  >  --env-canary / --env-canary-random  >  built-in "HARU"
+
+    Refuses two conflicting all-knobs defaults, and any resolved token (default or per-knob)
+    that is not a valid env-name prefix (§5.2). On --env-canary-random, logs each knob's final
+    token so the packager can record what to set at runtime (§5.3). The map is NOT secret
+    (INV-SECRET-02 covers the secret VALUE only)."""
+    per_knob = per_knob or {}
+    if env_canary and env_canary_random:
+        raise BuildError(
+            "--env-canary and --env-canary-random set two conflicting all-knobs canary "
+            "defaults. Pass one or the other.")
+    default = _random_canary() if env_canary_random else (env_canary or DEFAULT_CANARY)
+    canary: dict = {}
+    for knob in CANARY_KNOBS:
+        tok = per_knob.get(knob) or default
+        if not _CANARY_RE.fullmatch(tok):
+            src = (f"--stub-env-{knob.replace('_', '-')}-canary" if per_knob.get(knob)
+                   else ("--env-canary-random" if env_canary_random else "--env-canary"))
+            raise BuildError(
+                f"canary token {tok!r} (from {src}) is not a valid env-name prefix.\n"
+                f"The launcher reads knob {knob.upper()} from <canary>_{knob.upper()} at "
+                f"runtime, so the canary must match ^[A-Za-z_][A-Za-z0-9_]*$.")
+        canary[knob] = tok
+    if env_canary_random:
+        say = log or (lambda _m: None)
+        say("--env-canary-random: record these — the launcher reads each knob at runtime "
+            "as <TOKEN>_<KNOB>:")
+        for knob in CANARY_KNOBS:
+            say(f"  {knob:10} -> {canary[knob]}_{knob.upper()}")
+    return canary
+
+
+def _toml_basic_str(s: str) -> str:
+    """Minimal TOML basic-string escape for a base_path (a path may carry `\\` on a Windows
+    target). Only backslash and double-quote need escaping for a single-line basic string."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# ── base_path safety (docs/adr/0004 §5, INV-BASE-01) ──────────────────────────────────────
+# A staging root that is a filesystem/drive/UNC root or a home-directory root is refused. The
+# launcher creates AND (with --reap) deletes a create-and-delete-own subtree beneath this
+# root, so the root must never be a place whose pollution or deletion would be catastrophic.
+# The build refuses the obvious shapes here (fail fast, cross-OS aware — a --target windows
+# build on Linux must still reject `C:\`); the launcher re-refuses defensively at runtime,
+# where the target's real "/" and $HOME are knowable (refuseUnsafeRoot in stage.nim).
+_DRIVE_ROOT_RE = _re.compile(r"[A-Za-z]:[\\/]?\Z")     # C:  C:\  C:/
+_FS_ROOT_RE = _re.compile(r"[\\/]+\Z")                 # /  \  //  \\  (posix root / UNC-ish)
+
+
+def _is_root_like(path: str) -> bool:
+    p = path.rstrip("/\\") or path            # keep a lone "/" as "/"
+    if p in ("/", "\\"):
+        return True
+    if _FS_ROOT_RE.fullmatch(path):           # bare separators only -> a root
+        return True
+    if _DRIVE_ROOT_RE.fullmatch(path):        # Windows drive root, any build OS
+        return True
+    home = os.path.expanduser("~")
+    return bool(home and home != "~" and os.path.normpath(p) == os.path.normpath(home))
+
+
+def resolve_base_path(base_path: str) -> str:
+    """Validate the --base-path staging root (docs/adr/0004 §3/§5). '' means 'normal cache'
+    (the default, no refusal). A non-empty value that is empty-after-strip, a filesystem/drive/
+    UNC root, or the build host's home root is REFUSED at build time (INV-BASE-01). The value
+    is stored verbatim in the cleartext stub-config; the launcher applies the same refusal
+    against the TARGET's real roots at runtime."""
+    if not base_path:
+        return ""
+    if not base_path.strip():
+        raise BuildError("--base-path is blank. Omit it for the normal per-user cache, or "
+                         "give a real staging directory.")
+    if _is_root_like(base_path):
+        raise BuildError(
+            f"--base-path {base_path!r} resolves to a filesystem, drive, or home-directory "
+            f"root. The launcher stages AND (with --reap) deletes a subtree under this path, "
+            f"so it must be a dedicated directory, never a root (docs/adr/0004 §5).")
+    return base_path
+
+
+def stub_config_bytes(canary: dict, *, reap: bool = False, ram_only: bool = False,
+                      base_path: str = "") -> bytes:
+    """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2), UTF-8,
+    in fixed order. Canary tokens are validated env-name prefixes, so no escaping is needed.
+
+    The Phase-2 keys `reap`/`ram_only`/`base_path` are emitted ONLY when non-default, so a
+    build that uses none of them is byte-identical to the Phase-1 stub-config (the v1 corpus
+    and its exact-bytes test are unchanged). Their absence is today's behaviour, so no
+    stub_config_version bump is needed (docs/adr/0004 §2). Read before decryption by
+    launcher/stubconfig.parseStubConfig; sha-checked first (INV-STUB-01)."""
+    lines = ["stub_config_version = 1"]
+    # Top-level keys must precede the [canary] table (TOML). Emit only when non-default.
+    if reap:
+        lines.append("reap = true")
+    if ram_only:
+        lines.append("ram_only = true")
+    if base_path:
+        lines.append(f"base_path = {_toml_basic_str(base_path)}")
+    lines += ["", "[canary]"]
+    lines += [f'{knob} = "{canary[knob]}"' for knob in CANARY_KNOBS]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _looks_secret_shaped(key: str, value: str) -> bool:
+    """Deterministic 'this inject looks like a credential' test (docs/adr/0003 §4.3)."""
+    ku = key.upper()
+    if ku.endswith("_KEY") or any(m in ku for m in _SECRET_KEY_MARKERS):
+        return True
+    return bool(_SECRET_VALUE_RE.fullmatch(value))
+
+
+def resolve_injects(env_append, encrypted: bool, log=None) -> list:
+    """Validate --env-append into the manifest `inject` list (docs/adr/0003 §4.3).
+
+    Refuses a malformed (`no '='`, empty KEY) or reserved-KEY inject — an inject the launcher
+    would silently drop is the class INV-BUILD-01/02 forbid. On an UNENCRYPTED build, warns
+    loudly for a secret-shaped inject, the same honesty as --embed-secret (INV-SECRET-02): the
+    value ships recoverable in plaintext. An ENCRYPTED build hides the payload, so no warning.
+    Called 'inject', never 'project'. Each entry is stored verbatim; the launcher splits on the
+    FIRST '=' (INV-LAUNCH-09), so an odd VALUE containing '=' round-trips faithfully."""
+    injects: list = []
+    for raw in (env_append or []):
+        if "=" not in raw:
+            raise BuildError(f"--env-append must be KEY=VALUE; got {raw!r} with no '='.")
+        key, value = raw.split("=", 1)
+        if not key:
+            raise BuildError(f"--env-append has an empty KEY: {raw!r}.")
+        if key.startswith("HARUPACK_") or key in _RESERVED_INJECT_KEYS:
+            raise BuildError(
+                f"--env-append {key}=… uses a reserved key. The launcher sets its own "
+                f"HARUPACK_*, the managed UV_*, PYTHONPYCACHEPREFIX and PYTHONPATH AFTER the "
+                f"injects and wins on a collision (INV-LAUNCH-09), so this inject would be "
+                f"silently dropped. Rename it, or configure the launcher's behaviour directly.")
+        if not encrypted and _looks_secret_shaped(key, value):
+            say = log or (lambda _m: None)
+            say(f"WARNING: --env-append {key}=… looks secret-shaped and this build is NOT "
+                f"encrypted, so the value ships recoverable in plaintext in the binary. Add "
+                f"--encrypt to hide it inside the payload, or confirm it is not a secret "
+                f"(INV-SECRET-02).")
+        injects.append(raw)
+    return injects
+
+
+def validate_encryption(enc: dict) -> None:
+    """Refuse a licence policy that cannot ever be satisfied.
+
+    Found by busybody's `wedge` persona (INV-CHAOS-07). An expiry in the past built cleanly
+    and produced a binary that refuses every run, forever — `cryptbox.nim` compares the
+    policy date against now and quits with "license expired". The person who can fix a
+    typo'd year is the person running the build, and they are not watching by the time the
+    artifact reaches a customer.
+    """
+    exp = str(enc.get("expires") or "")
+    if not exp:
+        return
+    # The launcher parses exactly `yyyy-MM-dd` (cryptbox.nim), so anything else is a policy
+    # the artifact will fail to interpret at all. The shape is checked before strptime
+    # because strptime is LENIENT about zero-padding — it accepts "2030-1-1", which Nim's
+    # `parse` with a "yyyy-MM-dd" pattern does not. Accepting a date here that the launcher
+    # cannot read would move the failure to the target, which is the whole thing this
+    # function exists to prevent.
+    try:
+        if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", exp):
+            raise ValueError(exp)
+        when = _dt.datetime.strptime(exp, "%Y-%m-%d").replace(tzinfo=_dt.timezone.utc)
+    except ValueError:
+        raise BuildError(
+            f"expires must be YYYY-MM-DD; got {exp!r}.\n"
+            f"The launcher parses this date with that exact format and cannot interpret "
+            f"anything else.") from None
+    now = _dt.datetime.now(_dt.timezone.utc)
+    if when < now:
+        raise BuildError(
+            f"expires is in the past: {exp} (today is {now:%Y-%m-%d}).\n"
+            f"This would build a binary that refuses every run from the moment it is "
+            f"created, and the\nrefusal reads as a licensing problem to whoever receives "
+            f"it. If that is genuinely intended,\nsay so with a date that has not passed "
+            f"yet and let it lapse.")
+
+
+def validate_manifest(manifest: dict) -> None:
+    """Refuse a declaration that cannot be honoured as written.
+
+    Both checks here were found by busybody's `wedge` persona (INV-CHAOS-07), which feeds
+    haru-pack contradictory config and reports anything that builds cleanly anyway. Both
+    built cleanly, and one of them produced a binary that could not find its own entrypoint.
+    """
+    sub = str(manifest.get("app_subdir", "app"))
+    bad = (Path(sub).is_absolute() or ".." in Path(sub).parts
+           or sub.startswith(("/", "\\")) or ":" in sub)
+    if bad:
+        # Same class as a zip-slip: a path from config that escapes the root it is
+        # resolved against. The payload builder copies the project to payload/<app_subdir>,
+        # so `..` writes the application OUTSIDE the payload — the zip is assembled from
+        # the payload root, the app is not under it, and the launcher stages a binary whose
+        # entrypoint is simply absent. Measured: `can't open file '.../escaped/app.py'`.
+        raise BuildError(
+            f"app_subdir must be a relative path inside the payload; got {sub!r}.\n"
+            f"An app_subdir containing '..' or an absolute path writes the application "
+            f"outside the\npayload, so the launcher stages a binary whose entrypoint is "
+            f"missing. The build would\nsucceed and the artifact would fail on the target.")
+
+    policy = str(manifest.get("cwd_policy", "launch"))
+    if policy not in CWD_POLICIES:
+        raise BuildError(
+            f"cwd_policy must be one of {', '.join(CWD_POLICIES)}; got {policy!r}.\n"
+            f"The launcher compares this against 'exe' and treats everything else as "
+            f"'launch', so an\nunrecognised value is indistinguishable from a chosen one — "
+            f"and the difference only\nshows up as a relative path resolving from the wrong "
+            f"directory on someone else's machine.")
+
 
 def compile_launcher(nim: str, target, workdir: Path) -> Path:
     tgt = target if isinstance(target, Target) else Target.parse(target)
@@ -147,7 +405,7 @@ def _resolve(project: Path, tier: str, python_cli: str,
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:
             manifest[k] = decl[k]
-    pyver = python_cli or decl.get("python", "") or disc.get("python", "") or "3.12"
+    pyver = python_cli or decl.get("python", "") or disc.get("python", "") or "3.13"
     e = decl.get("encryption", {})
     enc = {
         # INV-BUILD-02: an explicit --encrypt must enable encryption on its own. It was
@@ -161,7 +419,25 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "user": user or e.get("user", ""),
         "embed_secret": embed_secret or bool(e.get("embed_secret")),
     }
+    validate_manifest(manifest)
+    if enc["enabled"]:
+        validate_encryption(enc)
     return manifest, enc, pyver, disc["source"], Sources.resolve(decl)
+
+def _entry_relpath(manifest: dict) -> str:
+    """The .py file the obfuscator should treat as the entry, relative to the app dir.
+
+    entrypoint is argv resolved for the launcher; for obfuscation we only need a real .py
+    to hand pyarmor. A module:callable or console-script entry has no single file, so fall
+    back to the app package's __init__ or the first .py — pyarmor obfuscates the whole tree
+    regardless, and this only decides which file the "did the entry survive" check watches.
+    """
+    ep = manifest.get("entrypoint") or []
+    for tok in ep:
+        if isinstance(tok, str) and tok.endswith(".py"):
+            return tok
+    return "app.py"
+
 
 def assemble_payload(source: Path, manifest: dict, tier: str, target,
                      python: str, workdir: Path, wine: bool = False,
@@ -198,6 +474,32 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
         shutil.copy2(source, app / source.name)
     else:
         shutil.copytree(source, app, ignore=_IGNORE)
+
+    # Obfuscation is a source transform, applied to the copied app before anything else reads
+    # it — cache warming, dependency staging and the zip all see the obfuscated tree. It is
+    # INDEPENDENT of encryption: you can obfuscate a plaintext-payload binary, encrypt an
+    # unobfuscated one, do both, or neither. They protect different things (see
+    # INV-SECRET-02) and are wired on separate axes so neither implies the other.
+    obf = manifest.get("_obfuscation")
+    if obf and obf.get("engine", "none") != "none":
+        engine = get_engine(obf["engine"], obf.get("args") or ())
+        entry_rel = _entry_relpath(manifest)
+        try:
+            res = engine.obfuscate(app, entry_rel, python=python, log=log)
+        except ObfuscationError as e:
+            # A failed obfuscation must fail the build. Shipping the plaintext the user asked
+            # to hide, silently, is the exact anti-pattern INV-SECRET-02 and INV-DOC-02 guard.
+            raise BuildError(f"obfuscation failed: {e}") from e
+        manifest["obfuscation"] = {"engine": res.engine, "applied": res.applied,
+                                   "files": res.files}
+        say = log or (lambda _m: None)
+        say(f"obfuscation: {res.note}")
+        say("obfuscation raises the cost of reading the staged source; it is NOT a "
+            "confidentiality boundary. A secret that must never be recovered must never be "
+            "shipped (INV-SECRET-02).")
+    else:
+        manifest.setdefault("obfuscation", {"engine": "none", "applied": False})
+
     manifest = apply_tier(dict(manifest), tier)
     vendor = payload / "vendor"
     # tiers.bundles_uv is the single statement of which tiers ship a uv (main's
@@ -318,9 +620,14 @@ def target_is_host(tgt) -> bool:
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           machine: str = "", user: str = "", embed_secret: bool = False,
+          obfuscate: str = "none", obfuscate_args=(),
           python: str = "", wine: bool = False, encrypt: bool = False,
           entry_point: str = "", shake: bool = False, shake_keep=(),
-          log=None) -> dict:
+          env_canary: str = "", env_canary_random: bool = False,
+          stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
+          stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
+          reap: bool = False, ram_only: bool = False, base_path: str = "",
+          env_append=None, log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -332,9 +639,68 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
                                                      machine, user, embed_secret, encrypt,
                                                      entry_point, log=log)
+    # Record the requested engine on the manifest so assemble_payload can apply it. Validated
+    # here, at the front of the build, so an unknown engine or a missing pyarmor fails before
+    # any work — never after producing a binary the user believes is obfuscated.
+    if obfuscate and obfuscate != "none":
+        eng = get_engine(obfuscate)          # raises ObfuscationError on an unknown name
+        if reason := eng.available():
+            raise BuildError(reason)
+    manifest["_obfuscation"] = {"engine": obfuscate or "none",
+                                "args": list(obfuscate_args)}
+    if obfuscate_args and obfuscate in (None, "", "none"):
+        raise BuildError("obfuscation arguments were given but no engine was selected; "
+                         "pass --obfuscate <engine>")
+    # Obfuscation binds the payload to an EXACT Python minor version: pyarmor's runtime .so
+    # references version-private symbols, so a payload obfuscated for 3.12 fails to import
+    # under 3.11 or 3.13 (measured 2026-09-10). Only the thick tier guarantees the staged
+    # interpreter is the one obfuscation targeted; thin/default resolve a Python on the
+    # target and may not land on the same minor. haru-pack CAN see this, so it says so
+    # (INV-OBF-01).
+    if obfuscate and obfuscate != "none" and tier != "thick":
+        say = log or (lambda _m: None)
+        say(f"WARNING: --obfuscate with tier={tier}. Obfuscation is bound to Python "
+            f"{python or '3.13'} EXACTLY, and only --thick bundles that interpreter. On "
+            f"thin/default the target may resolve a different Python minor and the binary "
+            f"will fail to start with an 'undefined symbol' import error. Use --thick, or "
+            f"ensure the target has exactly Python {python or '3.13'}.")
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
+    # Canary map + injects are resolved BEFORE any compilation, so a bad token or a reserved
+    # inject fails fast (like --shake's preconditions) rather than after producing a payload.
+    # The secret-shaped inject WARNING depends on whether the payload will be encrypted, which
+    # is known here (INV-INJECT-01). One resolution rule for all four knobs (INV-CANARY-02).
+    canary = resolve_canary(env_canary, env_canary_random,
+                            per_knob={"secret": stub_env_secret_canary,
+                                      "uv_ver": stub_env_uv_ver_canary,
+                                      "source_url": stub_env_source_url_canary,
+                                      "base_path": stub_env_base_path_canary}, log=log)
+    injects = resolve_injects(env_append, encrypted=enc["enabled"], log=log)
+    # Phase-2 staging knobs (docs/adr/0004). base_path is refused at build time if it is a
+    # root; reap/ram-only are baked into the cleartext stub-config below (INV-BASE-01 /
+    # INV-RAM-01 / INV-REAP-01). HONEST DISCLAIMER, said out loud at build: --ram-only governs
+    # only where the STUB stages the payload tree — haru cannot control the packed app's OWN
+    # disk writes, and on Windows/macOS there is no guaranteed RAM filesystem.
+    base_path = resolve_base_path(base_path)
+    say = log or (lambda _m: None)
+    if ram_only:
+        say("--ram-only: best-effort RAM-backed staging. Linux stages under /dev/shm (tmpfs) "
+            "when available, else falls back to the persistent cache with a note. Windows/macOS "
+            "have no guaranteed RAM filesystem, so this is not guaranteed there. It governs only "
+            "where the STUB stages the payload tree — not the packed app's own disk writes.")
+    if reap:
+        say("--reap: after the app exits the stub spawns a detached, fire-and-forget deletion "
+            "of the staged subtree it created this run, then exits without waiting. Only that "
+            "subtree is removed — never the base path itself.")
+    if base_path:
+        say(f"--base-path: staging root default baked into the stub-config as {base_path!r}. "
+            "A canary-named BASE_PATH env var overrides it at runtime; the launcher refuses a "
+            "root/drive/home path defensively.")
+    if injects:
+        # Lives in the PAYLOAD manifest (post-decrypt), so --encrypt hides it (docs/adr/0003
+        # §4). Carried through assemble_payload's manifest dump; the launcher reads `inject`.
+        manifest["inject"] = injects
     shake_report: dict = {}
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -364,7 +730,11 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
                 "Refusing to emit a binary whose build receipt would be wrong.")
         launcher = compile_launcher(nim, tgt, tdp)
-        info = attach(launcher, payload, out, flags=flags)
+        # Every NEW binary is v2: it always carries the cleartext, signature-covered
+        # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
+        info = attach(launcher, payload, out, flags=flags,
+                      stub_config=stub_config_bytes(canary, reap=reap, ram_only=ram_only,
+                                                    base_path=base_path))
     try:
         out.chmod(0o755)
     except Exception:
@@ -373,7 +743,17 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # auditing a signed artifact should not have to guess whether a mirror was in play.
     info.update(sources=sources.describe(),
                 tier=tier, target=str(tgt), nim=nim, compiler=tc["compiler"], out=str(out),
-                encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver)
+                encrypted=bool(enc["enabled"]), kind=manifest["kind"], python=pyver,
+                # The resolved canary map (env-name prefixes) is not secret — recording it aids
+                # auditing (INV-CANARY-02). The secret VALUE still lands in no artifact
+                # (INV-SECRET-02).
+                canary=canary,
+                # Phase-2 staging knobs (docs/adr/0004): not secret, and recording them lets an
+                # auditor see whether a binary reaps / stages to RAM / relocates its cache.
+                staging={"reap": bool(reap), "ram_only": bool(ram_only),
+                         "base_path": base_path},
+                obfuscation=manifest.get("obfuscation", {"engine": "none",
+                                                         "applied": False}))
     if shake_report:
         info["shake"] = {k: shake_report[k] for k in
                          ("tracer", "dropped_files", "freed_bytes",

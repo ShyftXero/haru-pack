@@ -510,3 +510,55 @@ def test_a_malformed_pins_file_is_fatal_not_a_fallback(tmp_path):
     with pytest.raises(PinsError):
         load(str(bad))
     load.cache_clear()
+
+
+# ---------------------------------------------------------------- INV-SUPPLY-11: pins vs uv mirror
+
+@pytest.mark.invariant("INV-SUPPLY-11")
+def test_pbs_url_is_canonicalised_to_github_regardless_of_uv_mirror():
+    """uv 0.12 reports releases.astral.sh; uv 0.10 reported github.com. Both name the same
+    GitHub release asset, and the pin is keyed by the canonical GitHub URL so a uv upgrade
+    that moves the host never invalidates a pin.
+
+    Red-path: drop _canonical_pbs_url and the two hosts key to different pins.
+    """
+    from haru_pack import bundle
+    astral = ("https://releases.astral.sh/github/python-build-standalone/releases/download/"
+              "20251120/cpython-3.13.9%2B20251120-x86_64-unknown-linux-gnu-"
+              "install_only_stripped.tar.gz")
+    github = ("https://github.com/astral-sh/python-build-standalone/releases/download/"
+              "20251120/cpython-3.13.9%2B20251120-x86_64-unknown-linux-gnu-"
+              "install_only_stripped.tar.gz")
+    assert bundle._canonical_pbs_url(astral) == github
+    assert bundle._canonical_pbs_url(github) == github, "already-canonical URL is unchanged"
+    other = "https://example.com/whatever.tar.gz"
+    assert bundle._canonical_pbs_url(other) == other
+
+
+@pytest.mark.invariant("INV-SUPPLY-11")
+def test_version_selection_is_numeric_not_lexical():
+    """'3.13.9' > '3.13.14' as strings would pick an older patch as newest. The tuple compare
+    is what makes prefer-pinned and newest-fallback correct."""
+    from haru_pack import bundle
+    assert bundle._vt("3.13.9") < bundle._vt("3.13.14")
+    assert bundle._vt("3.13.12+20260325") < bundle._vt("3.13.15+20260901")
+    assert bundle._vt("3.9.19") < bundle._vt("3.13.1")
+
+
+def _os_token(os_: str) -> str:
+    return {"linux": "unknown-linux-gnu", "windows": "pc-windows-msvc",
+            "macos": "apple-darwin"}[os_]
+
+
+@pytest.mark.invariant("INV-SUPPLY-11")
+def test_the_default_python_is_pinned_for_every_supported_target():
+    """The whole point of the re-pin: a default (3.13) thick build must resolve to a PINNED,
+    verified interpreter on every target haru-pack claims to support — not chase uv's newest
+    unpinned patch. Reads pins.toml directly (no network)."""
+    from haru_pack import bundle
+    pinned = set(bundle.PBS_SHA256)
+    for os_, arch in [("linux", "x86_64"), ("linux", "aarch64"), ("windows", "x86_64"),
+                      ("windows", "aarch64"), ("macos", "aarch64")]:
+        hits = [u for u in pinned
+                if f"-{arch}-" in u and _os_token(os_) in u and "cpython-3.13" in u]
+        assert hits, f"no pinned 3.13 build for {os_}/{arch}"

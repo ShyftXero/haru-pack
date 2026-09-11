@@ -1,9 +1,44 @@
 # haru-pack
 
+haru-pack (하루팩)
+
+"Haru" (하루) means "day,"
+"Pack" (팩) means "pack."
+
+If you're shipping your code off on a little adventure you might send it with a ***day***...***pack***... get it?
+
+you can just call it `haru` for short.
+
 Pack a Python project — a **PEP 723 script** or a full **multi-folder project** (Flask,
 Playwright, …) — into a single, **signable native launcher** that stages `uv` + a
 standalone Python and runs it **as if it were a compiled binary in the folder it was
 launched from**. Windows-first, cross-compiled from Linux. Built on `uv`; launcher in Nim.
+
+## Why is this even here.
+
+I love python.
+
+I don't like most other programming languages... idk why, I'm lazy and stubborn.
+
+You might find yourself asking "how is this even a modern Python project if it's not written primarily in a language other than Python?!? Where's the Rust?" and that is a fair set of questions.
+
+idk if it is a modern Python project... there is no Rust at the top layer, anyway.
+
+I do know that the ergonomics and sharp corners of other projects left me always a bit disappointed. I love Nuitka. I really love uv. I like pyinstaller. I also like Nimlang even though it's not python. (something about it appeals to me. that'll matter in a bit)
+
+uv really changed how I approach python development. The way you use it made sense to me so there didn't feel like quite the cognitive barrier to get over. Just the simple venv helpers did a lot to help me maintain healthier projects. The fact that I could rapidly try new python versions without risking breaking something was awesome. I appreciated Anaconda for that but it was large and had this parallel ecosystem.
+
+I saw uv and saw what I thought could be the future of sharing my code with others. They had figure out the "getting python on the computer problem". To be fair, pyinstaller was doing this over a decade ago. Nuitka as well. but they always felt "less-than" somehow.
+
+I wanted a tool that could offer some degree of source protection and delivery while being "comfortable" for my smooth brain.
+
+This is my attempt at also feeling "less-than". Made possible by AI. Thanks, Claude!
+
+Now it's got far too many flags to remember but I don't need to remember them because my agent can just re-learn it for me anytime I need to know.
+
+## AI Disclaimer
+
+This project was engineered with AI but that doesn't necessarily mean it's slop. Care was taken to ensure that it's robust, built with consistent standards, and able to withstand some adversarial pressure. That being said, it might also be slop. Buyer beware. I believe we should be building tools that will outlast the AI bubble. Build the tools that will continue to work when we can no longer afford to throw tokens at the problem. I'm capitalizing on that now and building the tools using AI while I still have access to it. Come with me if you want to live.
 
 > Think PyInstaller's UX, but the interpreter + deps are delegated to `uv`, the launcher is
 > a thin signable native stub, and you choose how much is bundled vs fetched on the target.
@@ -11,8 +46,8 @@ launched from**. Windows-first, cross-compiled from Linux. Built on `uv`; launch
 ## TL;DR
 
 ```sh
-pip install haru-pack
-haru-pack bootstrap          # installs Nim via choosenim; at most one sudo prompt
+uv tool install haru-pack
+haru-pack bootstrap          # installs Nim via choosenim
 haru-pack yourscript.py      # -> ./yourscript, a single native binary
 ./yourscript
 ```
@@ -30,7 +65,7 @@ haru-pack ./myproject --target linux-aarch64       # Raspberry Pi
 ```
 
 If a project declares more than one console script, haru-pack stops and asks rather than
-guessing:
+guessing but you can also specify its entry-point:
 
 ```sh
 haru-pack ./lotek --out lotek --entry-point "app.cli:main"
@@ -77,6 +112,15 @@ compiles to C and does both. It is a ~500-line stub, not an application.
 fetches on first run. Default bundles `uv` and fetches Python + deps once. `--thick`
 bundles everything and touches no network at all. Pick by what your target is allowed to
 reach, not by what is smallest.
+
+**Encryption protects the binary at rest; it cannot protect a secret from someone who runs
+it.** The launcher stages the payload to disk in plaintext so the interpreter can run it, and
+any user who can run the binary can read that staged source from their own cache. `--obfuscate`
+(pyarmor by default, modular) raises the *cost* of reading it — it is not a confidentiality
+boundary. A secret that must never leak must never be shipped in an artifact the client holds;
+put it behind a server the client authenticates to. haru-pack states this plainly rather than
+implying that "encrypted binary" means the embedded key is safe. See INV-SECRET-02 / INV-OBF-01
+and the busybody `reverse_engineer` persona, which proves each edge rather than asserting it.
 
 **One code path, not two.** Host and cross builds download the same artifacts the same way.
 Where there used to be a fork — a "fast path" for the host — the fast path was the
@@ -157,6 +201,8 @@ in this repo that were never implemented.
 | `--secret-env VAR` | | read the secret from env var `VAR` at build |
 | `--secret-prompt` | | prompt for the secret at build |
 | `--embed-secret` | off | embed the secret in the exe (weakest; no runtime secret needed) |
+| `--obfuscate ENGINE` | `none` | obfuscate the source before packing: `none` \| `pyarmor`. Independent of `--encrypt`; wants `--thick` |
+| `--obfuscate-args "…"` | | extra args passed through to the obfuscation engine |
 | `--expires YYYY-MM-DD` | | license expiry |
 | `--machine ID` | | bind cryptographically to a machine id (`haru-pack machine-id`) |
 | `--user NAME` | | bind cryptographically to an OS username |
@@ -212,7 +258,7 @@ run = ["playwright", "install", "firefox"]
 |---|---|
 | `HARUPACK_EXE_DIR` | folder the shipped exe lives in (find config next to the exe) |
 | `HARUPACK_STAGE` | the extraction/stage dir (bundled resources) |
-| `HARUPACK_SECRET` | (you set) license secret for an `--encrypt` build |
+| `HARU_SECRET` | (you set) license secret for an `--encrypt` build — default SECRET-knob canary; `--env-canary` / `--stub-env-secret-canary` change the prefix (INV-CANARY-01) |
 | `HARUPACK_GEO` | (you set) current country code for the geo check |
 
 `open("file.txt")` follows the process cwd like a native binary; use `cwd_policy = "exe"`

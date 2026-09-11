@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, shutil, subprocess, sys, tempfile, zipfile
+import hashlib, json, os, re, shutil, subprocess, sys, tempfile, zipfile
 from pathlib import Path
 from .archives import safe_extract_tar, fetch_verified, UnpinnedArtifact
 from .sources import Sources
@@ -151,22 +151,56 @@ def compress_uv(uv_path: Path, version: str = UV_VERSION, preset: int = XZ_PRESE
     return len(raw), len(comp), digest
 
 
+# python-build-standalone is published on GitHub; uv reports whatever mirror it currently
+# prefers as the download URL. uv 0.12 moved that to releases.astral.sh; 0.10 used
+# github.com. If the pin key tracked uv's mirror choice, every uv upgrade would invalidate
+# every python pin. It does not: the pin key is canonicalised to the GitHub release URL — the
+# publisher's own, where the digest sidecar and release-API `digest` live — so a mirror is
+# just a download point that `Sources.python_url()` rewrites to afterwards (INV-SUPPLY-11).
+_PBS_CANON = "https://github.com/astral-sh/python-build-standalone/releases/download"
+_PBS_MIRROR_RE = re.compile(
+    r"https://[^/]+/(?:github/)?"
+    r"(?:astral-sh/)?python-build-standalone/releases/download")
+
+
+def _canonical_pbs_url(url: str) -> str:
+    """Rewrite any python-build-standalone mirror URL to its canonical GitHub form.
+
+    Both `releases.astral.sh/github/python-build-standalone/...` (uv 0.12) and
+    `github.com/astral-sh/python-build-standalone/...` (uv 0.10) map to the same GitHub
+    release asset, which is the one the publisher's digest describes.
+    """
+    return _PBS_MIRROR_RE.sub(_PBS_CANON, url, count=1)
+
+
+def _vt(v: str) -> tuple:
+    """(major, minor, patch) for numeric comparison. '3.13.9' < '3.13.14' — lexically it is
+    not, which is the bug this replaces."""
+    return tuple(int(x) for x in re.findall(r"\d+", v.split("+")[0])[:3])
+
+
 def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
-    """Find the UPSTREAM python-build-standalone URL for an (os, arch, version).
+    """Find the canonical UPSTREAM python-build-standalone URL for an (os, arch, version).
 
-    Returns the upstream URL even when a mirror is configured: it is the key the digest is
-    pinned under. `Sources.python_url()` rewrites it to the download point afterwards, so a
-    mirror can never dodge the pin (INV-SUPPLY-10).
+    Returns the GitHub release URL — the key the digest is pinned under — regardless of which
+    mirror uv reports. `Sources.python_url()` rewrites it to the actual download point
+    afterwards, so a mirror can never dodge the pin (INV-SUPPLY-10, INV-SUPPLY-11).
 
-    Note for whoever maintains this: uv's catalog carries no `sha256` field (checked against
-    uv 0.10.4), so digests come from the release, not from here.
+    Prefers a version that is ALREADY PINNED for this (os, arch): haru-pack should stage a
+    known, verified interpreter, not silently chase whatever patch uv's catalog advanced to
+    this week. Only when no pin exists for the requested minor does it fall back to uv's
+    newest — and then the pin check refuses it, loudly, which is the signal to run add-pin.
+
+    Note: uv's catalog carries no `sha256` field, so digests come from the release, not here.
     """
     # --all-arches is REQUIRED, not decorative: without it uv lists only x86_64 and armv7,
     # so every aarch64 lookup returns nothing and a Raspberry Pi target looks unsupported.
     out = subprocess.run(["uv", "python", "list", "--all-platforms", "--all-arches",
                           "--all-versions", "--output-format", "json"],
                          capture_output=True, text=True, check=True)
-    best = None
+    pinned_urls = set(PBS_SHA256)
+    best_pinned = None       # (version_tuple, canonical_url) that has a pin
+    best_any = None          # (version_tuple, canonical_url) newest overall, for add-pin
     for e in json.loads(out.stdout):
         if e.get("os") != target_os or e.get("arch") != arch: continue
         if e.get("implementation") != "cpython" or e.get("variant") != "default": continue
@@ -174,15 +208,20 @@ def _find_python_url(target_os: str, version: str, arch: str = "x86_64") -> str:
         if not e.get("version", "").startswith(version): continue
         url = e.get("url") or ""
         if "install_only" not in url: continue
-        if best is None or e["version"] > best[0]:
-            best = (e["version"], url)
-    if not best:
+        canon = _canonical_pbs_url(url)
+        vt = _vt(e["version"])
+        if best_any is None or vt > best_any[0]:
+            best_any = (vt, canon)
+        if canon in pinned_urls and (best_pinned is None or vt > best_pinned[0]):
+            best_pinned = (vt, canon)
+    chosen = best_pinned or best_any
+    if not chosen:
         raise RuntimeError(
             f"no python-build-standalone {version} for {target_os}/{arch} in uv's catalog. "
             f"`uv python list --all-platforms --all-versions` shows what is available.")
-    return best[1]
+    return chosen[1]
 
-def bundle_python(target: str, vendor_dir: Path, version: str = "3.12",
+def bundle_python(target: str, vendor_dir: Path, version: str = "3.13",
                   sources: Sources | None = None) -> Path:
     """Stage a standalone Python into vendor/python — ONE path for host and cross.
 

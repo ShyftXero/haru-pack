@@ -40,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -185,17 +186,55 @@ def scan_runs(out_dir: Path) -> list:
 # ---------------------------------------------------------------- cross-run ledger
 
 def ledger_path() -> Path:
-    """Outside the repository, and overridable.
+    """Beside the MAIN checkout, outside every worktree, and overridable.
 
     Inside a repo the file is caught by `git stash`, by worktree switches and by branch
     changes — losing history exactly when you are hopping branches to investigate. lotek
     puts its ledger beside the checkout for this reason; so do we.
+
+    "Beside the checkout" has to mean the main one. Resolving it relative to __file__ put
+    the ledger in `.claude/worktrees/<name>-busybody-findings.jsonl` when run from a
+    worktree — inside the very directory that gets deleted when the worktree is removed,
+    which defeats the entire reason for keeping it out of the repo. Findings accumulated
+    across a week of branches would vanish with the branch that happened to be last.
+
+    `git rev-parse --git-common-dir` is the authoritative answer: it reports the MAIN
+    repository's .git for a worktree and its own for a normal checkout, so one call covers
+    both. The path fallback exists only for a source tree that is not a git checkout at all.
     """
     env = os.environ.get("HARUPACK_BUSYBODY_LEDGER")
     if env:
         return Path(env).expanduser()
-    repo = Path(__file__).resolve().parent.parent
-    return repo.parent / f"{repo.name}-busybody-findings.jsonl"
+    root = main_checkout(Path(__file__).resolve().parent.parent)
+    return root.parent / f"{root.name}-busybody-findings.jsonl"
+
+
+def main_checkout(start: Path) -> Path:
+    """The main working tree for `start`, even when `start` is a linked worktree."""
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"], cwd=start,
+            capture_output=True, text=True, timeout=15)
+        if common.returncode == 0:
+            d = Path(common.stdout.strip())
+            if not d.is_absolute():
+                d = (start / d).resolve()
+            # <main>/.git -> <main>. A bare repo has no working tree to sit beside, so it
+            # falls through to the path rule below.
+            if d.name == ".git" and d.parent.is_dir():
+                return d.parent
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # No git, or a bare repo: worktrees created by this project live in
+    # <main>/.claude/worktrees/<name>, so the main checkout is the parent of `.claude`.
+    # Scanned from the RIGHT, and matching the two components as a PAIR: a checkout can
+    # itself live under some other `.claude` (a test tmpdir under ~/.claude, for one), and
+    # taking the first match there resolves to the wrong tree entirely.
+    parts = start.parts
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == ".claude" and parts[i + 1] == "worktrees":
+            return Path(*parts[:i])
+    return start
 
 
 def ledger_append(records: list, path: Path | None = None) -> Path:
@@ -263,14 +302,42 @@ def _tree_size(path: Path) -> int:
     return total
 
 
-class Reaper:
-    """Tracks every working directory a run creates, and removes them all at the end.
+def free_dir(path: Path) -> int:
+    """Remove one directory tree now and return the bytes it held. Never raises.
 
-    Reaping happens in a `finally`, unconditionally. The previous version removed a work
-    directory only on the success path, so a case that raised, or a Ctrl-C, leaked it — and
-    at the thick tier each one holds a staged interpreter, so the leak is tens of megabytes
-    per case. A chaos harness is exactly the program most likely to be interrupted, which
-    makes best-effort cleanup the wrong shape.
+    The single implementation of "this scratch is finished with". Two callers need it and
+    they cannot share a Reaper: the serial path has one, and a parallel worker runs in
+    another process. Two copies of this would drift, and the drift would be a leak that only
+    appears at one --jobs setting.
+    """
+    d = Path(path)
+    try:
+        if not d.exists():
+            return 0
+        size = _tree_size(d)
+        shutil.rmtree(d, ignore_errors=True)
+        return 0 if d.exists() else size
+    except OSError:
+        return 0
+
+
+class Reaper:
+    """Tracks every working directory a run creates and guarantees all of them are removed.
+
+    Two mechanisms, and both are needed:
+
+      * `release()` frees one directory the moment its case is done. This is what keeps a
+        long sweep's live footprint at one case's worth.
+      * `reap()` in a `finally` removes whatever is left, unconditionally. This is what
+        survives a raise or a Ctrl-C.
+
+    Having only the second is a leak with a delayed fuse, and it bit us. Each tracked
+    directory holds a staged interpreter at the thick tier — around 145 MB — and a
+    37-case x 25-fixture sweep tracks 925 of them. Holding them all until the end needs
+    roughly 100 GB. The 2026-09-10 sweep died at case 168 on a 24 GiB user quota, which is
+    168 x 145 MB almost exactly, and then reported the quota failure as 470 chaos findings.
+
+    Having only the first is the older bug: a case that raised leaked its directory.
 
     `hold()` marks a directory to survive: findings whose artifacts are being preserved, or
     everything when --keep is passed. Those are reported rather than silently retained, so
@@ -290,6 +357,22 @@ class Reaper:
 
     def hold(self, path: Path) -> None:
         self._held.add(str(Path(path)))
+
+    def release(self, path: Path) -> int:
+        """Free one directory now, and stop tracking it. Returns bytes freed.
+
+        Silent by design: a per-case line for 925 cases is noise, and the totals are
+        reported once by `reap()`. Held directories are left alone.
+        """
+        d = Path(path)
+        if str(d) in self._held:
+            return 0
+        size = free_dir(d)
+        if size:
+            self.reaped += 1
+            self.freed += size
+        self._dirs = [x for x in self._dirs if x != d]
+        return size
 
     def reap(self) -> tuple:
         """Remove every tracked directory that is not held. Never raises."""

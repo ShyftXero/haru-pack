@@ -42,3 +42,17 @@ def script_project(tmp_path):
     d.mkdir()
     (d / "hello.py").write_text("print('hi')\n")
     return d
+
+
+@pytest.fixture(scope="session")
+def nim_launcher(tmp_path_factory):
+    """The REAL launcher, compiled once per session and shared by the Phase-2 staging tests
+    (tests/test_reap.py, tests/test_ram_only.py). Skips the requesting test when nim is absent,
+    so a pure-Python build test in the same file still runs on a no-nim box."""
+    import shutil
+
+    if shutil.which("nim") is None:
+        pytest.skip("nim not installed; the launcher cannot be built")
+    from _stage_helpers import compile_launcher
+
+    return compile_launcher(tmp_path_factory.mktemp("nim-stub-p2") / "launcher")

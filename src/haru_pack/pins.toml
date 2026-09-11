@@ -211,3 +211,17 @@ url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim
 provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
 retrieved = "2026-09-09"
 
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "1bc9a94ab2425fb6ae58e45f69cab61647759b57895649701390822d976fa923"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-10"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "f4c22b31ddbf8d7824cbcba2d8707621c2c8fab1fb6d2c1810c2bb0304d8e9a8"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-10"
+

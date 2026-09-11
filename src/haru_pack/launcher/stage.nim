@@ -33,6 +33,7 @@ import zippy/ziparchives
 import nimcrypto/sha2
 import xzdec
 when defined(posix): import std/posix
+when defined(windows): import std/osproc
 
 type StageError* = object of CatchableError
 
@@ -51,6 +52,141 @@ proc baseDir*(): string =
   else:
     result = getEnv("XDG_CACHE_HOME", getHomeDir() / ".cache")
   result = result / "haru-pack"
+
+# ------------------------------------------------ staging root: RAM-backed + safety refusal
+#
+# Phase 2 (docs/adr/0004-reap-ram-staging.md). The launcher resolves ONE staging root before
+# it stages, then stages AND (if --reap) reaps a create-and-delete-own subtree beneath it.
+# These are the primitives; main.nim composes the precedence and passes the chosen root to
+# `stageZip`. Keeping the delete target = the subtree the launcher itself created this run is
+# the whole safety story (INV-BASE-01 / INV-REAP-01): a hostile BASE_PATH can relocate staging
+# but can never turn the reaper into an arbitrary-delete.
+
+proc stripTrailingSep(p: string): string =
+  ## Drop trailing '/' or '\' but never collapse a lone "/" to "".
+  result = p
+  while result.len > 1 and (result[^1] == '/' or result[^1] == '\\'):
+    result.setLen(result.len - 1)
+
+proc refuseUnsafeRoot*(root: string): string =
+  ## "" if `root` is an acceptable staging root; otherwise a one-line diagnostic. A staging
+  ## root that is empty, the filesystem root '/', a Windows drive/UNC root, or the user's home
+  ## directory root is REFUSED (INV-BASE-01). The launcher creates and later reaps a named
+  ## subtree under this root, so the root must never be a location whose pollution or deletion
+  ## would be catastrophic. This fires defensively at RUNTIME (the target's real '/' and $HOME
+  ## are only knowable here); the build refuses the obvious shapes too (docs/adr/0004 §5).
+  if root.len == 0: return "empty staging root"
+  let p = stripTrailingSep(root)
+  # Canonicalize `.`/`..` LEXICALLY (mirrors the build's os.path.normpath) before the root/home
+  # comparisons. Without this a runtime BASE_PATH that RESOLVES to a refused root — e.g.
+  # `$HOME/x/..` or `/tmp/..` — slips past the exact-string checks below and stages (and, with
+  # --reap, reaps) a subtree directly under $HOME or '/'. That is the very thing this guard
+  # exists to refuse; the string form alone made "can never name a bare root" untrue for the
+  # attacker-controlled env value (INV-BASE-01, adversarial-review finding 2026-09-10).
+  let pn = normalizedPath(p)
+  if p == "/" or pn == "/": return "staging root is the filesystem root '/'"
+  when defined(windows):
+    # "C:", "C:\", "C:/" (drive root) and "\\", "//" (UNC root) are volume roots.
+    if p.len >= 2 and p.len <= 3 and p[1] == ':':
+      return "staging root is a drive root: " & root
+    if p == "\\\\" or p == "//":
+      return "staging root is a UNC root: " & root
+    if pn.len >= 2 and pn.len <= 3 and pn[1] == ':':
+      return "staging root is a drive root: " & root
+  let home = stripTrailingSep(getHomeDir())
+  if p == home or pn == normalizedPath(home):
+    return "staging root is the home-directory root: " & root
+  return ""
+
+proc isDirWritable(dir: string): bool {.used.} =   # {.used.}: consumed only on the Linux path
+  ## Probe writability by creating and removing a private subdir — honest about whether we can
+  ## actually stage here, rather than trusting existence alone.
+  if not dirExists(dir): return false
+  let probe = dir / ("haru-wtest-" & $getCurrentProcessId())
+  try:
+    createDir(probe)
+    removeDir(probe)
+    result = true
+  except CatchableError:
+    result = false
+
+proc ramBackedRoot*(): string =
+  ## Best-effort RAM-backed staging root (docs/adr/0004 §3).
+  ##
+  ## LINUX: /dev/shm is a tmpfs with REAL PATHS Python can import from, so it is the practical
+  ## mechanism. memfd is deliberately NOT used: an anonymous memfd has no path, so a staged
+  ## import tree cannot live there. If /dev/shm is missing or not writable, fall back to the
+  ## persistent cache and say so on stderr — no silent promise.
+  ##
+  ## WINDOWS / macOS: there is no guaranteed RAM filesystem, so --ram-only is best-effort only
+  ## and NOT guaranteed; fall back to the persistent cache with an honest note.
+  ##
+  ## HONEST DISCLAIMER: --ram-only governs only where the STUB stages the payload tree. It
+  ## cannot control the packed application's OWN disk writes. No strong promises.
+  when defined(linux):
+    const shm = "/dev/shm"
+    if isDirWritable(shm):
+      return shm / "haru-pack"
+    stderr.writeLine "haru-pack: --ram-only requested but /dev/shm is unavailable or not " &
+                     "writable; staging to the persistent cache instead."
+    return baseDir()
+  else:
+    stderr.writeLine "haru-pack: --ram-only is best-effort and not guaranteed on this OS " &
+                     "(no RAM-backed filesystem); staging to the persistent cache instead."
+    return baseDir()
+
+# ------------------------------------------------------------- detached reap (fire-and-forget)
+
+proc reapDetached*(target: string) =
+  ## Spawn a DETACHED, fire-and-forget process that deletes `target`, then return WITHOUT
+  ## waiting — deletion of many GB continues after the stub has died (docs/adr/0004 §4,
+  ## INV-REAP-01). `target` is ALWAYS the exact staged subtree the launcher created this run
+  ## (`<root>/<key>-<digest>`), never a raw base_path or env value.
+  if target.len == 0: return
+  when defined(posix):
+    # Double-fork + setsid: the grandchild is reparented to init and OUTLIVES this stub. We
+    # wait only for the FIRST child (which exits immediately after forking the deleter), never
+    # for the deletion itself. The path is passed to sh as a POSITIONAL arg ($1), never
+    # interpolated into the script text, so a staging root containing shell metacharacters (a
+    # hostile BASE_PATH that reached staging) cannot inject a command into our own reaper.
+    #
+    # The deleter redirects its own stdin/stdout/stderr to /dev/null: it INHERITS our fds, and
+    # a parent capturing our output would otherwise not see EOF (so would BLOCK) until the
+    # multi-GB delete finished — the exact "return without waiting" property we are promising.
+    #
+    # A known-good PATH is set INSIDE the script (a constant, not attacker input) so `rm`
+    # resolves even when we were launched with an empty or hostile PATH — a security-sensitive
+    # cleanup must not silently no-op because the inherited PATH could not find `rm`.
+    var argv = allocCStringArray(["/bin/sh", "-c",
+      "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec rm -rf -- \"$1\" </dev/null >/dev/null 2>&1",
+      "haru-reap", target])
+    let pid1 = fork()
+    if pid1 < 0:
+      deallocCStringArray(argv)
+      return                                   # cannot fork -> best-effort cleanup gives up
+    if pid1 == 0:
+      discard setsid()                         # detach from our session / controlling tty
+      let pid2 = fork()
+      if pid2 == 0:
+        discard execv("/bin/sh", argv)         # grandchild becomes `rm`; on success never returns
+        exitnow(127)                           # exec failed
+      else:
+        exitnow(0)                             # first child exits -> grandchild orphaned to init
+    else:
+      var status: cint
+      discard waitpid(pid1, status, 0)         # reap the IMMEDIATE child, not the deleter
+      deallocCStringArray(argv)
+  else:
+    # Windows (compile + code-review only on this host): `cmd /c start /b rmdir /s /q` launches
+    # rmdir without a window; cmd returns at once, so the stub does not wait for the deletion.
+    # poDaemon (DETACHED_PROCESS) keeps it off our console. The empty "" after `start` is its
+    # title argument, so a quoted target is not mistaken for the window title.
+    try:
+      let p = startProcess("cmd", args = ["/c", "start", "", "/b", "rmdir", "/s", "/q", target],
+                           options = {poDaemon, poUsePath})
+      p.close()                                # do NOT waitForExit — fire and forget
+    except CatchableError:
+      discard
 
 # ---------------------------------------------------------------- digests
 
@@ -302,10 +438,15 @@ proc verifyStagedDir(final, key, payloadDigest: string) =
       "); refusing to run it. Remove it and retry: " & final)
   verifyTree(final, mf)
 
-proc stageZip*(payload: string, key: string): string =
-  ## Extract a zip payload to <base>/<key>-<payload-digest>/ atomically, and on every
+proc stageZip*(payload: string, key: string, root = baseDir()): string =
+  ## Extract a zip payload to <root>/<key>-<payload-digest>/ atomically, and on every
   ## subsequent run verify the tree before handing it back. Raises `StageError` rather
   ## than reusing anything it cannot account for.
+  ##
+  ## `root` is the resolved staging root (docs/adr/0004: BASE_PATH env > stub base_path >
+  ## RAM-backed-or-cache). It defaults to the persistent per-user cache, so a caller that
+  ## passes nothing keeps today's behaviour byte-for-byte. The subtree name is derived only
+  ## from `key` and the payload digest, so the reaped path is one the launcher OWNS.
   if key.len == 0 or key.len > 64 or not key.allCharsInSet(KeyChars):
     raise newException(StageError, "invalid stage key (expected hex): " & key)
   let payloadDigest = sha256hex(payload)
@@ -313,17 +454,17 @@ proc stageZip*(payload: string, key: string): string =
   # staged; the name now carries 128 bits of the payload's own digest as well. The full
   # 64 hex chars would be better still, but Windows MAX_PATH plus a staged CPython tree
   # is a real constraint, so this is the deliberate trade.
-  let final = baseDir() / (key.toLowerAscii & "-" & payloadDigest[0 ..< 32])
+  let final = root / (key.toLowerAscii & "-" & payloadDigest[0 ..< 32])
 
   if dirExists(final):
     verifyStagedDir(final, key.toLowerAscii, payloadDigest)
     return final
 
-  createDir(baseDir())
-  hardenDir(baseDir())
-  assertSafePath(baseDir(), wantDir = true)
+  createDir(root)
+  hardenDir(root)
+  assertSafePath(root, wantDir = true)
 
-  let tmp = baseDir() / (key.toLowerAscii & ".tmp-" & $getCurrentProcessId())
+  let tmp = root / (key.toLowerAscii & ".tmp-" & $getCurrentProcessId())
   removeDir(tmp)
   createDir(tmp)
   hardenDir(tmp)

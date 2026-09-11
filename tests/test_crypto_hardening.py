@@ -57,7 +57,8 @@ import cryptbox
 when isMainModule:
   let raw = readFile(paramStr(1))
   if not isEncrypted(raw): quit("harness: not an encrypted container", 9)
-  let payload = openContainer(raw)
+  # SECRET knob default canary (INV-CANARY-01): HARU_SECRET replaces HARUPACK_SECRET.
+  let payload = openContainer(raw, "HARU_SECRET")
   writeFile(paramStr(2), payload)
   echo "HARNESS-OK ", payload.len
 """
@@ -97,8 +98,9 @@ def _run(harness_exe: Path, blob: bytes, tmp_path: Path, *,
     box.write_bytes(blob)           # would read as "this container opened"
     env = dict(os.environ)
     env.pop("HARUPACK_SECRET", None)
+    env.pop("HARU_SECRET", None)
     if secret is not None:
-        env["HARUPACK_SECRET"] = secret.decode()
+        env["HARU_SECRET"] = secret.decode()   # SECRET knob default canary (INV-CANARY-01)
     env.update(env_extra or {})
     proc = subprocess.run([str(harness_exe), str(box), str(out)],
                           capture_output=True, text=True, env=env, timeout=60,
@@ -405,6 +407,7 @@ def _prompt_over_pty(harness_exe: Path, blob: bytes, tmp_path: Path, typed: byte
     box.write_bytes(blob)
     env = dict(os.environ)
     env.pop("HARUPACK_SECRET", None)
+    env.pop("HARU_SECRET", None)
     master, slave = pty.openpty()
     proc = subprocess.Popen([str(harness_exe), str(box), str(out)],
                             stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)

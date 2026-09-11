@@ -126,16 +126,19 @@ PY=".venv/bin/python"
 # on PATH. This gate used to do the latter and passed, while CI — which downloaded a newer
 # ruff — failed on the same commit for days. There were three different ruff versions on the
 # maintainer's machine when that was diagnosed (INV-CI-01).
-echo "-- lint (pinned ruff via uv)"
-if command -v uv >/dev/null 2>&1; then
-    uv run --quiet --group dev ruff check . \
-        || die "ruff failed. Fix it; do not tag a release you would not merge."
-    echo "   ok"
-else
-    die "uv is not on PATH, so the pinned linter cannot run.
+echo "-- lint (pinned ruff, same pin CI uses)"
+command -v uv >/dev/null 2>&1 || die "uv is not on PATH, so the pinned linter cannot run.
 The gate will not fall back to an unpinned \`ruff\` — that is exactly the drift that kept CI
 red while this gate reported success. Install uv and re-run."
-fi
+RUFF_PIN="$(sed -n 's/.*"ruff==\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+[ -n "$RUFF_PIN" ] || die "no exact \`ruff==\` pin in pyproject.toml [dependency-groups] dev.
+That pin is the single source of truth for both this gate and CI (INV-CI-01); without it the
+two lint different things, which is how CI stayed red for a week while this said 'ok'."
+# `uvx`, not `uv run --group dev`: the latter installs into the project environment, so the
+# linter would mutate the env the tests are about to run in.
+uvx --quiet "ruff@$RUFF_PIN" check . \
+    || die "ruff $RUFF_PIN failed. Fix it; do not tag a release you would not merge."
+echo "   ok (ruff $RUFF_PIN)"
 
 # pytest's default basetemp lives at /tmp/pytest-of-$USER, which is shared and can end up
 # owned by another uid (containers, CI runners, a parallel job). pytest then refuses to run

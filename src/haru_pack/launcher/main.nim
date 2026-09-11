@@ -7,7 +7,7 @@
 ## (run-in-place), exposing exe-dir + stage-dir to the child.
 import std/[os, osproc, strutils, sequtils]
 import nimcrypto/sha2
-import overlay, stage, manifest, uvfetch, cryptbox
+import overlay, stage, manifest, uvfetch, cryptbox, stubconfig
 when defined(posix):
   import std/posix
   # A CUSTOM handler (not SIG_IGN) is reset to SIG_DFL across exec, so the child
@@ -21,6 +21,9 @@ const
   ExitInternalError*  = 7   ## unexpected failure; a clean diagnostic, never a traceback
   ExitBadFooter*      = 8   ## footer's payload extent does not fit inside this file
   ExitNoUv*           = 9   ## no usable uv, and the tier forbids looking for one
+  ExitBadStub*        = 10  ## stub-config: digest mismatch, unparseable TOML, unsupported
+                            ## stub_config_version, or an invalid/missing canary. One-line
+                            ## diagnostic, never a traceback (INV-LAUNCH-06 / INV-STUB-01).
 
 proc die(msg: string, code = 1) =
   stderr.writeLine "haru-pack: " & msg
@@ -41,6 +44,8 @@ proc findUv(stageRoot: string, m: Manifest): string =
   let onPath = findExe("uv")
   if onPath.len > 0: return onPath
   if m.fetchUv:
+    # TODO(phase-uv): UV_VER knob — when getEnv(sc.envForKnob(kUvVer)) is set, override
+    # m.uvVersion with it here (sc threaded in from launch()). Phase 1 only carries the knob.
     let got = ensureUv(stageRoot, m.uvVersion)
     if got.len > 0: return got
     die("thin tier: failed to fetch uv (need curl/powershell + network on first run)")
@@ -83,6 +88,24 @@ proc verifyPayloadDigest(payload: string, want: array[32, byte]) =
     stderr.writeLine "haru-pack:   actual   sha256 " & hexOf(got.data)
     quit(ExitDigestMismatch)
 
+proc verifyStubDigest(stub: string, want: array[32, byte]) =
+  ## INV-STUB-01. The v2 footer records SHA-256 over the cleartext stub-config bytes.
+  ## Verify it BEFORE parsing the canary map, mirroring verifyPayloadDigest.
+  ##
+  ## Like the payload digest this is self-referential (both the bytes and the digest come
+  ## from the same attacker-writable region), so it is NOT tamper-evidence: it detects
+  ## corruption/truncation/naive edits and is the precondition for a real signature
+  ## (INV-LAUNCH-03, still proposed).
+  let got = sha256.digest(stub)
+  var diff = 0'u8
+  for i in 0 .. 31: diff = diff or (got.data[i] xor want[i])
+  if diff != 0'u8:
+    stderr.writeLine "haru-pack: stub-config integrity check FAILED — this executable has " &
+                     "been modified since it was built."
+    stderr.writeLine "haru-pack:   expected sha256 " & hexOf(want)
+    stderr.writeLine "haru-pack:   actual   sha256 " & hexOf(got.data)
+    quit(ExitBadStub)
+
 proc runChild(exe: string, args: seq[string], workDir: string): int =
   let p = startProcess(exe, workingDir = workDir, args = args,
                        options = {poParentStreams})
@@ -113,6 +136,22 @@ proc runInstallSteps(uv, appDir: string, m: Manifest, steps: seq[InstallStep],
     ran = true
   if ran or steps.len > 0: writeFile(sentinel, "1")
 
+proc resolveStagingRoot(sc: StubConfig): string =
+  ## The staging-root precedence, computed BEFORE staging (docs/adr/0004 §3, INV-BASE-01):
+  ##
+  ##   BASE_PATH env (canary-resolved, Phase-1 mechanism)   [highest]
+  ##     > stub-config base_path (build-time default)
+  ##     > (ram_only ? RAM-backed root : the normal per-user cache from baseDir())
+  ##
+  ## Only the ROOT is chosen here; stageZip appends the create-and-delete-own subtree
+  ## `<root>/<key>-<digest>`. The caller refuses an unsafe root (refuseUnsafeRoot) before it
+  ## stages, so a hostile BASE_PATH can relocate staging but never becomes arbitrary-delete.
+  let envVal = getEnv(sc.envForKnob(kBasePath))   # BASE_PATH knob — now consumed (was Phase-1 TODO)
+  if envVal.len > 0: return envVal
+  if sc.basePath.len > 0: return sc.basePath
+  if sc.ramOnly: return ramBackedRoot()           # /dev/shm on Linux, else honest fallback
+  return baseDir()
+
 proc launch(): int =
   let self = getAppFilename()
   let exeDir = getAppDir()
@@ -121,6 +160,11 @@ proc launch(): int =
 
   # 1. locate staged payload root
   var stageRoot = ""
+  # Phase-2 reap state (docs/adr/0004 §4). Only ever set on the overlay-staged path below —
+  # a HARUPACK_DEV_STAGE tree belongs to the developer and is NEVER reaped (we did not create
+  # it). reapTarget is the exact subtree stageZip created/verified this run (INV-REAP-01).
+  var reapWanted = false
+  var reapTarget = ""
   # INV-LAUNCH-02: HARUPACK_DEV_STAGE stages an arbitrary directory and skips the
   # overlay, the digest check, decryption and every license check. In a shipped, signed
   # binary that is a signed proxy for arbitrary code execution, available to anyone who
@@ -138,14 +182,40 @@ proc launch(): int =
         die("no payload appended and HARUPACK_DEV_STAGE unset")
       else:
         die("no payload appended to this executable")
-    let fault = footerFault(ft, getFileSize(self).int, footerAt)   # W9
+    let fault = footerFault(ft, getFileSize(self).int, footerAt)   # W9 / INV-LAUNCH-05/08
     if fault.len > 0: die("corrupt payload footer: " & fault, ExitBadFooter)
+    # Stub-config: cleartext, signature-covered, read BEFORE decrypt/stage so the per-knob
+    # canary map decides which env name holds each knob. A v1 (single-payload) binary carries
+    # no stub -> the all-HARU default. Only SECRET is consumed in Phase 1 (below); UV_VER /
+    # SOURCE_URL / BASE_PATH ride in `sc` for later phases (TODOs at their future consumers).
+    var sc = defaultStubConfig()
+    if ft.hasStub:
+      let stubBytes = readStub(self, ft, footerAt)
+      verifyStubDigest(stubBytes, ft.stubSha)   # INV-STUB-01 — before we parse the map
+      try:
+        sc = parseStubConfig(stubBytes)
+      except ValueError as e:
+        die(e.msg, ExitBadStub)
+    # TODO(phase-remote): SOURCE_URL knob — when getEnv(sc.envForKnob(kSourceUrl)) is set,
+    # fetch the payload over HTTP through the one payload pipeline instead of readPayload.
     var payload = readPayload(self, ft, footerAt)
     verifyPayloadDigest(payload, ft.payloadSha)   # INV-LAUNCH-01 — before we decrypt
     let shahex = hexOf(ft.payloadSha)
     if (ft.flags and 1'u16) != 0'u16 or isEncrypted(payload):
-      payload = openContainer(payload)     # decrypt + license checks (dies on failure)
-    stageRoot = stageZip(payload, shahex[0..15])
+      # SECRET knob (INV-CANARY-01): the decryption key's env NAME is sc.envForKnob(kSecret)
+      # (default HARU_SECRET), replacing the retired hardcoded HARUPACK_SECRET.
+      payload = openContainer(payload, sc.envForKnob(kSecret))   # dies on failure
+    # BASE_PATH / ram_only (docs/adr/0004 §3, INV-BASE-01): resolve the staging ROOT by
+    # precedence, then REFUSE an unsafe root (/, a drive/UNC root, or the home root) before we
+    # create anything under it. stageZip appends the create-and-delete-own `<key>-<digest>`
+    # subtree, which is the only path --reap ever deletes (INV-REAP-01).
+    let root = resolveStagingRoot(sc)
+    let rootFault = refuseUnsafeRoot(root)
+    if rootFault.len > 0:
+      die("refusing to stage under an unsafe base path — " & rootFault, ExitBadStub)
+    stageRoot = stageZip(payload, shahex[0..15], root)
+    reapWanted = sc.reap                 # build-time --reap; independent of ram_only
+    reapTarget = stageRoot               # the exact subtree we just created/verified
 
   # 2. manifest
   let mfPath = stageRoot / "manifest.toml"
@@ -155,7 +225,12 @@ proc launch(): int =
     die("manifest declares no entrypoint: " & mfPath)
   let appDir = stageRoot / m.appSubdir
 
-  # 3. env wiring (three roots + uv offline knobs)
+  # 3. env wiring (inject first, then three roots + uv offline knobs)
+  # inject (env-append) is applied FIRST so both uv AND the app inherit it, while every
+  # reserved var the launcher sets below WINS on a collision — an inject cannot repoint
+  # UV_PYTHON off the host and defeat the thick tier's hermeticity (INV-LAUNCH-04). The
+  # build refuses reserved keys outright, so this ordering is belt-and-braces (ADR §4.2).
+  for (k, v) in m.inject: putEnv(k, v)
   putEnv("HARUPACK_EXE_DIR", exeDir)
   putEnv("HARUPACK_STAGE", stageRoot)
   putEnv("UV_CACHE_DIR", if m.cacheDir.len > 0: stageRoot / m.cacheDir else: baseDir() / "uv-cache")
@@ -230,7 +305,15 @@ proc launch(): int =
   #    so a plain open('file.txt') always hits the file adjacent to the shipped exe)
   let childCwd = if m.cwdPolicy == "exe": exeDir else: runDir
   when defined(posix): signal(SIGINT, ignoreInParent)   # child owns Ctrl+C
-  return runChild(uv, a, childCwd)
+  let rc = runChild(uv, a, childCwd)
+
+  # 7. detached reap (build-time --reap, docs/adr/0004 §4, INV-REAP-01): after the app exits,
+  # hand the staged subtree to a fire-and-forget deleter and return WITHOUT waiting — many GB
+  # keep deleting after this stub has died. Only the subtree the launcher created this run is
+  # reaped; a dev-stage tree (reapTarget == "") is never touched.
+  if reapWanted and reapTarget.len > 0:
+    reapDetached(reapTarget)
+  return rc
 
 when isMainModule:
   # W16: parseManifest, parseJson and the expiry parse all raise, and zippy raises on a

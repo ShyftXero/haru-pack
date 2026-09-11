@@ -86,9 +86,12 @@ proc currentUser(): string =
 proc xorBytes(b: seq[byte], pad: string): string =
   for i in 0 ..< b.len: result.add char(b[i] xor byte(pad[i mod pad.len]))
 
-proc resolveSecret(box: Box): string =
-  ## env HARUPACK_SECRET -> embedded (weak) -> interactive prompt
-  result = getEnv("HARUPACK_SECRET")
+proc resolveSecret(box: Box, secretEnv: string): string =
+  ## env <secretEnv> -> embedded (weak) -> interactive prompt.
+  ## The env NAME is resolved by the launcher from the SECRET knob's canary
+  ## (docs/adr/0003-stub-config-and-canary.md §3.3, INV-CANARY-01); the all-HARU default
+  ## makes it HARU_SECRET, which replaces the retired HARUPACK_SECRET.
+  result = getEnv(secretEnv)
   if result.len > 0: return
   if (box.flags and EmbedSecret) != 0'u16 and box.esecret.len > 0:
     return xorBytes(box.esecret, Obfus)
@@ -116,15 +119,19 @@ proc checkPolicy(policy: seq[byte]) =
     if not ok:
       quit("haru-pack: not licensed for this location (allowed: " & $geo & ")", 3)
 
-proc openContainer*(raw: string): string =
+proc openContainer*(raw: string, secretEnv: string): string =
   ## derive key, GCM-decrypt, THEN parse+check the (hidden) policy -> returns payload zip.
+  ## `secretEnv` is the env NAME the SECRET knob resolves to (default HARU_SECRET); the
+  ## caller passes `sc.envForKnob(kSecret)`. The container byte format is UNCHANGED — only
+  ## the source of the secret's env name moved (INV-CANARY-01).
   let box = parseBox(raw)
   if box.version != ContainerVersion:
     quit("haru-pack: unsupported encrypted container version " & $box.version &
          " (this launcher reads version " & $ContainerVersion & " — rebuild the binary)", 5)
-  let secret = resolveSecret(box)
+  let secret = resolveSecret(box, secretEnv)
   if secret.len == 0:
-    quit("haru-pack: this build is encrypted — set HARUPACK_SECRET (or run interactively)", 4)
+    quit("haru-pack: this build is encrypted — set " & secretEnv &
+         " (or run interactively)", 4)
   var pw = newSeq[byte](secret.len)
   for i in 0 ..< secret.len: pw[i] = byte(secret[i])
   if (box.flags and BindMachine) != 0'u16:

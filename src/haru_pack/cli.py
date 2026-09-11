@@ -72,7 +72,12 @@ app = typer.Typer(add_completion=False, cls=_DefaultToBuild,
 def _run_build(*, project, out=None, target="host", tier="default", thin=False, thick=False,
                chonky=False, encrypt=False, secret=None, secret_env=None, secret_prompt=False,
                embed_secret=False, expires="", machine="", user="", geo="", python="",
-               entry_point="", wine=False, shake=False, shake_keep=()) -> None:
+               entry_point="", wine=False, obfuscate="none", obfuscate_args="",
+               shake=False, shake_keep=(), env_canary="", env_canary_random=False,
+               stub_env_secret_canary="", stub_env_uv_ver_canary="",
+               stub_env_source_url_canary="", stub_env_base_path_canary="",
+               reap=False, ram_only=False, base_path="",
+               env_append=None) -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -107,8 +112,17 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          expires=expires, geo=[g for g in geo.split(",") if g],
                          machine=machine, user=user, embed_secret=embed_secret, python=python,
                          wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
+                         obfuscate=obfuscate,
+                         obfuscate_args=[a for a in obfuscate_args.split() if a],
                          entry_point=entry_point, shake=shake,
                          shake_keep=list(shake_keep or []),
+                         env_canary=env_canary, env_canary_random=env_canary_random,
+                         stub_env_secret_canary=stub_env_secret_canary,
+                         stub_env_uv_ver_canary=stub_env_uv_ver_canary,
+                         stub_env_source_url_canary=stub_env_source_url_canary,
+                         stub_env_base_path_canary=stub_env_base_path_canary,
+                         reap=reap, ram_only=ram_only, base_path=base_path,
+                         env_append=list(env_append or []),
                          log=lambda m: print(
                              f"{prog()}: {m}",
                              style="warn" if "WARNING" in m else "info"))
@@ -122,6 +136,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     except BuildError as e:
         print(str(e), style="error"); raise typer.Exit(2)
     tag = " 🔒encrypted" if info.get("encrypted") else ""
+    ob = (info.get("obfuscation") or {})
+    if ob.get("applied"):
+        tag += f" 🌀{ob.get('engine')}"
     if info.get("shake"):
         sh = info["shake"]
         before, after = sh["payload_bytes_before"], sh["payload_bytes_after"]
@@ -139,7 +156,7 @@ def version():
     print(f"haru-pack {__version__}")
 
 
-def _report_ambiguity(project: Path, e: "AmbiguousProject") -> None:
+def _report_ambiguity(project: Path, e: AmbiguousProject) -> None:
     """Explain the choice, then write the config that records it — do not guess.
 
     A wrong guess here builds cleanly and runs the wrong program, so the failure shows up
@@ -176,8 +193,8 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
         print(tc["advice"], style="warn")
 
     if path is not None:
-        from .discovery import discover
         from . import scaffold
+        from .discovery import discover
         try:
             disc = discover(path)
         except Exception as e:
@@ -285,16 +302,45 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           machine: str = typer.Option("", "--machine", help="bind to this machine-id (cryptographic)"),
           user: str = typer.Option("", "--user", help="bind to this OS username (cryptographic)"),
           geo: str = typer.Option("", "--geo", help="allowed country codes, comma-separated"),
-          python: str = typer.Option("", "--python", help="Python version to stage (e.g. 3.12); default auto/3.12"),
+          python: str = typer.Option("", "--python", help="Python version to stage (e.g. 3.13); default auto/3.13"),
           entry_point: str = typer.Option("", "--entry-point", "-e",
               help="what to run: a script (app.py), a console script (lotek), or "
                    "module:callable (app.cli:main) — same spelling as [project.scripts]"),
           wine: bool = typer.Option(False, "--wine", help="run execute-required bundle steps under wine (thick cross)"),
+          obfuscate: str = typer.Option("none", "--obfuscate", help="obfuscate the source before packing: none | pyarmor (default engine when a value is omitted). Independent of --encrypt."),
+          obfuscate_args: str = typer.Option("", "--obfuscate-args", help="extra args passed through to the obfuscation engine, quoted"),
           shake: bool = typer.Option(False, "--shake",
               help="thick only: run the project's tests under a file tracer and drop bundled "
                    "files nothing touched; refuses to ship if the suite then fails"),
           shake_keep: List[str] = typer.Option(None, "--shake-keep", metavar="GLOB",
-              help="never prune paths matching GLOB (repeatable)")):
+              help="never prune paths matching GLOB (repeatable)"),
+          env_canary: str = typer.Option("", "--env-canary", metavar="TOKEN",
+              help="canary prefix for ALL stub knobs (default HARU); knob K is read at runtime "
+                   "as <TOKEN>_<K> (e.g. HARU_SECRET). Must match ^[A-Za-z_][A-Za-z0-9_]*$"),
+          env_canary_random: bool = typer.Option(False, "--env-canary-random",
+              help="pick a random [A-Z][A-Z0-9]{7} canary for all knobs and PRINT it — record "
+                   "it; you set the secret at runtime as <TOKEN>_SECRET"),
+          stub_env_secret_canary: str = typer.Option("", "--stub-env-secret-canary",
+              metavar="TOKEN", help="override the SECRET knob's canary only"),
+          stub_env_uv_ver_canary: str = typer.Option("", "--stub-env-uv-ver-canary",
+              metavar="TOKEN", help="override the UV_VER knob's canary only"),
+          stub_env_source_url_canary: str = typer.Option("", "--stub-env-source-url-canary",
+              metavar="TOKEN", help="override the SOURCE_URL knob's canary only"),
+          stub_env_base_path_canary: str = typer.Option("", "--stub-env-base-path-canary",
+              metavar="TOKEN", help="override the BASE_PATH knob's canary only"),
+          reap: bool = typer.Option(False, "--reap",
+              help="after the app exits, spawn a DETACHED process that deletes the staged "
+                   "subtree, then exit without waiting (fire-and-forget cleanup)"),
+          ram_only: bool = typer.Option(False, "--ram-only",
+              help="best-effort RAM-backed staging: Linux stages under /dev/shm when available "
+                   "(else falls back to the cache). Governs only where the STUB stages — not "
+                   "the app's own disk writes; not guaranteed on Windows/macOS"),
+          base_path: str = typer.Option("", "--base-path", metavar="DIR",
+              help="staging-root default baked into the stub-config (a canary-named BASE_PATH "
+                   "env var overrides it at runtime). Refused if it is a root/drive/home path"),
+          env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
+              help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
+                   "Lives in the payload — use --encrypt to hide a secret value")):
     """Build a single-file launcher from a project payload dir.
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
@@ -303,7 +349,15 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                chonky=chonky, encrypt=encrypt, secret=secret, secret_env=secret_env,
                secret_prompt=secret_prompt, embed_secret=embed_secret, expires=expires,
                machine=machine, user=user, geo=geo, python=python, entry_point=entry_point,
-               wine=wine, shake=shake, shake_keep=shake_keep)
+               wine=wine, obfuscate=obfuscate, obfuscate_args=obfuscate_args,
+               shake=shake, shake_keep=shake_keep, env_canary=env_canary,
+               env_canary_random=env_canary_random,
+               stub_env_secret_canary=stub_env_secret_canary,
+               stub_env_uv_ver_canary=stub_env_uv_ver_canary,
+               stub_env_source_url_canary=stub_env_source_url_canary,
+               stub_env_base_path_canary=stub_env_base_path_canary,
+               reap=reap, ram_only=ram_only, base_path=base_path,
+               env_append=env_append)
 
 @app.command()
 def verify(exe: Path):
@@ -321,8 +375,8 @@ def verify(exe: Path):
 def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
          force: bool = typer.Option(False, "--force", help="overwrite an existing haru_pack.toml")):
     """Scaffold a haru_pack.toml, pre-filled from discovery + any available venv."""
-    from .discovery import discover
     from . import scaffold
+    from .discovery import discover
     out_dir = path if path.is_dir() else path.parent
     out = out_dir / "haru_pack.toml"
     if out.exists() and not force:

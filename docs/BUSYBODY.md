@@ -13,7 +13,450 @@ its own), `journal.jsonl`, `results.json`, and preserved artifacts for any findi
 ```sh
 python tools/busybody.py --history     # every run; interrupted ones say so
 python tools/busybody.py --triage      # findings grouped by fingerprint, across all runs
+python tools/busybody.py --analyze     # did the last sweep buy anything? what diverged?
+python tools/busybody.py --calibrate --fixtures top25    # find a discriminating threshold
 ```
+
+## Analysis is a tool, not a reading exercise
+
+Every analysis in this document was first done by hand, with throwaway one-liners over
+`journal.jsonl`. That works exactly once. It does not survive the person who wrote the
+one-liner, it cannot be re-run later to compare, and it burns whoever repeats it — a human
+scrolling a 900-line JSONL file, or a model ingesting it as tokens — for an answer the
+machine computes in a millisecond.
+
+So the questions are the tool:
+
+**`--analyze [RUN]`** prints the fingerprint census, the divergence matrix, the outcome and
+blame distributions, and the slowest cases. The census is the one that matters: *N case runs
+produced M distinct results*. A 25-fixture sweep with a 25:1 ratio confirmed the same facts
+once per fixture — which is not 25× the assurance, and the report says so in those words.
+
+**`--calibrate`** measures the resource band between fixtures and prints a threshold to
+paste, along with the per-fixture requirements to paste beside it. It stages each fixture
+unrestricted first, so what gets measured is the *application's* requirement rather than
+staging's — the latter being identical for every package and not the question. It also says
+plainly that the number is machine-specific and does not transfer.
+
+Neither needs a model. Neither needs you to open the raw records.
+
+## wedge — the persona that attacks the config
+
+The other twelve personas abuse a binary that was already built. `wedge` attacks the
+**declaration**, and it is a different class of bug: a config contradiction that builds
+cleanly ships an artifact whose behaviour nobody predicted from reading the config, and the
+build is the last point at which the person who can fix it is still watching.
+
+A *wedge* is a configuration where two directives cannot both be honoured. Four outcomes:
+
+| outcome | meaning |
+|---|---|
+| `REFUSED` | the build stopped and named at least one side of the conflict. Best case. |
+| `WARNED` | it built and said which side it overrode. Fine when precedence is documented. |
+| `RAN` | it built and the predicted damage did not occur — the wedge was not a real contradiction. The **case** is wrong, not the tool. |
+| `SILENT-WEDGE` | it built, said nothing, and the artifact carries the damage. **A finding.** |
+
+`SILENT-WEDGE` is in `FATAL`. `WARNED` deliberately is not: resolving a conflict and saying
+which side lost is the behaviour this persona is asking for.
+
+Each case names the artifact property it expects to be damaged and then checks it, so a
+finding is never "the config was weird" — it is "the config was weird **and** here is the
+resulting binary's specific defect."
+
+### Three defects on the first run
+
+**`app_subdir` containing `..`** — the payload builder copies the project to
+`payload/<app_subdir>`, so the application landed *outside* the payload. The zip is
+assembled from the payload root, the app was not under it, and the launcher staged a binary
+with no entrypoint: `can't open file '.../escaped/app.py'`. Same class as a zip-slip — a
+path from config escaping the root it is resolved against.
+
+**`expires` in the past** — `cryptbox.nim` compares the policy date to now and quits with
+`license expired`, so the artifact was dead on arrival and the failure read as a licensing
+problem rather than the typo it was.
+
+**An unrecognised `cwd_policy`** — `main.nim` compares it against `"exe"` and treats
+everything else as `"launch"`, so a typo and a deliberate choice produced identical binaries.
+The difference surfaced only as a relative path resolving from the wrong directory on someone
+else's machine.
+
+All three are now refused at build time by `validate_manifest` / `validate_encryption`, with
+messages that name both sides. `tests/test_config_wedges.py` claims them, including a check
+that `CWD_POLICIES` only lists values `main.nim` actually branches on — so the validator
+cannot drift into validating against a fiction.
+
+### It also caught two of its own cases cheating
+
+`licence_expires_before_it_is_built` and `three_names_for_one_artifact` both *passed* at
+first, and both were wrong. They refused — but for an unrelated guard that fired earlier: no
+secret supplied, and an ambiguous entrypoint. Neither had reached the wedge it claimed to
+test.
+
+That is the same mistake `payload_edited_and_footer_recomputed` made when it took a CRC32
+rejection as proof of tamper detection. `REFUSED-UNRELATED` now names it: *the build refused
+without mentioning either side of the conflict, so the case missed its target.* It is a note
+against busybody, not a pass for haru-pack. Fixing the two cases to isolate their wedges is
+what exposed the expiry defect.
+
+**A case must isolate its wedge, or it measures whichever guard happens to fire first.**
+
+### Wedge cases run once
+
+They are registered `per_fixture=False`. They build their own artifact and say nothing about
+the packed package, so running them once per fixture would repeat one answer 25 times and
+inflate exactly the census INV-CHAOS-04 exists to keep honest.
+
+## reverse_engineer — the honest limit of packing a secret
+
+A developer has to embed an API key and ship a binary. haru-pack can encrypt the payload, so
+the key is not sitting in the distributed exe as a string. But the launcher **stages the
+payload to disk in plaintext** so the interpreter can run it — that is not a bug, it is how
+running Python works — and it stages to the regenerable cache (`~/.cache/haru-pack/...`), not
+a temp dir, so the plaintext persists. Any user who can *run* the binary can read its source
+out of their own cache.
+
+The `reverse_engineer` persona plants a known secret and **proves each edge of that
+boundary** rather than asserting it (INV-SECRET-02):
+
+| what it checks | outcome |
+|---|---|
+| encrypted binary, at rest | secret must be **absent** from the exe bytes — `RAN`, else `LEAKED` |
+| plain build, after running | secret **is** recoverable from the stage — `EXPOSED` (documented reality, kept visible) |
+| `--obfuscate` vs plain | literal present in the plain stage, **gone** from the obfuscated stage — `RAN`, else `LEAKED` |
+| staged tree permissions | must be owner-only, not group/other-readable — `RAN`, else `LEAKED` |
+
+Two new outcomes, both closed-vocabulary:
+
+- **`EXPOSED`** — a secret recovered from a surface haru-pack *documents* as recoverable
+  (the staged plaintext on the running user's disk). **Not a defect.** The persona keeps it
+  visible so that if it ever stops being true, the staging model changed and the docs must
+  too.
+- **`LEAKED`** — a secret recovered from a surface that is *supposed* to protect it: the
+  encrypted binary at rest, or a tree readable by other users. **A defect** (`critical`).
+
+The obfuscation case proves the value **both ways**: the plain control stage must contain the
+literal, or the case is vacuous — a no-op obfuscator cannot pass by making both sides clean.
+
+**The honest bottom line, stated everywhere it matters:** a secret that must never be
+recovered must never be shipped in an artifact the client holds. The right architecture for a
+must-not-leak key is a server the client authenticates to. Packing is not that, and haru-pack
+does not pretend it is.
+
+## --obfuscate — raise the cost, honestly
+
+```sh
+haru-pack build app.py --thick --obfuscate pyarmor
+haru-pack build app.py --thick --obfuscate pyarmor --obfuscate-args "--mix-str"
+```
+
+Obfuscation is a modular engine (`ObfuscationEngine` + a registry) with **pyarmor** as the
+default. It runs as `uv run --python <target-version> --with pyarmor -- pyarmor gen`, which
+means two things:
+
+- haru-pack needs **no pyarmor dependency of its own** — uv provisions it on demand, and uv
+  is already the whole staging mechanism.
+- pyarmor runs under the **exact interpreter version the binary will stage**, which it must:
+  pyarmor's runtime `.so` references version-private CPython symbols, so a payload obfuscated
+  for 3.12 fails to import under 3.11 (`_PyThreadState_GetCurrent`) or 3.13/3.14
+  (`_PyErr_GetTopmostException`). This is *not* a lock to 3.12 — pyarmor obfuscates for
+  **standard CPython 3.7–3.14** (verified 3.11/3.12/3.13/3.14 each build and run when
+  targeted); 3.12 is just haru-pack's default `--python`. The one hard ceiling is
+  **free-threaded** (GIL-less) CPython, which pyarmor does not support; a bare `3.14` can
+  resolve to a `+freethreaded` build via uv, so haru-pack catches that and names the fix.
+  Measured 2026-09-10.
+
+Because of that binding, **obfuscation wants `--thick`**: only thick bundles the exact
+interpreter and guarantees the match. A non-thick obfuscated build warns loudly that the
+target must have exactly that Python or the binary will fail to start.
+
+Three hard rules (INV-OBF-01):
+
+1. **Apply or fail.** `--obfuscate pyarmor` with no uv, or a pyarmor that errors, **fails the
+   build**. It never silently ships plaintext when you asked for obfuscation — that false
+   confidence is the exact thing being guarded against.
+2. **`none` is the honest default.** Not obfuscated is a named engine, recorded in the
+   manifest, never implied by omission.
+3. **Independent of encryption.** Obfuscate a plaintext-payload binary, encrypt an
+   unobfuscated one, do both, or neither. They protect different things and are wired on
+   separate axes.
+
+pyarmor's unlicensed/trial runtime is size-limited and not for redistribution; haru-pack
+detects the trial banner and says so in the build log. It will not decide licensing for you,
+but it will not let you ship a trial artifact believing it is licensed.
+
+## Composition — why the personas stack
+
+A persona that runs alone asks a closed question. *Does staging cope with umask 077?* has the
+same answer forever, and answering it is integration testing with a costume on. The open
+question is the other one:
+
+> **Which combination of individually-survivable conditions is not survivable?**
+
+A read-only cwd is fine. No `HOME` is fine. `CI=true` with no TTY is fine. One of the ways of
+stacking three of those is where the traceback lives, and no amount of running them
+separately will find it. That is the difference between this and a test suite.
+
+So hostility is expressed as **traits** — small, orthogonal, declared mutations — and the
+runner combines them:
+
+```sh
+python tools/busybody.py --list-traits              # the catalogue
+python tools/busybody.py --compose 1                # every trait alone: the baseline
+python tools/busybody.py --compose 2                # pairs
+python tools/busybody.py --compose 3 --compose-runs 300
+python tools/busybody.py --compose-only greenhorn_output_over_the_input,foreman_no_home
+```
+
+42 traits across 11 personas. 845 conflict-free pairs, over 11,000 triples.
+
+### The pass condition is deliberately weak
+
+| outcome | verdict |
+|---|---|
+| `RAN` | fine |
+| `REFUSED` | fine — a guard fired and said so |
+| `APP-CRASHED` | fine — the app declined the box these traits built for it |
+| `CRASHED` | **never** — a language-level traceback reached the user |
+| `HUNG` | **never** |
+| `SILENT` | **never** — exit 0 and the app never ran |
+
+That is the existing `FATAL` set, which is the point: composition needs no new vocabulary,
+only a weaker expectation. Nobody has reasoned about combination 7,431 of 11,000, so
+asserting *"haru-pack works under any three of these"* would be an overclaim of exactly the
+kind `INVARIANTS.md` exists to prevent. **The floor is the claim: it works, or it refuses
+intelligibly.**
+
+### Fallibility — the persona is a person, not a fixture
+
+A trait has a *probability* of acting. Some days the new developer reads the flag correctly.
+
+This matters more than it sounds. If `greenhorn` always fumbles, then *"greenhorn fumbled
+AND auditor left a `.env` behind"* is the only thing ever tested — and *"greenhorn got it
+right, auditor still left the `.env`"* is a **different code path** that never runs at all.
+
+```
+run 0   auditor_plants_credentials+foreman_ci_true          (greenhorn got it right today)
+run 1   foreman_ci_true                                     (nobody misbehaved but CI)
+run 3   greenhorn_output_over_the_input+auditor+foreman_ci   (everything at once)
+```
+
+`fires` is set below 1.0 only where real-world presence is genuinely intermittent — a
+developer's mistake, a stale cache that may or may not be there. A CI runner's missing TTY is
+not a coin flip, so `foreman`'s traits always fire.
+
+**A run's identity is the set that FIRED**, not the set that was selected. Both are
+journalled. A run where nothing fired is a *control*, and it is kept rather than resampled —
+a control arriving through the same machinery is worth more than one bolted on beside it,
+because if the baseline is broken that is where it shows.
+
+Fallibility is forced **off** for exactly two passes: `--compose 1`, which *is* the
+attribution baseline (a baseline with holes makes every composed finding unattributable), and
+`--compose-only`, where someone asked for a specific stack and a control run would answer a
+different question than the one they typed.
+
+### Attribution, and why the baseline comes first
+
+A composed failure is only interesting if the parts are individually fine. `A+B` failing while
+`A` and `B` each pass alone is an **interaction** — the finding worth having. `A+B` failing
+because `A` was already broken is just `A`. Running `--compose 1` first is what makes that
+distinction free rather than another guess.
+
+### Determinism
+
+Selection and firing both come from a recorded seed, and every finding prints the command that
+reproduces it:
+
+```
+[critical] CRASHED  greenhorn_output_over_the_input+revenant_manifest_from_the_future
+    Reproduce with: python tools/busybody.py --compose-only greenhorn_output_over_the_input,revenant_manifest_from_the_future --compose-seed 1757505639
+```
+
+Firing is drawn from `sha256(seed:run_index:trait_name)` rather than a sequential RNG.
+Per-trait, so adding a trait to the catalogue does not reshuffle every other trait's decisions
+in every other run — a recorded seed has to keep meaning what it meant when the finding was
+filed. And a digest rather than `random.Random(triple)`, which raises on Python 3.14 and whose
+seed-to-stream mapping is an implementation detail either way.
+
+### Conflicts are cancellations, not breakages
+
+A declared conflict means one trait **cancels** the other — a read-only cache and an absent
+`HOME` cannot both be the thing under test, and a stack whose members cancel tests *less* than
+either member alone while looking like coverage. Pairs that **break** together are not
+conflicts. Those are the findings.
+
+## The eleven personas
+
+| persona | attacks | phase |
+|---|---|---|
+| `greenhorn` | wrong invocation — bad paths, bad flags, output in silly places | build |
+| `foreman` | the environment CI actually provides | build + run |
+| `crosseyed` | a foreign `--target`; the payload must not carry host objects | build |
+| `babel` | filenames legal here and illegal, colliding or unencodable there | build |
+| `understudy` | the packaged application misbehaving | build |
+| `revenant` | an on-disk stage left by an older, different haru-pack | run |
+| `quotamaster` | target storage hostility — noexec, full, read-only, cgroup | run |
+| `packrat` | payload extremes — enormous files, fifos, absurd file counts | build |
+| `tourist` | the artifact on a platform that is not its own | run |
+| `auditor` | credential-shaped files where the payload builder will see them | build |
+| `archivist` | a build that must be byte-reproducible | build |
+
+Three of them also own **explicit cases**, because their value is a property of an artifact
+rather than a condition to survive — *"these two builds are identical"* and *"no ELF object in
+a Windows payload"* are things to check, not things to endure:
+
+- **`archivist`** builds the same input twice and compares payload bytes, naming the first
+  differing member and why (`date_time`, `external_attr`, or content).
+- **`auditor`** plants every credential shape the ignore list claims to cover and then **greps
+  the finished binary** for each planted value. Stronger than scanning zip members, which
+  cannot see a leak via the manifest, a Nim literal, or a warmed uv cache.
+- **`crosseyed`** reads the payload of a foreign-target build and checks ELF `e_machine` and
+  wheel tags. A Windows payload cannot be *run* here, but it can be *read* — which is what
+  makes the check possible without a second machine.
+
+### quotamaster needs docker, and says so
+
+Some target hostility cannot be faked in-process. A **noexec mount** is the clearest case:
+staging writes an interpreter and then execs it, so a cache on a noexec filesystem fails at
+`exec` with `EACCES`. `/tmp` is noexec on any hardened host and CIS benchmarks recommend it —
+and `mount(2)` needs privileges this harness should never ask for.
+
+So those four cases run the artifact inside a container where docker chooses the mount options:
+`--tmpfs /cache:noexec`, a 24 MB cache filesystem, `--read-only` rootfs, and a 512 MB cgroup
+cap. The image is a stock glibc base (`debian:12-slim`), which keeps the case honest about what
+the binary actually requires of a host. A missing docker or image is reported as a **skip**,
+not a pass.
+
+The cgroup case is worth its own note: a cgroup limit kills on the OOM path rather than failing
+an allocation, so the process takes `SIGKILL` with no traceback and no message. That is a
+genuinely different failure from the `RLIMIT_AS` case, and `rc 137` with empty output must not
+be classified as a silent success.
+
+## Where the ledger lives
+
+```
+/home/you/code/haru-pack-busybody-findings.jsonl     <- beside the MAIN checkout
+```
+
+Beside the checkout, never inside it — a file in the repo is caught by `git stash`, by
+worktree switches and by branch changes, which loses history exactly when you are hopping
+branches to investigate. That is lotek's reasoning and it holds here.
+
+"Beside the checkout" has to mean the **main** one. Resolving it relative to `__file__` put
+the ledger at `.claude/worktrees/<name>-busybody-findings.jsonl` when run from a worktree —
+inside the directory that gets deleted when the worktree is removed, which defeats the whole
+point. A week of findings would vanish with whichever branch happened to be last.
+
+`git rev-parse --git-common-dir` is the authoritative answer: it reports the main
+repository's `.git` from a linked worktree and its own from a normal checkout, so one call
+covers both. The path fallback (`<main>/.claude/worktrees/<name>` to `<main>`) exists only
+for a source tree that is not a git checkout, and it matches `.claude/worktrees` as a *pair*
+scanned right-to-left — a checkout can itself live under some other `.claude`, and taking
+the first match resolves to the wrong tree entirely.
+
+Override with `HARUPACK_BUSYBODY_LEDGER` — a fixed location is right for the default and
+wrong as the only option, not least because the tests need somewhere disposable.
+
+## Running it wide
+
+```sh
+python tools/busybody.py --fixtures top25 --tier thick --jobs 8
+```
+
+Measured on a 20-core box, top-25 at tier=thick, 37 cases:
+
+| jobs | wall clock | result |
+|---|---|---|
+| 1 | 389.9 s | 37/37 behaved as expected |
+| 4 | 142.1 s | 37/37 behaved as expected |
+| 8 | 70.5 s | 37/37 behaved as expected |
+
+**Identical outcomes at all three widths is the point; the speedup is only the reason to
+bother.** A harness whose results depend on how many workers it used has no results — every
+finding becomes "is that real, or was the box just busy?"
+
+Default is 4, cap is 8. The cap is not a shrug: each worker stages a real interpreter (peak
+452 MB measured) and spawns processes with their own rlimits, and past 8 the timing-sensitive
+cases start reporting the load rather than the product.
+
+### Four cases never share the machine
+
+`killed_mid_stage`, `two_cold_starts_at_once`, `interrupted_while_the_app_runs` and
+`terminated_mid_run` are marked `serial=True` and run in their own pass afterwards. Each
+sleeps for a fixed interval and then signals — they are asking *where had the process got to
+after 0.7 seconds?*, and the answer changes when seven other cases are competing for CPU.
+
+Marking a case serial costs wall clock. Not marking one that needs it costs a flaky result
+that reads as a regression, which is worse.
+
+### One code path
+
+`run_one()` executes a case. The parallel pass hands work items to a pool; the serial pass
+calls the same function inline. Two implementations would drift, and the drift shows up as
+"it only fails under `--jobs 8`" — the least debuggable shape available.
+
+The journal and the findings ledger have exactly one writer: the parent. Workers return
+records and never touch shared state, which keeps the fsync-per-line contract that makes an
+interrupted run readable. Results come back through ordered `imap`, not `imap_unordered`, so
+two runs of the same sweep produce comparable journals — that comparability is what makes the
+fingerprint census reproducible rather than merely repeatable.
+
+`--keep` forces one worker: it retains every work directory, 131 GB for a top-25 sweep, and
+running wide only makes that peak arrive sooner. mpire is a dev-group dependency; without it
+the sweep runs serially and says so.
+
+## When the box fails, not the product
+
+A 925-run sweep on 2026-09-10 reported **470 findings**. All of them were one disk quota.
+
+The harness wrote work directories into `/tmp`, which on this machine carries `usrquota`
+with a 24 GiB per-user ceiling. At case 168 the launcher started failing with
+`errno: 122 Disk quota exceeded`, and every case after that — across all twenty remaining
+fixtures — recorded that failure under whichever persona happened to be running. Three
+distinct defects, all in one event:
+
+1. **Work dirs were freed only at the end of the run.** The reaper tracked all 925 and
+   removed them in the run-level `finally`. That was itself the fix for an earlier
+   leak-on-raise bug, and it traded a small leak for a large one: 925 thick-tier work dirs
+   at ~145 MB each needs about 100 GB. 168 x 145 MB is 24 GiB — exactly where it died.
+2. **The failure was scored per case.** One environment failure became thirty different
+   "findings" per fixture, and 470 rows went into the findings ledger.
+3. **`--analyze` called it divergence.** It reported *30 of 37 cases diverged by fixture*.
+   None had.
+
+What made it readable in seconds was the divergence matrix itself: the same five fixtures
+passed every single case, and no property of a Python package produces that. Those five were
+the five built before the quota ran out. The tool found its own run invalid — which is the
+point of having it, and it should not have needed to.
+
+### What changed
+
+| | |
+|---|---|
+| `reaper.release(work)` | frees each case's scratch immediately; `reap()` stays as the backstop for a raise or Ctrl-C |
+| `infra_failure_reason()` | errno 122/28 aborts the sweep instead of scoring it |
+| ledger | an aborted run writes **nothing** — a ledger full of one failure in thirty costumes is worse than an empty one |
+| `--work-root DIR` | put scratch on a filesystem with room |
+| `--scratch-cap-gb N` | abort on a leak at a number you chose, default 8 |
+| `--analyze` | an aborted run prints `THE BOX FAILED, NOT THE PRODUCT` and labels the fake divergence |
+
+### `df` is not the ceiling
+
+This is the part worth remembering. `df` said 31 GiB free on `/tmp`, and the next write
+failed at 24 GiB, because a **per-user quota is invisible to `statvfs`**. A preflight that
+only checked free space would have reported plenty of room and been wrong.
+
+So the harness prints the scratch mount's quota options at the start of every sweep:
+
+```
+scratch    : /tmp  (31.2 GiB free per statvfs)
+             /tmp has a quota (usrquota). The number above is NOT the ceiling —
+             a per-user quota is invisible to statvfs. Use --work-root to move scratch
+             somewhere unquota'd if a long sweep dies with errno 122.
+```
+
+Recovering an already-poisoned run: `--analyze <RUN>` now labels it, and the ledger rows can
+be dropped by `run` id. The run's journal is append-only, so the honest repair is to *append*
+an `infra_failure` annotation rather than edit the original records.
 
 Exit codes are a contract: `0` clean, `1` findings, `130` interrupted. **An interrupt beats
 findings** — a run you killed did not finish, and reporting its partial findings as a
@@ -182,7 +625,7 @@ stops diverging, recalibrate — do not nudge it.
 **"The launcher crashed" and "the app crashed" are different findings.** Once calibrated, the
 case diverged and then reported the divergence as `CRASHED` — a haru-pack defect — because the
 classifier could not tell a numpy `MemoryError` from a Nim traceback. There is now an
-`APP-CRASHED` outcome and a `blame` field (`launcher` / `app` / `unknown`), split cheaply on
+`APP-CRASHED` outcome and a `blame` field (`launcher` / `app` / `os` / `harness`), split cheaply on
 the fact that the launcher prefixes every diagnostic with `haru-pack:`. `APP-CRASHED` is
 deliberately **not** fatal: an application declining a limit a persona imposed on purpose is
 behaving correctly, and a case has to opt into accepting it.

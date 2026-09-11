@@ -78,7 +78,14 @@ def test_busybody_cannot_contaminate_the_tree_it_tests():
     assert "_CONTAMINATING" in src and "VIRTUAL_ENV" in src, (
         "busybody no longer scrubs environment-adopting variables"
     )
-    assert 'mkdtemp(prefix=f"bb-{c[\'name\']}-")' in src, (
+    # The single mkdtemp lives in run_one(), which both the parallel and serial passes use.
+    # dir=None means $TMPDIR, which is outside the checkout.
+    assert 'mkdtemp(prefix=f"bb-{case_name}-",' in src and "dir=work_root_str or None" in src, (
         "busybody's work directories are back inside the repository; uv will discover "
         "haru-pack's own project from them"
+    )
+    # --work-root was added so a long sweep can escape a quota'd /tmp (INV-CHAOS-05). It is
+    # also a new way to point scratch straight back into the repository, so it is refused.
+    assert "REPO in WORK_ROOT.parents" in src, (
+        "--work-root can aim scratch inside the repo, reinstating the contamination bug"
     )

@@ -15,10 +15,12 @@ partial findings as a completed verdict is the same lie facing the other way."
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
 import time
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -356,3 +358,491 @@ def test_there_are_app_level_personas_distinct_from_launcher_ones():
     assert app_level <= personas, f"missing app-level personas: {app_level - personas}"
     for name in app_level:
         assert any(c["persona"] == name for c in bb.CASES), f"{name} has no cases"
+
+
+# ---------------------------------------------------------------- analysis is a tool
+
+def _analyze():
+    spec = importlib.util.spec_from_file_location(
+        "busybody_analyze", REPO / "tools" / "busybody_analyze.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _journal(tmp_path, cases):
+    """Write a minimal run directory: one `started`, the cases, one `finished`."""
+    run = tmp_path / "run-synthetic"
+    run.mkdir()
+    lines = [{"kind": "started", "total": len(cases), "planned": []}]
+    lines += cases
+    lines += [{"kind": "finished"}]
+    (run / "journal.jsonl").write_text(
+        "\n".join(json.dumps(x) for x in lines) + "\n")
+    return run
+
+
+def _case(name, fixture, outcome="RAN", ok=True):
+    return {"kind": "case", "name": name, "fixture": fixture, "persona": "p",
+            "outcome": outcome, "ok": ok, "seconds": 1.0,
+            "fingerprint": f"{name}:{outcome}"}
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_a_sweep_that_confirmed_one_fact_many_times_says_so(tmp_path):
+    """The number that makes a sweep look like more assurance than it bought.
+
+    Twenty-five fixtures answering identically is one fact learned twenty-five times.
+    Reporting only the run count hides that; the census has to state it.
+    """
+    a = _analyze()
+    cases = [_case("c1", f"fixture-{i}") for i in range(25)]
+    cases += [_case("c2", f"fixture-{i}") for i in range(25)]
+    got = a.analyze_run(_journal(tmp_path, cases))
+
+    assert len(got["cases"]) == 50
+    assert got["diverged"] == {}, "no case was given a differing outcome"
+    assert len(got["fingerprints"]) == 2, "two cases, one answer each"
+
+    text = a.format_analysis(got)
+    assert "NOTHING DIVERGED" in text, (
+        "a 50-run sweep with 2 distinct results must say the sweep bought nothing"
+    )
+    assert "50 case run(s) produced 2 distinct result(s)" in text
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_a_case_whose_answer_depends_on_the_package_is_named(tmp_path):
+    """The other half: when a sweep DOES earn its cost, the report says which cases earned it
+    — by name and by fixture, so the reader can go look."""
+    a = _analyze()
+    cases = [_case("flat", f"fixture-{i}") for i in range(4)]
+    cases += [_case("varies", "fixture-light", "RAN"),
+              _case("varies", "fixture-heavy", "APP-CRASHED", ok=False)]
+    got = a.analyze_run(_journal(tmp_path, cases))
+
+    assert set(got["diverged"]) == {"varies"}, (
+        f"expected only `varies` to diverge, got {sorted(got['diverged'])}"
+    )
+    text = a.format_analysis(got)
+    assert "NOTHING DIVERGED" not in text
+    assert "varies" in text and "APP-CRASHED" in text
+    assert "heavy" in text, "the report must name the fixture that differed"
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_an_interrupted_run_is_not_reported_as_a_clean_sweep(tmp_path):
+    """Partial results read as complete ones are how a killed sweep becomes a green light."""
+    a = _analyze()
+    run = tmp_path / "run-partial"
+    run.mkdir()
+    (run / "journal.jsonl").write_text("\n".join(json.dumps(x) for x in [
+        {"kind": "started", "total": 100, "planned": []},
+        _case("c1", "fixture-a"),
+        {"kind": "interrupted", "detail": "SIGINT"},
+    ]) + "\n")
+    got = a.analyze_run(run)
+    assert got["state"] == "INTERRUPTED"
+    text = a.format_analysis(got)
+    assert "INTERRUPTED" in text
+    assert "1 of 100 planned" in text
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_the_analysis_questions_are_reachable_from_the_command_line():
+    """A tool nobody can invoke is a private one-liner with extra steps."""
+    src = (REPO / "tools" / "busybody.py").read_text()
+    for flag in ("--analyze", "--calibrate"):
+        assert f'"{flag}"' in src, f"{flag} is not wired into the CLI"
+    assert "format_analysis" in src, "--analyze must use the shared formatter"
+
+
+@pytest.mark.invariant("INV-CHAOS-04")
+def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
+    """A fingerprint folds in the diagnostic TEXT, so the same outcome with two different
+    messages counts as two distinct results. That granularity is right for triage and wrong
+    for "did the sweep buy anything" — and conflating them made the census print
+    "0 case(s) DIVERGED" on a sweep where nothing had.
+    """
+    a = _analyze()
+    cases = []
+    for i in range(25):
+        c = _case("c1", f"pkg{i}")
+        c["fingerprint"] = f"fp-{i}"      # 25 fingerprints, one outcome
+        cases.append(c)
+    got = a.analyze_run(_journal(tmp_path, cases))
+
+    assert len(got["fingerprints"]) == 25
+    assert got["diverged"] == {}, "the outcome was RAN on every fixture"
+
+    text = a.format_analysis(got)
+    assert "NOTHING DIVERGED" in text
+    assert "0 of" not in text, "a sweep where nothing diverged must not claim 0 diverged"
+    assert "fingerprints against 1 case(s)" in text, (
+        "the fingerprint/outcome gap should be explained, not hidden"
+    )
+
+
+def _module_code(path):
+    """A module's source with every comment and docstring removed.
+
+    Source-shape assertions are only as good as what they read. A comment that MENTIONS a
+    guard makes a "the guard is present" assertion pass with the guard deleted — which is
+    the exact trap tests/test_sources.py documents. `ast.unparse` drops comments, and the
+    docstrings are stripped explicitly.
+    """
+    tree = ast.parse(pathlib.Path(path).read_text())
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            node.body = body[1:]
+    return ast.unparse(tree)
+
+
+# ------------------------------------------------- the box failing is not a product finding
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_a_disk_quota_failure_is_recognised_as_the_environment():
+    """No persona imposes capacity limits.
+
+    `hoarder` starves file descriptors, address space and TMPDIR writability — never disk
+    space. So errno 122 or 28 coming out of a case means the box gave up, and every result
+    after it is the same failure in a different costume.
+    """
+    bb = _load_busybody()
+    assert bb.infra_failure_reason(
+        {"stderr": "haru-pack: IOError: errno: 122 `Disk quota exceeded`"})
+    assert bb.infra_failure_reason({"stderr": "OSError: [Errno 28] No space left on device"})
+    assert bb.infra_failure_reason({"stdout": "", "stderr": ""}) == ""
+    assert bb.infra_failure_reason(
+        {"stderr": "haru-pack: no payload appended to this executable"}) == "", (
+        "an ordinary launcher refusal must not be mistaken for an environment failure"
+    )
+    # the returned reason is the offending line, so the abort message is actionable
+    assert "122" in bb.infra_failure_reason(
+        {"stderr": "line one\nharu-pack: IOError: errno: 122 `Disk quota exceeded`\nlast"})
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_an_environment_failure_aborts_the_sweep_and_spares_the_ledger():
+    """Red-path, at the call sites — the checks are worthless if nothing invokes them.
+
+    Deleting the `infra_failure_reason` guard scores the box's failure as chaos findings.
+    Reverting `if bad and not aborted` to `if bad` writes them to the ledger permanently.
+    """
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "infra_failure_reason(rec)" in src, (
+        "every record must be tested for an environment failure as it is collected"
+    )
+    assert "raise InfraFailure(" in src, "detection without an abort is just a log line"
+    assert "if bad and (not aborted):" in src, (
+        "a run aborted on an environment failure must not write to the findings ledger"
+    )
+    assert "jr.write('infra_failure'" in src, (
+        "the journal must record WHY the run stopped, or --analyze cannot tell"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_scratch_is_freed_per_case_not_at_the_end_of_the_run(tmp_path):
+    """The leak with a delayed fuse.
+
+    Tracking every work dir and reaping only in the run-level `finally` was itself a fix for
+    a leak-on-raise bug, and it traded a small leak for a large one: 925 thick-tier work dirs
+    at ~145 MB each is about 100 GB. On this box the 24 GiB /tmp quota stopped it at case
+    168 — 168 x 145 MB, almost exactly.
+    """
+    dirs = []
+    reaper = bl.Reaper(log=lambda _m: None)
+    for i in range(4):
+        d = tmp_path / f"work{i}"
+        d.mkdir()
+        (d / "payload").write_bytes(b"x" * 4096)
+        dirs.append(reaper.track(d))
+
+    for d in dirs[:3]:
+        reaper.release(d)
+
+    live = [d for d in dirs if d.exists()]
+    assert live == [dirs[3]], (
+        f"released dirs must be gone immediately, still on disk: {live}"
+    )
+    assert reaper.reaped == 3 and reaper.freed >= 3 * 4096
+
+    reaper.reap()          # the backstop still takes the remainder
+    assert not any(d.exists() for d in dirs)
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_release_leaves_held_directories_alone(tmp_path):
+    """A finding's preserved artifacts must survive the very mechanism that frees scratch."""
+    reaper = bl.Reaper(log=lambda _m: None)
+    keep = reaper.track(tmp_path / "keep")
+    keep.mkdir()
+    (keep / "evidence").write_bytes(b"y" * 128)
+    reaper.hold(keep)
+
+    assert reaper.release(keep) == 0
+    assert keep.exists(), "held directories are the artifacts of a finding; never released"
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_the_case_loop_releases_scratch_and_the_finally_is_only_the_backstop():
+    """Deleting the per-case release call reinstates the 100 GB sweep. Nothing else catches
+    it, because the totals reported at the end are identical either way."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "free_dir(work)" in src, (
+        "each completed case must free its own scratch; the run-level reap() is a backstop"
+    )
+    assert "reaper.reap()" in src, "the backstop must still exist for a raise or a Ctrl-C"
+    assert "SCRATCH_CAP_GB" in src, (
+        "a leak should stop the sweep at a number the operator chose"
+    )
+    # A worker process cannot share the parent's Reaper, so both go through one function.
+    # Two copies would drift into a leak that only appears at one --jobs setting.
+    led = _module_code(REPO / "tools" / "busybody_ledger.py")
+    assert "def free_dir(" in led and "size = free_dir(d)" in led, (
+        "Reaper.release and the parallel worker must share one implementation"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_a_quota_is_invisible_to_df_and_the_report_says_so(tmp_path):
+    """The trap that made this hard to see: /tmp reported 31 GiB free and refused the next
+    write at 24 GiB, because the mount carries `usrquota`."""
+    bb = _load_busybody()
+    lines = bb.work_root_report(tmp_path)
+    assert lines and "free per statvfs" in lines[0]
+
+    mounts = pathlib.Path("/proc/mounts").read_text()
+    if "usrquota" in mounts or "prjquota" in mounts:
+        quota_mount = next(
+            ln.split()[1] for ln in mounts.splitlines()
+            if len(ln.split()) >= 4 and ("usrquota" in ln.split()[3]
+                                         or "prjquota" in ln.split()[3]))
+        text = " ".join(bb.work_root_report(pathlib.Path(quota_mount)))
+        assert "quota" in text and "NOT the ceiling" in text, (
+            f"{quota_mount} has a quota; the report must not present statvfs as the limit"
+        )
+
+
+@pytest.mark.invariant("INV-CHAOS-05")
+def test_an_aborted_run_is_never_read_as_a_verdict(tmp_path):
+    """--analyze must refuse to let a poisoned run look like results. The real one reported
+    "30 of 37 cases DIVERGED by fixture"; none had. The five fixtures that passed everything
+    were the five built before the quota ran out."""
+    a = _analyze()
+    run = tmp_path / "run-aborted"
+    run.mkdir()
+    recs = [{"kind": "started", "total": 925, "planned": []}]
+    # two fixtures that ran clean, then one poisoned by the environment
+    recs += [_case("c1", "early", "RAN"), _case("c1", "late", "REFUSED", ok=False)]
+    recs += [{"kind": "infra_failure", "completed": 2,
+              "detail": "landlord/hostile_umask on idna: errno: 122 `Disk quota exceeded`"}]
+    (run / "journal.jsonl").write_text("\n".join(json.dumps(x) for x in recs) + "\n")
+
+    got = a.analyze_run(run)
+    assert got["state"] == "ABORTED (environment)"
+    text = a.format_analysis(got)
+    assert "THE BOX FAILED, NOT THE PRODUCT" in text
+    assert "Discard this section" in text, (
+        "the divergence a quota failure fabricates must be labelled as fabricated"
+    )
+    assert "122" in text, "the abort reason belongs in the report, not just the journal"
+
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_every_non_ran_result_names_who_failed(tmp_path):
+    """A "?" in the blame column is a hole in triage, not a finding.
+
+    The 2026-09-10 top-25 sweep printed 25 of them. All were `not_executable`, whose OS
+    refusal comes back through run_exe's OSError branch — which returned early without
+    setting blame. Four parties exist and the two that this cannot infer from output
+    (`os`, `harness`) have to be named by whoever knows.
+    """
+    bb = _load_busybody()
+
+    victim = tmp_path / "noexec"
+    victim.write_bytes(b"\x7fELF not really")
+    victim.chmod(0o644)
+    r = bb.run_exe(victim, tmp_path, env={"PATH": "/usr/bin:/bin"}, timeout=20)
+    assert r["outcome"] == "REFUSED"
+    assert r.get("blame") == "os", (
+        f"the kernel refused the exec; blame was {r.get('blame')!r}. A missing blame shows "
+        f"up in --analyze as a '?' bucket."
+    )
+
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "'blame': 'harness'" in src, (
+        "a CASE-ERROR is busybody breaking; it must never read as a statement about "
+        "haru-pack"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-03")
+def test_the_blame_vocabulary_is_closed():
+    """Four values, and the docstring that defines them lists exactly those four. An
+    undocumented fifth is how a triage column turns back into free text."""
+    bb = _load_busybody()
+    doc = bb.blame.__doc__ or ""
+    for party in ("launcher", "app", "os", "harness"):
+        assert party in doc, f"{party} is produced but not documented in blame()"
+    assert bb.blame("", "haru-pack: nope") == "launcher"
+    assert bb.blame("", "Traceback (most recent call last):") == "app"
+    assert bb.blame("", "") == "unknown"
+
+
+# ---------------------------------------------------------------- parallel execution
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_cases_that_measure_time_never_share_the_machine():
+    """A case that sleeps for a fixed interval and then signals is asking "where had the
+    process got to after 0.7 s?" — and the answer changes when seven other cases are
+    competing for CPU. Those cases run in a separate serial pass.
+
+    Red-path: drop `serial=True` from any of them and the case starts reporting the load
+    instead of the product, intermittently, in a way that reads as a regression.
+    """
+    bb = _load_busybody()
+    serial = {c["name"] for c in bb.CASES if c.get("serial")}
+    expected = {"killed_mid_stage", "two_cold_starts_at_once",
+                "interrupted_while_the_app_runs", "terminated_mid_run"}
+    assert expected <= serial, f"timing-sensitive cases not marked serial: {expected - serial}"
+
+    # and the marking has to be justified by the code, not just declared
+    import ast
+    import inspect
+    for name in expected:
+        fn = next(c["fn"] for c in bb.CASES if c["name"] == name)
+        body = ast.unparse(ast.parse(inspect.getsource(fn).lstrip()))
+        assert ("time.sleep" in body or "Popen" in body), (
+            f"{name} is marked serial but does not appear to measure time; either the mark "
+            f"is stale or the case changed"
+        )
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_the_worker_count_is_capped_not_merely_defaulted():
+    """Each worker stages a real interpreter (measured peak 452 MB) and spawns processes with
+    their own rlimits. Past the cap the timing cases measure the load."""
+    bb = _load_busybody()
+    assert bb.JOBS_DEFAULT == 4
+    assert bb.JOBS_MAX == 8
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "min(a.jobs, JOBS_MAX)" in src, "--jobs must be clamped, not trusted"
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_one_code_path_runs_a_case_whether_parallel_or_serial():
+    """The parallel pass hands work items to a pool; the serial pass calls the same function
+    inline. Two implementations would drift, and the drift would show up as "it only fails
+    under --jobs 8", which is the least debuggable shape available."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert src.count("def run_one(") == 1, "run_one must have exactly one definition"
+    assert "run_one(fname, str(exe)" in src, "the serial pass must call run_one inline"
+    assert "pool.imap(run_one, items)" in src, (
+        "ordered imap: an unordered journal is not byte-comparable between two runs of the "
+        "same sweep, which is what makes the fingerprint census reproducible"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_keeping_artifacts_forces_serial():
+    """--keep retains every work dir — 452 MB each, 131 GB for a top-25 sweep. Running 8
+    wide makes that peak arrive 8x sooner without helping anyone read them."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "if a.keep and jobs > 1:" in src, "--keep must downgrade to one worker"
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_a_missing_optional_dependency_does_not_stop_a_sweep():
+    """mpire is in the dev group. --jobs is a convenience for whoever is iterating on the
+    harness; a missing optional package must degrade to serial, not fail at the point where
+    the work would have started."""
+    src = _module_code(REPO / "tools" / "busybody.py")
+    assert "except ImportError" in src and "return None" in src
+    assert "running serially" in src, (
+        "falling back silently would make a 6x slowdown look like the machine"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-06")
+def test_the_worker_does_not_write_shared_state():
+    """The journal and the findings ledger have exactly one writer: the parent. A worker that
+    appended to the journal would interleave partial lines and break the fsync-per-line
+    contract that makes an interrupted run readable (INV-CHAOS-01)."""
+    bb = _load_busybody()
+    import ast
+    import inspect
+    body = ast.unparse(ast.parse(inspect.getsource(bb.run_one).lstrip()))
+    for forbidden in ("jr.write", "ledger_append", "jr.beat"):
+        assert forbidden not in body, (
+            f"run_one calls {forbidden} from a worker process; the parent is the only writer"
+        )
+
+
+# ---------------------------------------------------------------- where the ledger lives
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_the_ledger_is_outside_every_worktree():
+    """The findings ledger has to outlive the branch that produced the findings.
+
+    Resolving it relative to __file__ put it at
+    `.claude/worktrees/<name>-busybody-findings.jsonl` when run from a worktree — inside the
+    directory that gets deleted when the worktree is removed, which defeats the entire
+    reason for keeping it out of the repo. A week of findings would vanish with whichever
+    branch happened to be last.
+
+    Red-path: resolve from `Path(__file__).parent.parent` again and this fails whenever the
+    suite runs in a worktree, which is where it usually runs.
+    """
+    where = bl.ledger_path()
+    assert ".claude" not in where.parts, (
+        f"the ledger is inside .claude ({where}); it dies with the worktree"
+    )
+    assert "worktrees" not in where.parts, f"the ledger is inside a worktree: {where}"
+    assert where.name.endswith("-busybody-findings.jsonl")
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_the_ledger_sits_beside_the_main_checkout_not_the_linked_one():
+    """Same directory whichever worktree you are in, so `--triage` sees one history."""
+    here = REPO
+    main = bl.main_checkout(here)
+    assert ".claude" not in main.parts, f"main_checkout returned a worktree: {main}"
+    assert (main / ".git").exists(), (
+        f"{main} does not look like the main checkout (no .git)"
+    )
+    if ".claude" in here.parts:
+        assert main != here, (
+            "running from a worktree, but main_checkout returned the worktree itself"
+        )
+    assert bl.ledger_path().parent == main.parent
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_the_ledger_location_is_still_overridable(monkeypatch, tmp_path):
+    """A fixed location is right for the default and wrong as the only option: the tests
+    themselves must be able to write somewhere disposable."""
+    target = tmp_path / "elsewhere.jsonl"
+    monkeypatch.setenv("HARUPACK_BUSYBODY_LEDGER", str(target))
+    assert bl.ledger_path() == target
+
+
+@pytest.mark.invariant("INV-CHAOS-01")
+def test_main_checkout_falls_back_to_the_path_rule_without_git(tmp_path):
+    """The fallback is for a source tree that is not a git checkout at all. Worktrees this
+    project creates live in <main>/.claude/worktrees/<name>, so the main checkout is the
+    parent of `.claude`."""
+    fake = tmp_path / "proj" / ".claude" / "worktrees" / "feature"
+    fake.mkdir(parents=True)
+    # no git repository anywhere above tmp_path, so git rev-parse fails and the rule applies
+    assert bl.main_checkout(fake) == tmp_path / "proj"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert bl.main_checkout(plain) == plain

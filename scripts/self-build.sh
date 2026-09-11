@@ -33,7 +33,12 @@ die()   { red "self-build: $*"; exit 1; }
 
 OUT="$ROOT/dist/self"
 TARGETS="linux-x86_64 windows-x86_64"
-PYVER="3.12"
+# Match the project's own default rather than hardcoding a number that drifts. haru-pack
+# declares `requires-python = ">=3.9"`, so discovery would resolve 3.9 — which has no pinned
+# interpreter and refuses (INV-SUPPLY-01). Naming the default explicitly is what keeps this
+# working when the default moves; it moved 3.12 -> 3.13 on 2026-09-10.
+PYVER="$(sed -n 's/.*or "\([0-9]\+\.[0-9]\+\)"$/\1/p' src/haru_pack/build.py | head -1)"
+[ -n "$PYVER" ] || PYVER="3.13"
 
 while [ $# -gt 0 ]; do
     case "$1" in

@@ -26,11 +26,21 @@ jobs:
       - run: uv pip install -e . pytest
 
       - name: lint
-        # `uvx ruff` (unpinned) downloads whatever ruff released most recently, whose
-        # DEFAULT rule set grows between versions — so this step failed on unchanged code
-        # for days while the same commit passed the local gate. The pin lives in
-        # [dependency-groups] dev and nowhere else (INV-CI-01).
-        run: uv run --group dev ruff check .
+        # Unpinned `uvx ruff` downloads whatever ruff released most recently, whose DEFAULT
+        # rule set grows between versions — so this step failed on unchanged code for days
+        # while the same commit passed the local gate (INV-CI-01).
+        #
+        # The pin lives in [dependency-groups] dev and nowhere else, and is READ from there
+        # rather than repeated here. It is run through `uvx`, in its own throwaway
+        # environment, deliberately: `uv run --group dev` resolves and installs into the
+        # project environment, which would mean the linter mutates the very env the tests
+        # below run in. The first version of this step did exactly that and broke
+        # `typer.testing` for the test job.
+        run: |
+          pin="$(sed -n 's/.*"ruff==\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+          test -n "$pin" || { echo "::error::no exact ruff== pin in pyproject.toml"; exit 1; }
+          echo "linting with pinned ruff $pin"
+          uvx "ruff@$pin" check .
 
       - name: invariant contract
         # Runs first and on its own so a linkage failure is legible in the log rather

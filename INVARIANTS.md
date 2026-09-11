@@ -85,8 +85,55 @@ socket of its own. Do not read a green offline check as "this binary makes no ne
 Note: Cross-compiled thick builds take the `warm_cache_windows` path, which resolves wheels
 for the target platform without executing them. Script staging runs the target interpreter,
 so it is host-target only.
+Note: Verified 2026-09-10 by busybody's `examiner` persona, which runs a packaged library's
+OWN test suite from inside the thick binary with the network denied at the process level:
+
+    numpy     2175 passed, 3 skipped, 2 xfailed in 26.33s   (100.8 MB binary)
+    certifi      3 passed in 0.03s                          ( 63.7 MB binary)
+
+This is a stronger statement than a hello-world fixture can make. `import numpy` succeeds
+long before numpy is usable — the failure modes of a bundled native package live in the
+parts an import never touches: a lazily-loaded `.so`, an f2py-generated extension, a
+packaged data file. Checked across all 25 top-PyPI packages, only these two ship a runnable
+suite in the wheel; the other 23 would need sdists, which is a second acquisition path for
+no extra assurance.
+Note: A vacuous pass is prevented twice over. The generated script verifies the test paths
+exist and exits 2 with `PAYLOAD INCOMPLETE` if they do not, and pytest itself returns 5
+rather than 0 when it collects nothing. The success marker is printed only on rc == 0.
 Territory: src/haru_pack/build.py, src/haru_pack/bundle.py, src/haru_pack/discovery.py,
-tests/test_tiers_offline.py, tools/flex-run.py
+tests/test_tiers_offline.py, tests/test_examiner_fixtures.py, tools/flex-run.py
+
+### INV-TIER-03
+Status: active
+Statement: A payload built for a foreign target contains only objects for that target. No
+host ELF object reaches a Windows payload; no x86-64 object reaches an aarch64 payload.
+Actors: whoever runs `--target linux-aarch64` and deploys the result to a Raspberry Pi, and
+whoever runs `--target windows` and emails the exe to a customer.
+Assets: the meaning of `--target`. A cross-built binary that carries host objects fails on
+first run on the machine it was explicitly built for — after the build reported success, and
+after the artifact has been signed and shipped. The operator has no reason to suspect it and
+no way to see it without unpacking the binary.
+Red-path: A payload whose members include `\x7fELF` objects under `--target windows`, or ELF
+objects with `e_machine` 0x3E (x86-64) under `--target linux-aarch64`. Both are checked
+statically by busybody's `crosseyed` cases, which read the payload rather than running it —
+a Windows payload cannot be executed on Linux, but it can be inspected, and that is what
+makes the check possible without a second machine. `tests/test_compose.py` pins the
+`e_machine` decoding, because getting 0x3E and 0xB7 the wrong way round would make the
+aarch64 check pass on an x86 payload.
+Source: 2026-09-10, from the persona brainstorm. Cross-target correctness had four tests in
+`tests/test_targets.py` covering target PARSING and none covering payload CONTENTS, so
+nothing anywhere verified that a foreign payload held foreign objects. uv's
+`--python-platform` resolves wheels for the target without executing them, which is the
+right mechanism; the risk is any path that stages with the host interpreter instead.
+Note: The Raspberry Pi is a stated deployment target for this project, which is why the
+aarch64 case is not hypothetical. ARM Linux is a target, not a build host.
+Note: `tourist` covers the adjacent question — what happens when a foreign artifact IS
+executed here — and its honest scope is "fails cleanly". A real foreign run needs a real
+foreign machine; `openclaw` is the ARM one on hand.
+Territory: src/haru_pack/targets.py, src/haru_pack/bundle.py, tools/busybody.py,
+tests/test_compose.py, tests/test_targets.py
+
+---
 
 ### INV-TIER-02
 Status: active
@@ -204,6 +251,220 @@ per case. App-level personas are the only ones for which `--fixtures top25` buys
 and even then only 2 of 13 diverged — the bundled interpreter absorbs most environmental
 difference.
 Territory: tools/busybody.py, tests/test_busybody_ledger.py
+
+---
+
+### INV-CHAOS-04
+Status: active
+Statement: Every question asked of a chaos run is answerable by a tool that reads the run's
+own records, and the report states how many distinct results the run produced — not only how
+many runs it performed.
+Actors: whoever reads a sweep six months from now, with no model available and no memory of
+how the numbers were computed.
+Assets: whether the harness's output means anything to a human. A sweep that reports
+"925/925 passed" and nothing else reads like 925x the assurance of a single run. It is not,
+if every case answered identically 925 times, and the difference is not visible without
+computing it.
+Red-path: Delete the divergence computation from `analyze_run`, or the FINGERPRINT CENSUS
+from `format_analysis`, and a 25-fixture sweep reports a large run count with no way to see
+that it confirmed the same handful of facts once per fixture. Two claiming tests feed
+`analyze_run` synthetic journals — one where every fixture agrees, one where they do not —
+and assert the report says which happened.
+Source: 2026-09-10. Every analysis in docs/BUSYBODY.md was first produced by hand with
+throwaway one-liners over `journal.jsonl`. That works exactly once: it does not survive the
+person who wrote it, cannot be re-run to compare, and costs whoever repeats it — a human
+scrolling 900 lines of JSONL, or a model ingesting them as tokens — for an answer the machine
+computes in a millisecond.
+Note: `--calibrate` is the same principle applied to thresholds. It measures the band and
+prints a number to paste, with the per-fixture measurements to paste beside it, so the next
+person recalibrates instead of nudging. It also states that the number is machine-specific.
+Note: This invariant is why `tools/busybody.py --calibrate` exists at all. A comment in the
+source already promised it ("re-run tools/busybody.py --calibrate rather than nudging the
+number") while no such flag existed — a dangling claim of exactly the kind INV-DOC-02 exists
+to catch, found in our own code.
+Territory: tools/busybody_analyze.py, tools/busybody.py, tests/test_busybody_ledger.py
+
+---
+
+### INV-CHAOS-05
+Status: active
+Statement: The harness's own environment failing is never reported as a product finding. A
+run that exhausts scratch space aborts, says the box failed, and writes nothing to the
+findings ledger. And scratch is freed per case, so a long sweep's live footprint stays at
+one case's worth rather than the whole sweep's.
+Actors: whoever reads the ledger. Also whoever runs a 900-case sweep on a machine with a
+quota they have never had reason to think about.
+Assets: the credibility of every finding. A ledger holding 470 rows that are all one disk
+quota wearing thirty persona costumes is worse than an empty ledger — it cannot be triaged,
+and it teaches the reader that busybody findings are noise.
+Red-path: Delete the `infra_failure_reason` check from the case loop and a sweep that runs
+out of room scores the box's failure as chaos findings across every remaining fixture.
+Delete the `reaper.release(work)` call and the sweep holds every work directory until the
+end — about 100 GB for 37 cases x 25 fixtures at the thick tier. Change `if bad and not
+aborted` back to `if bad` and a poisoned run pollutes the ledger permanently. Each has a
+claiming test.
+Source: 2026-09-10, from a real 925-run sweep. It died at case 168 with `errno 122 Disk
+quota exceeded` and reported 470 findings. Three separate defects in one event:
+
+  1. Work dirs were tracked and reaped only in the run-level `finally`. That was itself a
+     fix for an earlier leak-on-raise bug, and it traded a small leak for a large one:
+     168 cases x ~145 MB is 24 GiB, which is exactly the user quota on this box's /tmp.
+  2. The quota failure was classified per case, so one environment failure became thirty
+     different "findings" per fixture.
+  3. `--analyze` reported 30 of 37 cases as having DIVERGED by fixture. They had not. The
+     five fixtures that passed everything were the five built before the quota ran out.
+
+Note: The divergence report was what made the run readable at all — the same five fixtures
+passing every single case is not a pattern any package property produces. The tool found its
+own run invalid, which is the point of having it. It should not have needed to.
+Note: `df` is not the ceiling. This box reported 31 GiB free on /tmp and refused the next
+write at 24 GiB, because the mount carries `usrquota` and a per-user quota is invisible to
+`statvfs`. The harness now prints the mount's quota options at the start of a sweep, and
+`--work-root` moves scratch elsewhere.
+Note: `--scratch-cap-gb` (default 8) aborts on a leak at a number the operator chose rather
+than at whatever the filesystem happens to allow.
+Territory: tools/busybody.py, tools/busybody_ledger.py, tools/busybody_analyze.py,
+tests/test_busybody_ledger.py
+
+---
+
+### INV-CHAOS-06
+Status: active
+Statement: Running the harness in parallel changes how long a sweep takes and nothing else.
+A case that measures elapsed time runs in a serial pass; a case run is executed by one
+function whether it runs in a worker or inline; and the journal has exactly one writer.
+Actors: whoever runs `--jobs 8` to get an answer before lunch, and whoever later has to
+explain why a case only fails at `--jobs 8`.
+Assets: the meaning of an outcome. A harness whose results depend on how many workers it
+used has no results — every finding becomes "is that real, or was the box just busy?"
+Red-path: Drop `serial=True` from `interrupted_while_the_app_runs` (it sleeps 0.7 s and then
+signals, so under load the signal arrives at a different point in startup) and the case
+begins flipping between RAN and REFUSED with no code change. Give the parallel and serial
+passes separate implementations and they drift, surfacing as "only fails under --jobs 8".
+Let a worker call `jr.write` and the journal interleaves partial lines, breaking the
+fsync-per-line contract INV-CHAOS-01 depends on. Each has a claiming test.
+Source: 2026-09-10. Measured on this 20-core box, top-25 tier=thick, 37 cases:
+
+    jobs=1   389.9s    37/37 behaved as expected
+    jobs=4   142.1s    37/37 behaved as expected
+    jobs=8    70.5s    37/37 behaved as expected
+
+Identical outcomes at all three widths is the evidence that matters; the speedup is only
+the reason to bother.
+Note: `JOBS_MAX = 8` is a cap, not a default. Each worker stages a real interpreter — peak
+452 MB measured — and spawns processes with their own rlimits. The ceiling exists because
+past it the timing-sensitive cases start reporting the load rather than the product.
+Note: `--keep` forces one worker. It retains every work directory, which is 131 GB for a
+top-25 sweep, and running wide only makes that peak arrive sooner.
+Note: mpire is a dev-group dependency. Nothing haru-pack ships uses it, and a sweep runs
+serially and says so when it is absent — a missing convenience must not stop the work.
+Note: ordered `imap`, not `imap_unordered`. An unordered journal is not byte-comparable
+between two runs of the same sweep, and that comparability is what makes the fingerprint
+census reproducible rather than merely repeatable.
+Territory: tools/busybody.py, tests/test_busybody_ledger.py
+
+---
+
+### INV-CHAOS-07
+Status: active
+Statement: A declaration that cannot be honoured as written is refused at build time, with a
+message naming both sides of the contradiction. haru-pack never resolves a config conflict
+silently and hands back an artifact whose damage is discovered on the target.
+Actors: whoever edits `haru_pack.toml` — often by copying a block from another project — and
+whoever receives the binary that edit produced.
+Assets: the operator's ability to predict an artifact from its config. Every other guard in
+this file protects the binary at runtime; this one protects the meaning of the build. A
+config wedge that builds cleanly is the worst shape available, because the build is the last
+point at which the person who can fix it is still watching.
+Red-path: Remove the `validate_manifest` call from `_resolve` and `app_subdir = "../x"`
+builds a binary whose entrypoint is outside the payload — measured as
+`can't open file '.../escaped/app.py'` on first run. Remove `validate_encryption` and
+`expires = "2001-01-01"` builds a binary that refuses every run forever. Add a value to
+`CWD_POLICIES` that `main.nim` does not implement and the config accepts a policy the
+launcher silently treats as `launch`. Each has a claiming test, plus a live case in
+busybody's `wedge` persona.
+Source: 2026-09-10. The `wedge` persona was built to attack declarations rather than
+binaries, and found three defects on its first run:
+
+  1. `app_subdir` containing `..` — the payload builder copies the project to
+     `payload/<app_subdir>`, so the application landed OUTSIDE the payload. The zip is
+     assembled from the payload root, the app was not under it, and the launcher staged a
+     binary with no entrypoint. Same class as a zip-slip: a path from config escaping the
+     root it is resolved against.
+  2. `expires` in the past. `cryptbox.nim` compares the policy date to now and quits with
+     "license expired", so the artifact was dead on arrival and the failure read as a
+     licensing problem rather than a typo.
+  3. An unrecognised `cwd_policy`. `main.nim` compares it against `"exe"` and treats
+     everything else as `"launch"`, so a typo and a deliberate choice produced identical
+     binaries, and the difference only surfaced as a relative path resolving from the wrong
+     directory on someone else's machine.
+
+Note: The persona also caught two of its OWN cases passing for the wrong reason. Both
+refused, but for an unrelated guard that fired first — no secret supplied, and an ambiguous
+entrypoint — so neither had reached the wedge it claimed to test. That is the same mistake
+`payload_edited_and_footer_recomputed` made when it took a CRC32 rejection as proof of
+tamper detection. `REFUSED-UNRELATED` now names it: the build refused without mentioning
+either side of the conflict, so the case missed its target and is a note against busybody
+rather than a pass for haru-pack.
+Note: `SILENT-WEDGE` is in `FATAL`. `WARNED` deliberately is not — resolving a conflict and
+saying which side lost is the behaviour this invariant asks for, not a defect.
+Note: Wedge cases are `per_fixture=False`. They build their own artifact and say nothing
+about the packed package, so running them once per fixture would repeat one answer 25 times
+and inflate the census that INV-CHAOS-04 exists to keep honest.
+Territory: src/haru_pack/build.py, tools/busybody.py, tests/test_config_wedges.py
+
+---
+
+### INV-CHAOS-08
+Status: active
+Statement: Under any stack of hostile conditions, haru-pack either works or refuses
+intelligibly. It never produces a language-level traceback, never hangs, and never exits
+zero without running the application. Composed runs are selected and realised from a
+recorded seed, so any finding can be reproduced by one printed command.
+Actors: whoever hits the combination nobody reasoned about. That is every user eventually,
+because a stack of individually-ordinary conditions is what a real machine is.
+Assets: the difference between chaos engineering and integration testing. A persona that
+runs alone asks a closed question — "does staging cope with umask 077?" has the same answer
+forever. The open question is which COMBINATION of individually-survivable conditions is not
+survivable, and running them one at a time cannot answer it.
+Red-path: The composed pass asserts only the FATAL floor, so removing a guard anywhere in
+staging or the launcher shows up here as a CRASHED stack rather than as a specific failed
+case. Concretely: delete the payload-digest check and the stacks containing
+`revenant_stage_from_an_older_layout` start reporting CRASHED instead of REFUSED. Remove
+`realize()`'s determinism (seed the draw from time instead of the triple) and
+`--compose-only` stops reproducing a finding, which is caught by a claiming test.
+Source: 2026-09-10. Built after the observation that the twelve existing personas each ran
+in isolation, which makes them integration tests wearing costumes. 42 traits across 11
+personas, combining to 845 conflict-free pairs and over 11,000 triples.
+Note: The pass condition is deliberately weak and must stay weak. `RAN`, `REFUSED` and
+`APP-CRASHED` are all acceptable for a stack, because nobody has reasoned about combination
+7,431. Asserting anything stronger — "haru-pack always works under any three of these" —
+would be an overclaim of exactly the kind this file exists to prevent. The floor is the
+claim: it refuses intelligibly, or it works.
+Note: FALLIBILITY. Each trait has a probability of acting, so a persona is a person rather
+than a fixture. If greenhorn always fumbles, then "greenhorn fumbled AND auditor left a .env
+behind" is the only thing ever tested, and "greenhorn got it right, auditor still left the
+.env" — a different code path — never runs. A run's identity is the set that FIRED, not the
+set that was selected, and both are journalled.
+Note: Fallibility is forced OFF for two passes, and only two. The k=1 pass IS the attribution
+baseline — "does trait A fail alone?" cannot be answered by a run where A did not fire, and a
+baseline with holes makes every composed finding unattributable. `--compose-only` is forced
+because someone asked for a specific stack, and handing them a control run answers a
+different question than the one they typed.
+Note: A run where nothing fired is a control, and it is kept rather than resampled. A control
+arriving naturally through the same machinery is worth more than one bolted on beside it: if
+the baseline is broken, that is where it shows.
+Note: `realize()` draws from sha256 of (seed, run_index, trait_name), not from a sequential
+RNG and not from `random.Random(triple)` — the latter raises on Python 3.14, and even where
+it works the seed-to-stream mapping is an implementation detail. A digest is stable across
+Python versions and machines, which is the property a printed reproduction line actually
+needs. Per-trait rather than sequential so that adding a trait to the catalogue does not
+reshuffle every other trait's firing decisions in every other run.
+Note: Conflicts are declared for pairs where one trait CANCELS another, not for pairs that
+break together. A stack whose members cancel tests less than either member alone; a stack
+that breaks together is the finding.
+Territory: tools/busybody_compose.py, tools/busybody_traits.py, tools/busybody.py,
+tests/test_compose.py
 
 ---
 
@@ -730,6 +991,46 @@ Note: busybody's own work directories now live outside the repository for the sa
 chaos harness that can damage the tree it is testing is worse than no harness.
 Territory: src/haru_pack/launcher/main.nim, tools/busybody.py, tests/test_launcher_isolation.py
 
+### INV-LAUNCH-08
+Status: active
+Statement: The launcher's footer reader loads both the v1 (68B, payload only) and the v2
+(116B, payload + stub-config) footer format, dispatching on `format_ver`, and validates the
+v2 stub-config extent by size exactly as it validates the payload extent.
+Actors: anyone who can write to a distributed binary; a truncated or partially-copied
+download. `stubOff`/`stubLen` are attacker-controlled u64s read off disk.
+Assets: the launcher's ability to keep loading today's single-payload binaries AND to load a
+new stub-carrying one, and to refuse a hostile stub locator by size rather than by crashing
+inside `setPosition`/`readStr`.
+Red-path: In `overlay.footerSizeFor` return `FooterV1Size` for version 2 (ignore the
+version), rebuild — a v2 binary's TAIL check lands on the stub-offset field, the footer is
+not found, and the exe reports "no payload appended" while a v1 binary still loads. Walked
+2026-09-10: v1 green, v2 red. Separately, guard out the `if ft.hasStub:` extent block in
+`footerFault` and set `stub_off` to 2**63 in a built v2 exe — observed `fatal.nim(53)
+sysFatal` / RangeDefect, exit 1; the guard turns that into a clean `ExitBadFooter`. Walked
+2026-09-10: 4 red.
+Source: docs/adr/0003-stub-config-and-canary.md §1.5/§1.6. Extends INV-LAUNCH-05 territory to
+the stub-config locator; the version dispatch is what keeps v1 binaries loading.
+Territory: src/haru_pack/launcher/overlay.nim, src/haru_pack/launcher/main.nim, src/haru_pack/overlay.py
+
+### INV-LAUNCH-09
+Status: active
+Statement: The launcher sets every manifest `inject` (env-append) KEY=VALUE pair in the child
+environment before invoking uv or the app, so both inherit them; the launcher's own reserved
+variables are set afterward and win on any collision.
+Actors: not an attacker — the packager choosing licensing/API-key env for the app. The
+security edge (an inject must not repoint a reserved var such as `UV_PYTHON` off the host,
+INV-LAUNCH-04) is defence in depth alongside the build-time refusal of reserved keys.
+Assets: the app's declared configuration actually reaching it, and the thick tier's
+hermeticity.
+Red-path: Delete the `for (k, v) in m.inject: putEnv(k, v)` loop in `main.launch`, rebuild —
+a fake uv that echoes an injected var sees it empty. Walked 2026-09-10: 1 red. Separately,
+move the loop AFTER the reserved `putEnv` block — an inject of `HARUPACK_STAGE` then wins and
+the collision assertion goes red. Walked 2026-09-10: 1 red.
+Source: docs/adr/0003-stub-config-and-canary.md §4.2. The pairs live in the PAYLOAD manifest
+(post-decrypt), so an encrypted build hides them; the launcher splits each entry on the first
+`=` only.
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/manifest.nim
+
 ---
 
 ## SUPPLY — what we execute that we did not write
@@ -933,6 +1234,36 @@ Note: Mirrors are for availability and policy. If a mismatch appears after point
 the mirror is wrong or stale. Do not edit the pin to make it pass.
 Territory: src/haru_pack/sources.py, src/haru_pack/bundle.py, tests/test_sources.py
 
+### INV-SUPPLY-11
+Status: active
+Statement: A python-build-standalone pin is keyed by the artifact's canonical GitHub release
+URL, not by whatever mirror uv currently reports. A uv upgrade that changes its download host
+never invalidates a pin, and haru-pack prefers a version that is already pinned over whatever
+patch uv's catalog has advanced to.
+Actors: whoever upgrades uv (the user did, mid-session); whoever later runs a thick build and
+expects the pins to still mean something.
+Assets: the stability of the pin set. haru-pack resolves python URLs live from uv's catalog, so
+if the pin key tracked uv's mirror, every uv release would silently invalidate every python pin
+and turn thick builds into a re-pinning treadmill.
+Red-path: Remove `_canonical_pbs_url` from `_find_python_url` so the pin is keyed by uv's raw
+URL. After a uv upgrade that moved the host (0.10 github.com → 0.12 releases.astral.sh), every
+python pin misses and thick builds fail with `UnpinnedArtifact`. Or delete the prefer-pinned
+branch so `_find_python_url` returns uv's newest patch even when an older pinned build is still
+in the catalog; a thick build then chases an unpinned version it did not need to. Both have
+claiming tests.
+Source: 2026-09-10. `uv self update` 0.10.4 → 0.12.12 moved the catalog host to
+releases.astral.sh and advanced the newest builds, which broke every thick python pin at once.
+The canonical-URL keying plus prefer-pinned restored 3 of 5 targets with no re-pinning; the two
+x86_64 targets were re-pinned to the 3.13.9 build the others already used, so all five now stage
+one uniform, verified interpreter.
+Note: This composes with INV-SUPPLY-10. Canonicalisation decides the pin KEY (publisher
+identity); `Sources.python_url` decides the download POINT (mirror). A mirror still cannot dodge
+the pin, because the key is the publisher URL regardless of where the bytes come from.
+Note: Prefer-pinned falls back to uv's newest only when NO pinned build for the minor is in the
+catalog — and then the pin check refuses it, loudly, which is the signal to run add-pin. It
+never silently stages an unverified interpreter.
+Territory: src/haru_pack/bundle.py, tests/test_supply_chain.py
+
 ### INV-SUPPLY-03
 Status: active
 Statement: No archive is extracted with a call that permits writes outside the destination
@@ -1018,6 +1349,103 @@ Red-path: Once implemented — run an encrypted build interactively and observe 
 Source: Adversarial review 2026-09-09, finding W11. `cryptbox.resolveSecret` uses
 `stdin.readLine()`; `std/terminal` is already imported but `readPasswordFromStdin` is not used.
 Territory: src/haru_pack/launcher/cryptbox.nim
+
+
+### INV-SECRET-02
+Status: active
+Statement: A secret embedded in an encrypted build is not present in plaintext in the
+distributed binary at rest. But the launcher stages the payload to disk in plaintext to run
+it, so any user who can EXECUTE the binary can recover the staged source from their own
+cache. haru-pack never claims otherwise, and obfuscation raises the cost of reading that
+staged source without making it a confidentiality boundary.
+Actors: the developer who has to embed an API key and ship it, and the reverse engineer who
+receives the binary and rummages.
+Assets: the developer's correct understanding of what they are protecting. The dangerous
+failure is not a weak cipher; it is a developer who believes "encrypted binary" means the
+embedded key is safe from someone running it, ships a key that must never leak, and is wrong.
+Red-path: busybody's `reverse_engineer` persona plants a known secret and proves each edge:
+  * ENCRYPTED build, no embed — the secret literal is ABSENT from the binary's payload
+    (decompressed), because the payload is ciphertext. This is what encryption buys.
+  * PLAIN build — the secret is PRESENT in the staged tree under the run's cache after the
+    binary runs. This is the soft spot, and it is inherent: a plaintext interpreter must be
+    handed plaintext to run.
+  * OBFUSCATED build — the plaintext literal is GONE from the staged source, replaced by a
+    pyarmor bootstrap. Measurable, and the whole value of `--obfuscate`; not a guarantee.
+  * `--embed-secret` — the decryption key is in the binary, so the payload is recoverable
+    from the binary ALONE. This is the documented weakest mode: encryption reduced to
+    obfuscation.
+Each is a claiming case, and the persona reports what it actually recovered rather than
+asserting a boundary.
+Source: 2026-09-10, from the reverse_engineer/obfuscation work. The staging path
+(`stage.nim`) writes the decrypted payload to `XDG_CACHE_HOME/haru-pack/<key>-<digest>/root/`
+in plaintext and leaves it there — it is the regenerable cache, not a temp dir — so the
+window is not "while running" but "until the cache is cleared".
+Note: The staged tree is hardened to owner-only, and the protection is REACHABILITY, not
+per-file bits. `hardenDir` sets the cache base (`<cache>/haru-pack`) and the staged root to
+0700; the inner files stay 0644, but the 0700 gate means another user cannot traverse in to
+reach them. Measured 2026-09-10. The persona's first version checked raw inner bits and
+reported a FALSE LEAKED on every 0644 file — corrected to walk the ancestor chain and flag a
+file only if it is other-readable AND every directory up to the cache base is
+other-traversable. A finding that cannot survive that check is not a finding; verifying it
+before believing it is the discipline, and it applied to the harness's own output here.
+That protection does nothing against the user who RUNS the binary, because that user is the
+owner — which is INV-SECRET-02's whole point.
+Note: A secret that must never be recovered must never be shipped to the client. The correct
+architecture for a must-not-leak key is a server the client authenticates to, not a key in an
+artifact the client holds. haru-pack's job is to be honest that packing is not that.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, tools/busybody.py,
+tests/test_reverse_engineer.py
+
+---
+
+## OBF — source obfuscation, and the honesty around it
+
+### INV-OBF-01
+Status: active
+Statement: `--obfuscate` either applies the requested engine or fails the build. It never
+silently ships unobfuscated source when obfuscation was asked for. The result is recorded in
+the manifest, so the artifact states truthfully what was done to it.
+Actors: the developer who runs `--obfuscate pyarmor` in CI and does not watch the log, and
+the person who later has to trust that a shipped binary is what its build command claimed.
+Assets: the truthfulness of the build. "I asked for obfuscation and got a plain binary and
+was not told" is the worst outcome, because it produces false confidence in a shipped
+artifact — the exact class INV-DOC-02 exists to prevent, here at build time.
+Red-path: request `--obfuscate pyarmor` with uv absent, or with a pyarmor that errors, and
+the build must exit non-zero rather than produce an unobfuscated binary. A claiming test
+drives `get_engine` with an unavailable engine and asserts the build refuses. The `none`
+engine is the explicit default and the honest name for "not obfuscated" — never implied by
+omission.
+Source: 2026-09-10. pyarmor is run as `uv run --python <ver> --with pyarmor -- pyarmor gen`,
+so haru-pack needs no pyarmor dependency and — crucially — obfuscates under the SAME
+interpreter version the binary will stage.
+Note: Obfuscation binds the payload to an EXACT Python minor version. Measured 2026-09-10: a
+payload obfuscated for 3.12 imports only under 3.12 — 3.11 fails on `_PyThreadState_GetCurrent`,
+3.13/3.14 on `_PyErr_GetTopmostException`, because pyarmor's runtime .so references
+version-private symbols. This is not a lock TO 3.12: pyarmor obfuscates for standard CPython
+3.7 through 3.14 (verified 3.11/3.12/3.13/3.14 each build and run when targeted), and
+haru-pack obfuscates under whatever `--python` selects. 3.12 is only the default. Only
+`--thick` bundles the exact interpreter and guarantees the run-time match; thin/default
+resolve a Python on the target and may not land on the same minor, so a non-thick obfuscated
+build warns loudly that the binary will fail to start unless the target has exactly that
+version.
+Note: pyarmor does NOT support free-threaded (GIL-less) CPython — the `+freethreaded` /
+`python3.14t` builds. A bare "3.14" can resolve to a free-threaded interpreter via uv, so the
+engine catches pyarmor's free-threading error and re-raises it naming the real constraint and
+the fix (pin a standard interpreter, or drop --obfuscate for a free-threaded target). This is
+the single hard ceiling; standard 3.14 obfuscates fine.
+Note: The engine is modular (an `ObfuscationEngine` interface with a registry) because
+pyarmor is commercial, versioned, and may be unavailable — offline, a lapsed licence, or a
+future where it is abandoned. This project exists to outlive its tools, so pyarmor is one
+implementation, not a hard dependency.
+Note: pyarmor's unlicensed/trial runtime is size-limited and not for redistribution. haru-pack
+detects the trial banner and says so in the build log; it does not decide licensing for the
+user, but it will not let them ship a trial artifact believing it is licensed.
+Note: Obfuscation and encryption are INDEPENDENT axes. Neither implies the other: you can
+obfuscate a plaintext-payload binary, encrypt an unobfuscated one, do both, or neither. They
+protect different things (INV-SECRET-02), and the code wires them separately so a change to
+one cannot silently alter the other.
+Territory: src/haru_pack/obfuscate.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+tests/test_obfuscate.py
 
 ### INV-SECRET-02
 Status: active
@@ -1403,3 +1831,180 @@ invariant does not claim otherwise.
 Source: Asked for 2026-09-11 — "wire the self build to demonstrate it via releases (linux
 and windows as part of the release script)".
 Territory: scripts/self-build.sh, scripts/cut-release.sh, tests/test_packaging.py
+
+---
+
+## STUB — the cleartext, signature-covered stub-config section
+
+### INV-STUB-01
+Status: active
+Statement: The launcher verifies the v2 stub-config's SHA-256 against the `stub_sha256` in
+its own footer BEFORE parsing the canary map, and refuses a mismatch with `ExitBadStub`.
+Actors: anyone who can write to a distributed binary. The stub bytes and the digest they are
+checked against both live in the same attacker-writable region.
+Assets: the per-knob canary map — which env var the launcher reads for the decryption key
+and (in later phases) for the other knobs. A silently-altered map is a silently-altered
+launcher input.
+Red-path: Replace `verifyStubDigest(stubBytes, ft.stubSha)` in `main.launch` with `discard`,
+rebuild, then change one canary letter inside the stub-config region of a built UNENCRYPTED
+v2 exe (`HARU` -> `XARU`, still a valid prefix). Without the guard the altered-but-valid map
+parses and the build runs (rc 0); with it, `ExitBadStub`. Walked 2026-09-10: 1 red.
+Source: docs/adr/0003-stub-config-and-canary.md §1.7. Analog of INV-LAUNCH-01 with the same
+self-referential caveat.
+Note: Like the payload digest (INV-LAUNCH-01) this is NOT tamper-evidence — both the stub
+bytes and `stub_sha256` come from the same footer, so an editor can recompute it. It detects
+corruption/truncation/naive edits and is the precondition for a real signature
+(INV-LAUNCH-03, still proposed). It must not be described as tamper-proof.
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/overlay.nim
+
+---
+
+## CANARY — per-knob env-name resolution
+
+### INV-CANARY-01
+Status: active
+Statement: The SECRET knob's decryption key is read from the single env var
+`<canary.secret>_SECRET` named by the stub-config (default `HARU_SECRET`); the retired
+`HARUPACK_SECRET` is not read, and no other knob's prefix resolves the secret.
+Actors: not an attacker — the packager choosing a per-build canary, plus the property that a
+stale or guessed env name (legacy `HARUPACK_SECRET`, or the wrong knob's prefix) does not
+decrypt.
+Assets: correct resolution of the decryption key's env name. A launcher that still honoured
+`HARUPACK_SECRET` would silently accept a secret set under the retired name, defeating the
+canary's purpose.
+Red-path: Hardcode `cryptbox.resolveSecret` back to `getEnv("HARUPACK_SECRET")` (ignore
+`secretEnv`), rebuild. A default build run with `HARU_SECRET` set then fails to decrypt (rc 4
+"no secret"); a build whose stub sets the secret canary to `MARK`, run with `MARK_SECRET`
+set, also fails. Walked 2026-09-10: 2 red.
+Source: docs/adr/0003-stub-config-and-canary.md §3.2/§3.3. One resolution rule,
+`stubconfig.envForKnob`, serves all four knobs; only SECRET is consumed in Phase 1.
+Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/launcher/main.nim
+
+### INV-CANARY-02
+Status: active
+Statement: The build resolves the per-knob canary map with the precedence
+`--stub-env-<knob>-canary` > `--env-canary`/`--env-canary-random` > built-in `HARU`, refuses
+two conflicting all-knobs defaults and any resolved token that is not a valid env-name prefix
+(`^[A-Za-z_][A-Za-z0-9_]*$`), emits the map as the cleartext stub-config section of a v2
+binary, and records it in the build receipt. The map is not secret; the secret VALUE never
+appears in it (INV-SECRET-02).
+Actors: the packager choosing a per-build canary — not an attacker. The dangerous outcome is
+a build that silently ships a stub the launcher then reads a different env name for than the
+packager was told, or a receipt/auditor that cannot see which env names a binary watches.
+Assets: agreement between what the packager asked for, what the binary carries, and what the
+receipt reports; and the property that every NEW binary carries the section at all.
+Red-path: In `build.resolve_canary`, delete the `if env_canary and env_canary_random: raise`
+and `test_conflicting_all_knob_defaults_refused` goes red; delete the
+`if not _CANARY_RE.fullmatch(tok): raise` and `test_invalid_canary_token_refused` goes red.
+Drop `stub_config=` from the `build.build` `attach()` call (emit a v1 footer) and
+`test_build_emits_a_v2_binary_carrying_the_canary_map` goes red (`format_ver == 1`); drop
+`canary=canary` from the receipt `info.update` and both the emit test and
+`test_receipt_records_the_canary_map_but_not_the_secret` go red. Walked 2026-09-10.
+Source: docs/adr/0003-stub-config-and-canary.md §2.1/§5. The build half of the one resolution
+rule INV-CANARY-01 defends at runtime; every new binary is v2 (carries the section).
+Territory: src/haru_pack/build.py, src/haru_pack/cli.py, src/haru_pack/overlay.py
+
+---
+
+## INJECT — env-append lives in the payload, and the build is honest about it
+
+### INV-INJECT-01
+Status: active
+Statement: The build validates each `--env-append KEY=VALUE` into the payload manifest `inject`
+list — refusing a malformed entry (no `=`, empty KEY) or a reserved KEY (`HARUPACK_*`, the
+launcher-managed `UV_*`, `PYTHONPYCACHEPREFIX`, `PYTHONPATH`) — and, on an UNENCRYPTED build
+only, warns loudly when a value is secret-shaped. An encrypted build hides the payload and so
+warns nothing.
+Actors: the packager injecting licensing/API-key env — plus the honesty edge from
+INV-SECRET-02: a plaintext payload ships the value recoverable, and the operator must not
+assume otherwise. A reserved KEY is the silently-ineffective-config class INV-BUILD-01/02 forbid.
+Assets: the operator's correct understanding of what an unencrypted inject exposes, and the
+guarantee that an inject the launcher would silently drop is refused at build time, not shipped.
+Red-path: In `build.resolve_injects`, remove the
+`if not encrypted and _looks_secret_shaped(...)` warning branch and
+`test_secret_shaped_inject_warns_on_unencrypted_build` goes red; remove the reserved-key
+`raise` and `test_reserved_inject_key_refused` goes red; in `build.build`, remove
+`manifest["inject"] = injects` and `test_build_writes_inject_into_the_payload_manifest` goes
+red. Walked 2026-09-10.
+Source: docs/adr/0003-stub-config-and-canary.md §4.3. The pairs live post-decrypt; the
+launcher applies them before uv + the app and its own reserved vars win on a collision
+(INV-LAUNCH-09). Called "inject", never "project".
+Territory: src/haru_pack/build.py, src/haru_pack/cli.py
+
+---
+
+## STAGING-2 — reap, ram-only, and base-path relocate staging without becoming a delete primitive
+
+Phase 2 of the launcher rework (docs/adr/0004-reap-ram-staging.md) lets a build bake three
+staging choices into the cleartext stub-config: an on-exit detached cleanup (`--reap`), a
+best-effort RAM-backed staging root (`--ram-only`), and a relocated staging root
+(`--base-path`, consuming the Phase-1 `BASE_PATH` knob). The danger is that `--reap` is a
+delete primitive fed by a relocatable root, one input to which (`BASE_PATH` env) is
+attacker-settable. The invariants below keep the delete target pinned to a subtree the
+launcher itself created, and keep an unsafe root out at both build and run time. None of the
+three changes any security decision by its ABSENCE, which is why neither the footer version nor
+`stub_config_version` moves — the corpus and the absence-is-today's-behaviour default are held
+by the CANARY/STUB invariants above and by docs/adr/0004 §2.
+
+### INV-BASE-01
+Status: active
+Statement: The launcher resolves the staging root by the precedence `BASE_PATH` env
+(canary-resolved) > stub-config `base_path` > (`ram_only` ? RAM-backed root : the per-user
+cache), computed BEFORE staging; it stages and reaps only a `<root>/<key>-<digest>` subtree it
+creates, and it REFUSES a root that is empty, `/`, a filesystem/drive/UNC root, or the
+home-directory root — at build time for `--base-path` and defensively at runtime for both the
+baked `base_path` and the `BASE_PATH` env.
+Actors: anyone who can set the `BASE_PATH` env on the target (the value is not baked through
+the build), plus a packager who fat-fingers `--base-path /`. The reaper (INV-REAP-01) deletes
+what staging created, so a root that resolves to `/` or `$HOME` would be catastrophic.
+Assets: the property that relocating staging can never become arbitrary-create or (via reap)
+arbitrary-delete; a hostile `BASE_PATH` can move where the subtree lives but not what is
+deleted, and can never name a bare root.
+Red-path: In `stage.refuseUnsafeRoot` return `""` always, rebuild, run a binary whose
+stub-config sets `base_path = "/"` (or run any binary with `HARU_BASE_PATH=/`): without the
+guard the launcher tries to stage under `/` and the "refusing to stage under an unsafe base
+path" `ExitBadStub` never fires. Separately, in `build.resolve_base_path` drop the
+`_is_root_like` raise and `test_build_refuses_root_base_path` goes red. Separately, reorder
+`main.resolveStagingRoot` to consult `sc.basePath` before the env and
+`test_env_base_path_overrides_stub_base_path` goes red.
+Source: docs/adr/0004-reap-ram-staging.md §3/§6. Consumes the `BASE_PATH` knob ADR 0003 §3.4
+left wired-but-unconsumed; the per-knob env-name rule is INV-CANARY-01.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py, src/haru_pack/cli.py
+
+### INV-RAM-01
+Status: active
+Statement: With `ram_only` baked and no base-path override, the launcher stages under a
+RAM-backed root — `/dev/shm/haru-pack` on Linux when `/dev/shm` exists and is writable — and
+otherwise falls back to the persistent per-user cache with an honest stderr note; an explicit
+base_path always wins over ram-only.
+Actors: not an attacker — a packager who does not want the staged payload tree written to
+persistent disk, and who must not be given a false guarantee when no RAM filesystem exists.
+Assets: an honest mechanism (real tmpfs paths the interpreter can import from; memfd is
+unusable for a path-based import tree) and an honest fallback, so ram-only never silently
+promises RAM it did not get. It governs only where the STUB stages, never the app's own writes.
+Red-path: In `stage.ramBackedRoot` return `baseDir()` unconditionally, rebuild, run a binary
+whose stub-config sets `ram_only = true`: staging then lands in the per-user cache and
+`test_ram_only_stages_under_dev_shm` (which asserts `HARUPACK_STAGE` is under `/dev/shm`) goes
+red. Walked on this Linux host, where `/dev/shm` exists.
+Source: docs/adr/0004-reap-ram-staging.md §4. CONTEXT.md "RAM-backed staging (ephemeral)".
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py
+
+### INV-REAP-01
+Status: active
+Statement: With `reap` baked, after the app exits the launcher spawns a DETACHED,
+fire-and-forget process that deletes ONLY the `<root>/<key>-<digest>` subtree it created this
+run, then returns the child's exit code without waiting; the base path itself and anything
+beside the subtree are left intact, and a `HARUPACK_DEV_STAGE` tree is never reaped.
+Actors: not an attacker — a packager who wants staged bytes cleaned up on exit; the safety edge
+is that the delete target must be the launcher's own subtree, never a raw base_path or env value
+(shared with INV-BASE-01).
+Assets: cleanup of the staged subtree that keeps running after the stub dies (many GB), without
+ever deleting the root it lives under or a developer's dev-stage tree.
+Red-path: Comment out the `if reapWanted and reapTarget.len > 0: reapDetached(reapTarget)` call
+in `main.launch`, rebuild, run a binary whose stub-config sets `reap = true` and a base_path
+under a temp dir: the staged subtree is still present after exit and
+`test_reap_deletes_only_its_own_subtree` (which polls for the subtree to vanish while asserting
+the base dir and a sentinel survive) goes red. Walked 2026-09-10 on Linux.
+Source: docs/adr/0004-reap-ram-staging.md §5/§6. CONTEXT.md "detached reap" / "reap
+(build-time)".
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py

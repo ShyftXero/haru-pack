@@ -176,8 +176,17 @@ def test_the_linter_is_pinned_to_one_version():
         "ci.yml lints with an unpinned `uvx ruff`; ruff's default rule set grows between "
         "releases, so this fails on unchanged code"
     )
-    assert "uv run --group dev ruff check ." in CI_RUN, (
-        "ci.yml no longer lints through the pinned dev-group ruff"
+    assert 'ruff==' in CI_RUN.replace("'", '"') or "ruff@$pin" in CI_RUN, (
+        "ci.yml no longer derives the linter version from the pyproject pin"
+    )
+    assert "uvx" in CI_RUN and "ruff@" in CI_RUN, (
+        "ci.yml should run the pinned ruff via uvx, in its own environment — "
+        "`uv run --group dev` installs into the project env and would mutate the env the "
+        "tests run in"
+    )
+    assert "uv run --group dev ruff" not in CI_RUN, (
+        "linting through the project environment mutates it; the test job then runs against "
+        "a different set of packages than it installed"
     )
 
 
@@ -185,8 +194,11 @@ def test_the_linter_is_pinned_to_one_version():
 def test_the_release_gate_uses_the_same_pinned_linter():
     """The gate reported success on the exact commit CI rejected, because it used whatever
     `ruff` was on PATH. Three different ruffs were installed on the machine at the time."""
-    assert "uv run --quiet --group dev ruff check ." in CUT_RUN, (
+    assert 'ruff@$RUFF_PIN' in CUT_RUN, (
         "cut-release.sh does not lint through the pinned ruff"
+    )
+    assert 'ruff==' in CUT_RUN, (
+        "cut-release.sh does not read the pin from pyproject, so it can drift from CI"
     )
     assert "skipping lint" not in CUT_RUN, (
         "the gate still has a path where it skips the linter and prints a note; a skipped "

@@ -90,7 +90,10 @@ include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproj
 # Bumping this is a deliberate act, not a side effect: a newer ruff may demand 100+ changes,
 # and I001 in particular fights the compact grouped-import house style that [tool.ruff.lint]
 # documents. Decide the rules, then bump.
-dev = ["pytest>=8", "ruff==0.15.19"]
+dev = ["pytest>=8", "ruff==0.15.19",
+       # busybody --jobs only. A dev-tool dependency: nothing haru-pack SHIPS uses
+       # it, and the harness runs serially when it is absent.
+       "mpire>=2.10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
