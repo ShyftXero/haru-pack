@@ -160,7 +160,7 @@ means two things:
   for 3.12 fails to import under 3.11 (`_PyThreadState_GetCurrent`) or 3.13/3.14
   (`_PyErr_GetTopmostException`). This is *not* a lock to 3.12 — pyarmor obfuscates for
   **standard CPython 3.7–3.14** (verified 3.11/3.12/3.13/3.14 each build and run when
-  targeted); 3.12 is just haru-pack's default `--python`. The one hard ceiling is
+  targeted); 3.13 is just haru-pack's default `--python`. The one hard ceiling is
   **free-threaded** (GIL-less) CPython, which pyarmor does not support; a bare `3.14` can
   resolve to a `+freethreaded` build via uv, so haru-pack catches that and names the fix.
   Measured 2026-09-10.

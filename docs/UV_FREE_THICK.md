@@ -25,7 +25,7 @@ This is the first thing to know, because it changed after `INV-PAYLOAD-04` lande
 So removal is now worth **~14 MB of exe**, not the ~22 MB it was worth before, and not the
 55 MB that the unpacked figure suggests. Compressing uv already captured 8 MB of the prize
 for a much smaller change. Any future case for this work has to be made against 14 MB, and
-against a `--thick` binary that is ~82 MB — so it is roughly a 17% cut, not an
+against a `--thick` binary that is ~85 MB (measured) — so it is roughly a 17% cut, not an
 order-of-magnitude one.
 
 There is a real secondary benefit that is not about size: at thick, a payload that ships no
@@ -55,7 +55,7 @@ Ship a flat `--target` install tree and put it on `PYTHONPATH`. No venv, no uv.
 # host, or cross — installing wheels for another platform is just unzipping,
 # so no target-native code is executed at build time
 uv pip install --only-binary :all: --target <payload>/vendor/site \
-    [--python-platform windows --python-version 3.12] -r <locked reqs>
+    [--python-platform windows --python-version 3.13] -r <locked reqs>
 ```
 
 At runtime the launcher runs the bundled interpreter directly:

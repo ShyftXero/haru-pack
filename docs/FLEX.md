@@ -106,7 +106,7 @@ python tools/gen-package-manifest.py -n 250
 `flex/sources.toml` keeps 300 names, so growing to ~250 needs no refetch — which also means
 growing the list does not silently pull in a different month's ranking at the same time.
 
-At 250, mind the cost: a default-tier build is ~23 MB and ~25 s here. Use `-j` for
+At 250, mind the cost: a default-tier build is ~15 MB and ~25 s here. Use `-j` for
 parallelism, and expect the thick-tier hard targets to dominate wall clock and disk.
 
 ## Adding a package

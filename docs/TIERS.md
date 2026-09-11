@@ -6,11 +6,13 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 |------|------|---------|-------------------|--------------|---------|
 | **thin** | `--thin` | nothing | uv + Python + deps | ~0.4 MB | no (needs net on 1st run) |
 | **default** | *(none)* | uv | Python + deps | ~15 MB | no (net on 1st run) |
-| **thick** | `--thick` / `--chonky` | uv + Python (+deps) | nothing | ~82 MB | **yes** |
+| **thick** | `--thick` / `--chonky` | uv + Python (+deps) | nothing | ~85 MB | **yes** |
 
-> The default and thick figures are ~8 MB smaller than they used to be because the bundled
-> `uv` now ships XZ-compressed; see below. `hello` at default tier measured 15.0 MB on
-> 2026-09-10.
+> Both figures are ~8 MB smaller than they used to be because the bundled `uv` now ships
+> XZ-compressed; see below. Both are measured, not derived: `hello` is **15.0 MB** at
+> default tier and **85.4 MB** at thick (2026-09-11, linux-x86_64, Python 3.13). The thick
+> figure read ~82 MB until 2026-09-11, which was the old number minus the saving rather
+> than a measurement — caught by the documentation pass.
 
 > **Invariant: uv is bundled in every tier except `thin`.** haru-pack never assumes the
 > target machine already has uv — no supported Ubuntu LTS ships it, Debian has no CLI
@@ -44,9 +46,24 @@ So it ships as `vendor/uv.xz` and the launcher expands it while staging. On uv 0
 linux-x86_64: **55.59 MB raw → 22.25 MB deflated → 14.17 MB as XZ/LZMA2**, i.e. ~8 MB off
 the finished binary. `INV-PAYLOAD-04`.
 
-The staged `uv` is **byte-identical to Astral's release** — verified, digest
-`ae65ed04…`, and recorded in `.stage-files` like every other staged file. That identity is
-the reason this is compression of a payload member rather than UPX-packing the executable:
+The staged `uv` is the publisher's binary, and two separate things make that true.
+At build time `bundle_uv` verifies the release against the digest pinned in `pins.toml`
+(`INV-SUPPLY-01`) and `compress_uv` compresses exactly those bytes. At stage time the
+launcher expands the member and checks the result against the sha256 the build recorded
+beside it, refusing the tree on a mismatch — measured digest `ae65ed04…` for uv 0.10.4
+linux-x86_64 — and the expanded file is then recorded in `.stage-files` like every other
+staged file.
+
+Be precise about what the runtime check buys: it catches **corruption** — a truncated or
+bit-rotted member, a mismatched size sidecar, a decoder bug. It does **not** defeat
+tampering, because the digest sidecar sits next to the member an attacker would be
+rewriting. Payload authenticity as a whole is `INV-LAUNCH-01`, still `proposed`. This
+paragraph said "byte-identical to Astral's release" full stop until 2026-09-11, with
+nothing at runtime behind it; an adversarial review called that out and `INV-PAYLOAD-04`
+was narrowed to match the code.
+
+That identity is why this is compression of a payload member rather than UPX-packing
+the executable:
 packing modifies the binary, which destroys uv's own code signature, makes the shipped
 bytes match no publisher digest, trips the AV packer heuristics that target UPX most of
 all, and pays decompression on *every* launch instead of once.
@@ -79,7 +96,9 @@ payload. `INV-PAYLOAD-03`.
 files the program opens. `haru-pack build ./proj --thick --shake` runs the project's
 declared test command under a file-access tracer, drops what nothing touched, then rebuilds
 from the pruned payload offline and re-runs the suite — failing the build if it does not
-pass (`INV-SHAKE-01`). Measured on `examples/shake-demo`: 92.1 → 75.9 MB payload. The floor
+pass (`INV-SHAKE-01`). Measured on `examples/shake-demo`: 92.1 → 75.9 MB payload — a figure
+that predates `INV-PAYLOAD-03`, so the baseline is now smaller and the marginal saving less;
+`SHAKE.md` carries the full caveat. The floor
 is the bundled `uv` (~55 MB unpacked) plus CPython, so expect ~50-60 MB however hard you
 shake; the big wins are projects whose dependencies dwarf that. Details, limits and the
 config block: [`SHAKE.md`](SHAKE.md).
@@ -99,8 +118,11 @@ config block: [`SHAKE.md`](SHAKE.md).
   thick on Windows or use a `[[post_install]]` with `os=["windows"]` instead.
 
 ## Manifest fields set by the tier
-`tier`, `offline`, `fetch_uv`, `uv_version` (thin). The interpreter for thick is
-auto-detected at runtime, not pinned in the manifest.
+`tier`, `offline`, `fetch_uv`; plus `uv_version` and `uv_sha256` on **thin**, where the
+launcher fetches uv and checks it against that pinned digest before extracting it
+(`INV-SUPPLY-05`). A `--shake` build also records a summary: `shaken`, `tracer`,
+`dropped_files`, `freed_bytes`, `verified`. The interpreter for thick is auto-detected at
+runtime, not pinned in the manifest.
 
 ## Example: bundled Playwright + Firefox (offline)
 `examples/playwright-shot` — a project that screenshots a page with **Firefox**, built

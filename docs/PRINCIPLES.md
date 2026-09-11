@@ -1,11 +1,14 @@
 # haru-pack — guiding principles
 
-There is one, and everything else in this repository is downstream of it.
+there's really only one, and everything else in here is downstream of it.
 
 > **User ergonomics is of the utmost importance.**
 
-The word *user* is doing a lot of work there, so it is worth spelling out. It means three
-different entities, and they are ranked when they conflict.
+the sharp corners of other packaging tools are exactly why this project exists, so "it
+works if you hold it right" is not a standard I get to use.
+
+The word *user* is doing a lot of work in that sentence, so it is worth spelling out. It
+means three different entities, and they are ranked when they conflict.
 
 ## The three users
 

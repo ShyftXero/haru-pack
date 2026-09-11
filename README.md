@@ -47,10 +47,14 @@ This project was engineered with AI but that doesn't necessarily mean it's slop.
 
 ```sh
 uv tool install haru-pack
-haru-pack bootstrap          # installs Nim via choosenim
-haru-pack yourscript.py      # -> ./yourscript, a single native binary
+haru bootstrap               # installs Nim via choosenim
+haru yourscript.py           # -> ./yourscript, a single native binary
 ./yourscript
 ```
+
+`haru` and `haru-pack` are the same program — both are installed, so use whichever you feel
+like typing. The rest of this README says `haru-pack` because that is the package name, and
+the tool prints back whichever one you actually used.
 
 That is the whole thing. Point it at a script or a project directory and a binary appears.
 
@@ -144,7 +148,8 @@ toolchain on the Pi.
 **The bundled uv is compressed, not packed.** `uv` is the biggest thing in any non-thin
 payload and the payload zip only has DEFLATE, so uv ships XZ-compressed (55.59 → 14.17 MB
 vs 22.25 MB deflated) and the launcher expands it during staging — about 8 MB off every
-default and thick binary. It is expanded **byte-identically to the publisher's release** and
+default and thick binary. The launcher expands it and checks the result against the digest
+the build recorded, refusing a mismatch — so what runs is the publisher's binary, and
 recorded in the stage manifest like everything else, which is precisely why this is not UPX:
 packing modifies the executable, destroying uv's own signature, matching no publisher digest,
 tripping AV packer heuristics, and paying the cost on every launch instead of once. The
@@ -232,7 +237,7 @@ root only to override or declare extras (full reference: [docs/CONFIG.md](docs/C
 ```toml
 cwd_policy = "exe"               # "launch" (native cwd, default) | "exe" (always exe-adjacent)
 entrypoint = ["python", "-m", "myapp"]   # override the discovered entrypoint
-python = "3.12"                  # override the staged Python version
+python = "3.13"                  # override the staged Python version (this is the default)
 
 [encryption]                     # same fields as the --encrypt flags (secret via CLI/env only)
 enabled = true
@@ -270,14 +275,22 @@ user data — the code lives in the stage dir.
   `pytest -m invariant` checks that every `active` one is claimed by a test.
 - [THREAT_MODEL.md](THREAT_MODEL.md) — assets, actors, trust boundaries, and what the
   licensing feature does and does not actually enforce
+- [docs/PRINCIPLES.md](docs/PRINCIPLES.md) — the one guiding principle, and who the three
+  "users" are when they conflict
 - [docs/CONFIG.md](docs/CONFIG.md) — haru_pack.toml reference + discovery
 - [docs/TIERS.md](docs/TIERS.md) — bundling tiers + the Playwright example
+- [docs/SHAKE.md](docs/SHAKE.md) — `--shake`: pruning a thick payload on traced evidence,
+  and what a passing test suite does and does not prove
 - [docs/SIGNING.md](docs/SIGNING.md) — Windows Authenticode code signing (cross-platform)
 - [docs/ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) — `--encrypt` + license checks
 - [docs/FLEX.md](docs/FLEX.md) — the flex harness: top-25 breadth + hard targets
 - [docs/BUSYBODY.md](docs/BUSYBODY.md) — chaos testing: the personas and how to read a report
 - [docs/RELEASING.md](docs/RELEASING.md) — cutting a release (`./scripts/cut-release.sh`)
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — publishing to PyPI
+- [docs/adr/](docs/adr/) — architecture decision records (stub-config + canary, reap +
+  RAM staging)
+- [docs/UV_FREE_THICK.md](docs/UV_FREE_THICK.md) — a costed and **declined** design, kept so
+  it is not rediscovered from scratch
 - [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)
 
 ## Status
