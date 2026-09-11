@@ -179,7 +179,8 @@ def test_severity_vocabulary_is_closed():
     value from severity_for and this fails."""
     bb = _load_busybody()
     for outcome, expect in (("CRASHED", "critical"), ("SILENT", "critical"),
-                            ("HUNG", "critical"), ("REFUSED", "warning"),
+                            ("HUNG", "critical"), ("SILENT-WEDGE", "critical"),
+                            ("STALLED", "critical"), ("REFUSED", "warning"),
                             ("CASE-ERROR", "note")):
         sev = bb.severity_for({}, {"outcome": outcome}, ok=False)
         assert sev in bl.SEVERITIES, f"{outcome} produced {sev!r}, outside the vocabulary"
@@ -325,6 +326,10 @@ def test_app_crashed_is_not_automatically_fatal_but_launcher_crashed_is():
     on any heavy package, which is the outcome those cases exist to produce."""
     bb = _load_busybody()
     assert "CRASHED" in bb.FATAL and "HUNG" in bb.FATAL and "SILENT" in bb.FATAL
+    # A stall is a finding whatever the case expected (INV-CHAOS-09). It is in FATAL for
+    # the same reason SILENT is: the run would otherwise exit 0 after watching nothing
+    # happen for the whole quiet threshold.
+    assert "STALLED" in bb.FATAL
     assert "APP-CRASHED" not in bb.FATAL, (
         "an application declining an imposed resource limit is not a haru-pack defect"
     )
