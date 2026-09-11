@@ -24,7 +24,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install ${{ matrix.python-version }}
       - run: uv venv --python ${{ matrix.python-version }}
-      - run: uv pip install -e . pytest
+      # `--group dev` so the environment the tests run in is the one declared in
+      # pyproject.toml, pinned ruff and all. Without it the next `uv run` re-resolved and
+      # installed into this env mid-job ("Installed 3 packages"), so the suite ran against a
+      # different set of packages than this step produced — which is how `typer.testing`
+      # came to be missing in CI at the same typer version that has it locally.
+      - run: uv pip install -e . --group dev
 
       - name: lint
         # Unpinned `uvx ruff` downloads whatever ruff released most recently, whose DEFAULT
@@ -47,7 +52,7 @@ jobs:
         # Runs first and on its own so a linkage failure is legible in the log rather
         # than buried in a full-suite summary. This is the gate that catches an `active`
         # invariant whose claiming test was deleted.
-        run: uv run pytest -m invariant
+        run: uv run --no-sync pytest -m invariant
 
       - name: full suite
-        run: uv run pytest
+        run: uv run --no-sync pytest

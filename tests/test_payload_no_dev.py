@@ -105,10 +105,21 @@ def test_dev_tools_are_installed_outside_the_payload(monkeypatch, tmp_path):
     monkeypatch.setattr(bundle.subprocess, "run", fake_run)
     bundle.install_dev_tools(tmp_path / "app", tmp_path / "env")
     assert envs, "install_dev_tools never invoked uv"
+    import os
+
+    ambient = os.environ.get("UV_CACHE_DIR")
     for env in envs:
-        assert "UV_CACHE_DIR" not in env, (
-            "a uv call in install_dev_tools points UV_CACHE_DIR somewhere; if that is the "
-            "payload cache the dev group ships again, which INV-PAYLOAD-03 forbids"
+        # The requirement is that install_dev_tools does not REDIRECT the cache at the
+        # payload — not that UV_CACHE_DIR is unset. Inheriting the operator's own cache is
+        # correct and is the point: the dev tools should come from the build host.
+        #
+        # The first version asserted plain absence and passed only because this machine had
+        # no UV_CACHE_DIR set. CI's setup-uv action exports one
+        # (`/home/runner/work/_temp/setup-uv-cache`), so it failed there the first time the
+        # invariant contract actually ran — which is what fixing the linter pin unblocked.
+        assert env.get("UV_CACHE_DIR") == ambient, (
+            "install_dev_tools overrode UV_CACHE_DIR; if it points at the payload cache the "
+            "dev group ships inside the binary again, which INV-PAYLOAD-03 forbids"
         )
     assert any("--only-dev" in a for a in argvs), "the dev group is no longer what is read"
 

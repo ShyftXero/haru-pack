@@ -163,29 +163,42 @@ def test_bare_path_dispatches_to_build_without_shadowing_subcommands():
     then binds the first token to that argument, and `haru-pack version` is parsed as
     "build the project named 'version'" — which is exactly what the first attempt did.
     """
+    import subprocess
+    import sys
+
     import typer.main
-    from typer.testing import CliRunner
 
     from haru_pack import __version__
     from haru_pack.cli import app
 
+    # No CliRunner, deliberately. `typer.testing` was not importable in CI on either 3.9 or
+    # 3.13, and `click.testing` is not available either — typer 0.27 does not depend on
+    # click at all (its requires are shellingham, rich, annotated-doc, colorama). A test for
+    # this invariant must not rest on a test helper a dependency may stop shipping, and
+    # re-implementing the routing rule in the test would only assert that the test agrees
+    # with itself. So: the command table is read from the real group, and the routing is
+    # exercised by running the real CLI.
     click_group = typer.main.get_command(app)
     for expected in ("build", "version", "doctor", "init", "verify", "bootstrap"):
         assert expected in click_group.commands, f"subcommand {expected} disappeared"
 
-    runner = CliRunner()
+    def run_cli(*argv):
+        return subprocess.run(
+            [sys.executable, "-c", "from haru_pack.cli import app; app()", *argv],
+            capture_output=True, text=True)
 
     # A registered subcommand must NOT be treated as a path. This is the assertion that
     # fails if the shortcut is ever reimplemented as a callback positional.
-    r = runner.invoke(app, ["version"])
-    assert r.exit_code == 0, f"`haru-pack version` broke: {r.output}"
-    assert __version__ in r.output, f"`version` did not print the version: {r.output!r}"
+    r = run_cli("version")
+    assert r.returncode == 0, f"`haru-pack version` broke: {r.stdout}{r.stderr}"
+    assert __version__ in r.stdout, f"`version` did not print the version: {r.stdout!r}"
 
     # A path IS routed to build. Point it at a directory that cannot be discovered so the
     # run fails inside build (proving it got there) without doing 20 MB of work.
-    r = runner.invoke(app, ["definitely-not-a-real-path-9f3a"])
-    assert r.exit_code != 0
-    combined = r.output + str(r.exception or "")
-    assert "discover" in combined or "No such" in combined or "does not exist" in combined, (
+    r = run_cli("definitely-not-a-real-path-9f3a")
+    assert r.returncode != 0
+    combined = r.stdout + r.stderr
+    assert ("discover" in combined or "No such" in combined
+            or "does not exist" in combined or "no pyproject" in combined), (
         f"a bare path did not reach `build`: {combined[:300]!r}"
     )
