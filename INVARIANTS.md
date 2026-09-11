@@ -1631,6 +1631,13 @@ slashes — those use the TARGET's separator, so `--target windows-x86_64` emits
 Source: Eli asked whether haru-pack could UPX the uv binary before storing it, 2026-09-10.
 The answer was that the size win is real but belongs to LZMA rather than to packing, and is
 obtainable without modifying a signed third-party executable.
+Note — architecture coverage, because "the C is portable" is a claim like any other:
+the decoder is compiled and round-trips the real `uv.xz` to the same digest on
+linux-x86_64, on windows-x86_64 cross-compiled from Linux (under wine), and — as of
+2026-09-11 — on **linux-aarch64 natively on real hardware** (gcc 14.2, `-Wall -Wextra`, no
+warnings). macOS is still neither compiled nor run and `docs/TIERS.md` says so. Building the
+whole launcher for aarch64 needs the real `aarch64-linux-gnu-gcc`; `zig cc` handles the
+vendored C but not `nimcrypto`'s `-march=armv8-a+crypto` NEON path.
 Territory: src/haru_pack/bundle.py, src/haru_pack/launcher/xzdec.nim,
 src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/xz/
 

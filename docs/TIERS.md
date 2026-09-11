@@ -76,11 +76,17 @@ dictionary allocation, which is what makes it fine on a Raspberry Pi.
 
 Cross-platform: the decoder is ~3 400 lines of vendored, decoder-only C from
 [xz-embedded](https://github.com/tukaani-project/xz-embedded) (the one the Linux kernel
-uses to boot XZ kernels), with no dependencies beyond `memcpy`. Verified compiling and
-round-tripping byte-identically on Linux x86_64 and on Windows x86_64 cross-compiled from
-Linux (run under wine). `aarch64` and macOS were **not** compile-tested — the toolchains
-were absent on the build host — but the C is architecture-neutral. Provenance and per-file
-digests: `src/haru_pack/launcher/xz/PROVENANCE.md`, enforced by `INV-PAYLOAD-05`.
+uses to boot XZ kernels), with no dependencies beyond `memcpy`. Where it has been run:
+
+| architecture | evidence |
+|---|---|
+| linux-x86_64 | compiles and round-trips the real `uv.xz` byte-identically (`ae65ed04…`) |
+| windows-x86_64 | cross-compiled from Linux; same round-trip byte-identical under wine |
+| **linux-aarch64** | compiled natively on an aarch64 Debian box (gcc 14.2, `-Wall -Wextra`, no warnings) and decoded the **real** `uv.xz` to the same digest `ae65ed04…`, 2026-09-11. Also cross-compiles cleanly with `zig cc -target aarch64-linux-gnu` |
+| macOS | **not** compiled or run — no Mac and no osxcross here. The C is architecture-neutral and has no Darwin-specific paths, but that is reasoning, not a measurement |
+
+Provenance and per-file digests: `src/haru_pack/launcher/xz/PROVENANCE.md`, enforced by
+`INV-PAYLOAD-05`.
 
 ## What thick does NOT carry
 The bundled dependency cache holds the project's **runtime** resolution only. `uv sync`
@@ -102,6 +108,19 @@ that predates `INV-PAYLOAD-03`, so the baseline is now smaller and the marginal 
 is the bundled `uv` (~55 MB unpacked) plus CPython, so expect ~50-60 MB however hard you
 shake; the big wins are projects whose dependencies dwarf that. Details, limits and the
 config block: [`SHAKE.md`](SHAKE.md).
+
+## Cross-compile notes (Linux → aarch64)
+Building a **launcher** for `linux-aarch64` needs the real cross toolchain:
+
+```sh
+haru-pack bootstrap --target linux-aarch64      # or: sudo apt install gcc-aarch64-linux-gnu
+```
+
+`zig cc -target aarch64-linux-gnu` is **not** a substitute for the full launcher, though it
+works fine for the vendored C on its own. `nimcrypto`'s `sha2_neon.nim` compiles with
+`-march=armv8-a+crypto`, and zig's clang rejects that with `unknown CPU: 'armv8'`. That is a
+dependency's NEON path, not anything in haru-pack — recorded here so the next person does
+not spend an afternoon on it. Tried 2026-09-11.
 
 ## Cross-compile notes (Linux → Windows)
 - **thin / default**: fully supported from Linux. `haru-pack` fetches the **Windows** uv

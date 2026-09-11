@@ -47,6 +47,19 @@ smaller the vendored surface, the smaller the thing a reviewer has to read.
 filter (it would shrink an x86 binary further), `xz_dec_bcj.c` has to be vendored in the
 same commit or the decoder will reject the stream at runtime, on the customer's machine.
 
+## Where this has been compiled and run
+
+| target | result |
+|---|---|
+| linux-x86_64 (gcc) | compiles; decodes the real `uv.xz` to `ae65ed04…` |
+| windows-x86_64 (mingw, cross from Linux) | compiles; same digest, run under wine |
+| linux-aarch64 (gcc 14.2, native on real hardware) | compiles with `-Wall -Wextra` and no warnings; decodes the real `uv.xz` to the same `ae65ed04…`, 2026-09-11 |
+| linux-aarch64 (`zig cc`, cross) | compiles to aarch64 objects cleanly |
+| macOS | not attempted — no Mac available |
+
+The aarch64 run used the same `XZ_SINGLE` call shape as `xzdec.nim` against the same stream
+the build produces, so it exercises the production path rather than a toy input.
+
 ## Updating it
 
 1. Download the new tag's tarball and record its SHA-256 in the table above.
@@ -55,6 +68,9 @@ same commit or the decoder will reject the stream at runtime, on the customer's 
    the vendored decoder on the host and asserts byte-identity.
 4. Cross-compile check, because the header include path is the thing that breaks:
    `haru-pack build examples/hello-script --target windows-x86_64`.
+5. Re-run the aarch64 check if you touch the decoder: compile it natively on an arm64 box
+   and decode a real `uv.xz`, comparing the digest. A compile alone would not have caught a
+   wrong-endian or alignment assumption, which is the whole reason to bother.
 
 ## Per-file SHA-256 as vendored
 
