@@ -40,6 +40,72 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
   at runtime (`UV_OFFLINE=1`). The launcher **discovers the bundled interpreter at runtime**
   (robust to uv's version-alias symlink dir, which the zip doesn't preserve).
 
+## Dependency caching: shared at default, none at thick (by design)
+
+The tiers differ not only in what they *bundle* but in whether two of your apps can *share* a
+big dependency on the user's disk.
+
+- **default** keeps uv's caching win. The launcher points `UV_CACHE_DIR` at a per-user
+  `~/.cache/uv-cache`, so the first run fetches a heavy dependency once and every later run —
+  and every *other* default-tier app that needs the same version — reuses it, hardlinked, not
+  downloaded again. Two of your apps that both depend on torch 2.x cost **one ~3 GB download
+  and ~3 GB on disk**, not two.
+- **thick** deliberately does the opposite. Its cache is `stageRoot/vendor/cache`, *inside*
+  the binary's own verified, content-addressed stage, and `UV_OFFLINE=1` — so nothing is
+  shared and nothing is fetched. That is the price of the offline contract: a thick binary is
+  a sealed unit that runs on a machine with no network and no other haru-pack app present.
+  Two thick torch apps are **~6 GB, and that is the point**, not a regression. (Re-running the
+  *same* thick binary is still free — its stage is reused and re-verified, not rebuilt.)
+
+Rule of thumb: **default** when your users are online and run several of your tools that share
+heavy dependencies; **thick** when the target has no internet, or must not depend on anything
+already installed on it. There is no knob today to make *thick* share one global cache across
+binaries — that would reintroduce the network dependency thick exists to remove.
+
+## Recipe: a licensed diagnostic that leaves little on disk — `--ram-only --encrypt --obfuscate`
+
+A licensed diagnostic tool whose *source itself* is sensitive — proprietary detection logic,
+an embedded credential, a customer's data schema — should not be written to the user's disk in
+the clear, even transiently. Combine four flags, each covering a different moment in the
+binary's life:
+
+- **`--encrypt`** keeps the payload AES-256-GCM encrypted **at rest** inside the binary, so the
+  shipped file never contains readable source ([`ENCRYPTION_LICENSING.md`](ENCRYPTION_LICENSING.md)).
+- **`--obfuscate`** (`pyarmor`) transforms the source itself, so the tree the launcher stages —
+  even after decryption — is a pyarmor bootstrap plus an encrypted code object, not readable
+  `.py`. A `grep` of the staged tree no longer yields the API key as a string literal, and the
+  logic is not sitting there as source. This is the **slight anti-forensics** step: a dump of
+  the RAM stage yields obfuscated code, not your program. See
+  [obfuscation](SHARP_CORNERS.md) and `INV-OBF-01`.
+- **`--ram-only`** stages the (encrypted-at-rest, obfuscated) tree to a RAM-backed root
+  (`/dev/shm` on Linux) instead of the on-disk cache, so what is staged never touches
+  persistent storage and is gone when the process exits.
+- **`--thin` vs `--thick`** — the size/reliability trade, and it interacts with `--obfuscate`
+  (see the caveat): `--thin` ships a tiny file and fetches uv + Python + deps at run time;
+  `--thick` bakes in the exact interpreter and runs offline.
+
+**The honest boundary — do not bet your life on it.** Obfuscation raises the *cost* of reading
+the staged source; it is **not a confidentiality boundary**. Whatever runs on the target must be
+runnable, so it must be recoverable: a determined reverse engineer with the binary, a debugger
+and time still wins — most casual rummaging does not. The rule the whole codebase holds to is
+*a secret that must never be recovered must never be shipped to the client.* Likewise
+`--ram-only` governs only where the launcher stages *your payload tree*; it does not move uv's
+dependency cache (the public PyPI packages `--thin` fetches land in the normal on-disk
+`~/.cache/uv-cache` — not your secret), cannot control the application's own disk writes, and is
+best-effort (no writable `/dev/shm` → it falls back to disk and says so). Anyone who can *run*
+the binary can drive its recovered code. What you get is a realistic bar: your code is not
+persisted to disk in the clear by default, and reading what *is* in RAM costs real effort.
+
+**Caveat — obfuscation pins the exact Python minor.** pyarmor's runtime references
+version-private CPython symbols, so a payload obfuscated for 3.12 imports **only** under 3.12.
+Only `--thick` bundles that exact interpreter and guarantees the match; with `--thin`/default the
+target resolves its own Python and the binary **fails to start** unless it happens to be exactly
+that minor (haru-pack warns loudly at build time). So:
+
+- target's Python is known/controlled → `--thin --ram-only --encrypt --obfuscate` (smallest).
+- target's Python is not guaranteed → `--thick --ram-only --encrypt --obfuscate` (bundles the
+  matching interpreter; larger, and offline, but it actually starts).
+
 ## The bundled uv is compressed, not packed
 `uv` is the largest member of every non-thin payload, and the payload zip only has DEFLATE.
 So it ships as `vendor/uv.xz` and the launcher expands it while staging. On uv 0.10.4

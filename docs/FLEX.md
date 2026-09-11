@@ -80,22 +80,56 @@ list is ranks 1–25 of the download ranking:
 | 16. six | 17. pydantic | 18. numpy | 19. click | 20. pycparser |
 | 21. anyio | 22. pytest | 23. pydantic-core | 24. iniconfig | 25. aiobotocore |
 
-Ranks **26–100 are not yet in the matrix**. Most are expected to be more of the same —
-pure-Python or manylinux wheels that pack without incident — so the value of closing the gap
-is confidence and the occasional surprise, not a redesign. The eight `hard_targets` are a
-separate, harder axis (see below) and are *not* part of the top-100 count.
+Ranks **26–100 are not yet in the matrix**. The eight `hard_targets` are a separate, harder
+axis (see below) and are *not* part of the top-100 count.
 
-Closing it is a config change, not new code: raise `top_n` and regenerate the matrix.
+### The bar is "does it work", not "does it import"
+
+Most of these packages are libraries, not applications: `requests`, `six`,
+`typing-extensions` do nothing an end user sees directly. Bundling one and checking that
+`import` succeeds is the shipping-a-game-and-never-playing-it trap — a syntactically valid,
+runnable binary proves nothing about whether the *library* survived packaging. `import numpy`
+succeeds long before numpy is usable; the failure modes of a packed library live in the parts
+an import never touches (a lazily-loaded `.so`, a data file, a compiled extension).
+
+So a package is exercised by running **something that uses it** from inside the delivered
+binary, strongest first:
+
+| method | what it proves | maintenance |
+|---|---|---|
+| **sit the exam** — the package's OWN test suite as the entrypoint (`examiner`, INV-TIER-01) | the library *works* after packaging, not merely imports | **none** — no bespoke script; it is the package's own suite |
+| bespoke `smoke` in `curation.toml` | one hand-picked real operation ran | a script per package — the thing we are moving *away* from |
+| import-and-version fallback | the module loaded | none, but it is the weak bar above |
+
+**Where the exam stands today (2026-09-11): 2 of the 25 sit a real exam** — `numpy`
+(2175 passed inside the binary) and `certifi`. The other 23 fall back to a bespoke smoke or
+import-and-version. Not because the suite is uninteresting but because **their tests are not
+in the wheel** — checked 2026-09-10, only numpy and certifi ship a runnable suite in the
+built wheel. Everyone else's suite lives in the **sdist**.
+
+### Closing the gap — `tools/exam.py`, and the proof page
+
+The sdist acquisition path exists: **`tools/exam.py`**. For each top-N package it fetches the
+sdist (its tests ride along, not just the wheel), finds the test tree wherever it lives
+(`tests/`, `testing/`, or a bare `test_*.py` at the root), ships that whole tree — fixtures
+included — into a thick app whose entrypoint runs the package's own suite, installs the test
+extras the package *declares* (not a guessed set), and runs the binary offline. A pass means
+the payload carried a working library, not an importable one.
 
 ```sh
-python tools/gen-package-manifest.py --top-n 100   # walk the ranking to 100
-git diff flex/packages.toml                          # review — a decision, not a drift
+python tools/exam.py refresh     # rank/version/repo-url for the top-N (network)
+python tools/exam.py run         # sit the exam for each; write flex/exam-results.json
+python tools/exam.py emit        # render top_n_pypi_stats.md from the ledger (offline)
 ```
 
-Any of ranks 26–100 that need something beyond import-and-version (a real offline smoke, a
-non-default tier, a system library) get a hand-written entry in `flex/curation.toml` first;
-the rest fall back to the import-and-version smoke automatically. Update the date and the
-`25 of 100` above when the covered count changes.
+The result is a git-tracked proof page, [`top_n_pypi_stats.md`](../top_n_pypi_stats.md),
+rendered **deterministically** from `flex/exam-results.json` — no AI writes the table, and it
+reproduces byte-for-byte from the committed ledger. Its honest limits, both recorded per row:
+a package whose sdist ships **no** tests (boto3, botocore, aiobotocore) cannot sit an exam,
+and a suite that needs the network, a display or a system library will fail inside an offline
+thick binary — which is a property of that suite, not a packaging defect. Widening to 100 is a
+config change on the matrix (`gen-package-manifest.py --top-n 100`); `exam.py` then covers the
+new rows for free. Keep the `2 of 25` / `25 of 100` figures above in step with the page.
 
 ## Where the list comes from
 
