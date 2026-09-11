@@ -63,6 +63,40 @@ system libraries pip cannot bundle (`weasyprint`).
 `weasyprint` is marked `expect_failure`. It needs pango and cairo. Failing is the correct
 result; an unexpected **pass** is the interesting direction and shows as `XPASS`.
 
+## Coverage: where we are, and the target
+
+**Target: the top 100 most-downloaded PyPI packages.** That is the breadth bar haru-pack is
+aiming to clear — if the hundred packages the ecosystem pulls most all pack and run, "handles
+ordinary dependencies" stops being a claim and becomes a checked fact.
+
+**Where we are — 25 of 100, as of 2026-09-11** (ranking snapshot 2026-09-01). The `top25`
+list is ranks 1–25 of the download ranking:
+
+| | | | | |
+|---|---|---|---|---|
+| 1. boto3 | 2. packaging | 3. typing-extensions | 4. certifi | 5. idna |
+| 6. urllib3 | 7. requests | 8. charset-normalizer | 9. cryptography | 10. cffi |
+| 11. pluggy | 12. pygments | 13. pyyaml | 14. botocore | 15. python-dateutil |
+| 16. six | 17. pydantic | 18. numpy | 19. click | 20. pycparser |
+| 21. anyio | 22. pytest | 23. pydantic-core | 24. iniconfig | 25. aiobotocore |
+
+Ranks **26–100 are not yet in the matrix**. Most are expected to be more of the same —
+pure-Python or manylinux wheels that pack without incident — so the value of closing the gap
+is confidence and the occasional surprise, not a redesign. The eight `hard_targets` are a
+separate, harder axis (see below) and are *not* part of the top-100 count.
+
+Closing it is a config change, not new code: raise `top_n` and regenerate the matrix.
+
+```sh
+python tools/gen-package-manifest.py --top-n 100   # walk the ranking to 100
+git diff flex/packages.toml                          # review — a decision, not a drift
+```
+
+Any of ranks 26–100 that need something beyond import-and-version (a real offline smoke, a
+non-default tier, a system library) get a hand-written entry in `flex/curation.toml` first;
+the rest fall back to the import-and-version smoke automatically. Update the date and the
+`25 of 100` above when the covered count changes.
+
 ## Where the list comes from
 
 Three files, two of them committed, one generated:
