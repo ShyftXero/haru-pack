@@ -135,6 +135,24 @@ tests/test_compose.py, tests/test_targets.py
 
 ---
 
+### INV-TIER-04
+Status: proposed
+Statement: A build declared free-threaded runs on a free-threaded interpreter on the target, at
+every tier — not only `thick`.
+Actors: an operator who passed `--free-threaded`, got exit 0, and shipped it.
+Assets: the flag's meaning. A flag that is silently a no-op at two of three tiers is worse than
+an unimplemented one, because it is believed.
+Red-path: Remove the `python_request` key from the manifest, build a `default`-tier binary with
+`--free-threaded`, run it, and assert `sys._is_gil_enabled()` is `False`. It will be `True`.
+Source: docs/FREE_THREADED.md, 2026-09-10 — found by reading `launcher/main.nim:175` and
+noticing `manifest.python` is a path, not a version, so no tier without a staged interpreter
+carries the variant to the target at all.
+Territory: not yet — nothing is implemented. Planned:
+src/haru_pack/build.py, src/haru_pack/launcher/manifest.nim, src/haru_pack/launcher/main.nim
+
+---
+
+## CHAOS — the harness remembers what happened
 ### INV-TIER-02
 Status: active
 Statement: A build that combines `post_install` steps with `--thick` says so loudly, because
@@ -1368,6 +1386,27 @@ catalog — and then the pin check refuses it, loudly, which is the signal to ru
 never silently stages an unverified interpreter.
 Territory: src/haru_pack/bundle.py, tests/test_supply_chain.py
 
+### INV-SUPPLY-12
+Status: proposed
+Statement: A free-threaded interpreter is staged through the same pinned, digest-verified,
+member-sanitized path as a GIL one; the zstd archive does not get a second extraction route.
+Actors: anyone who can influence what the build host downloads.
+Assets: INV-SUPPLY-01 and INV-SUPPLY-03, which a parallel `.tar.zst` path would quietly exempt
+half the interpreters from.
+Red-path: Point the free-threaded extraction at an archive containing `../` and a member outside
+the destination; `_reject_unsafe_members` must refuse it, exactly as for `.tar.gz`. Then drop the
+pin for a free-threaded URL and confirm the build refuses rather than downloading.
+Source: docs/FREE_THREADED.md, 2026-09-10. Free-threaded builds publish no `install_only`
+archive (0 of 141 assets in python-build-standalone release 20260211), only `-full.tar.zst`, so
+a second extraction path is the obvious implementation — and INV-SUPPLY-07 was mined from
+exactly that shape: two staging paths where only one was verified, and the unverified one was
+the default.
+Territory: not yet — nothing is implemented. Planned:
+src/haru_pack/archives.py, src/haru_pack/bundle.py
+
+---
+
+## STAGE — the tree on the target that we actually execute
 ### INV-SUPPLY-03
 Status: active
 Statement: No archive is extracted with a call that permits writes outside the destination
@@ -1858,6 +1897,22 @@ tests/test_entrypoints.py
 
 ## UI — what haru-pack prints is what it meant to print
 
+### INV-BUILD-10
+Status: proposed
+Statement: `ft-probe` cannot report a pass unless it observed the GIL actually disabled in the
+process that ran the tests.
+Actors: not an attacker — a developer deciding whether to ship a free-threaded build.
+Assets: the probe's only claim. A probe that passes with the GIL on is a green light bolted to
+nothing, and its whole purpose is to be believed by someone who will not re-derive it.
+Red-path: Run `ft-probe` with `PYTHON_GIL=1` in the environment on a project whose suite passes.
+`PYTHON_GIL=1` re-enables the GIL on a free-threaded build, so the run proves nothing; the probe
+must refuse to report `no-blocker-found`. If it still reports a pass, the check is absent.
+Source: docs/FREE_THREADED.md, 2026-09-10.
+Territory: not yet — nothing is implemented. Planned: src/haru_pack/ (probe module), tools/
+
+---
+
+## UI — what haru-pack prints is what it meant to print
 ### INV-UI-01
 Status: active
 Statement: No text haru-pack prints is lost to terminal markup. Rich markup is opt-in per
