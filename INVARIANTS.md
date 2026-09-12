@@ -637,6 +637,27 @@ registry — lotek explicitly reserves its own tag so haru-pack gets its own). d
 Checks pids directly with `os.kill(pid, 0)`, so there is no ps-grep self-match trap (CLAUDE.md).
 Territory: tools/busybody.py, tests/test_busybody_runcontrol.py
 
+### INV-CHAOS-14
+Status: active
+Statement: `--analyze` is a GATE, not just a reader: it exits non-zero whenever the run it
+re-reads is not a clean, completed pass. `analyze_exit_code` returns 2 when no verdict was
+possible (a SETUP FAILURE or an environment ABORT — 'zero findings' there is an absence of data,
+not a pass), 1 when a human must look (findings present, OR the run did not finish), and 0 only
+when the run COMPLETED with nothing to report. main()'s `--analyze` branch returns that code.
+Actors: whoever wires `busybody.py --analyze` into CI (or a script) and trusts its exit status —
+a run full of findings, a setup failure, or an environment abort that exits 0 is a false pass, the
+exact false-clean this forbids.
+Assets: the property that a post-hoc verdict cannot read cleaner than the run it describes; the
+sweep's own exit-code contract (0/1/2/130) and this one agree on what a pass is.
+Red-path: In main()'s `--analyze` branch replace `return analyze_exit_code(analysis)` with
+`return 0`, and `test_analyze_exit_code_is_wired_into_the_cli` goes red (the gate is decorative);
+`analyze_exit_code` on a findings/setup/abort journal then returns 0. Separately, make
+`analyze_exit_code` return 0 unconditionally and `test_analyze_is_a_gate_not_just_a_reader` goes
+red on every non-clean journal. Walked 2026-09-12 on this Linux host.
+Source: adopted from lotek BusyBody #418/#682 (analyze doubles as a gate; refuse a false-clean).
+docs/BUSYBODY.md. Found by auditing haru-pack's `--analyze` against lotek's false-clean hardening.
+Territory: tools/busybody.py, tools/busybody_analyze.py, tests/test_busybody_ledger.py
+
 ### INV-FLEX-01
 Status: active
 Statement: `flex/packages.toml` is a pure function of two committed files —

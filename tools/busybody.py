@@ -115,7 +115,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from haru_pack import overlay  # noqa: E402
 
-from busybody_analyze import analyze_run, format_analysis  # noqa: E402
+from busybody_analyze import analyze_exit_code, analyze_run, format_analysis  # noqa: E402
 from busybody_compose import (  # noqa: E402
     TRAITS, BuildCtx, RunCtx, conflicts_in, describe_traits, realize,
     sample_combos, singleton_cases)
@@ -351,6 +351,17 @@ TRACEBACK_MARKERS = (
 # different persona costumes. --analyze showed the tell immediately (the same five fixtures
 # passing every case, and those five were the first five built) but the run had already
 # written 470 rows to the findings ledger.
+# These are broad in text — `No space left on device` / `[Errno 28]` / `Disk quota exceeded`
+# would, read literally, also match a case that DELIBERATELY induces the condition (the
+# quotamaster persona builds a `size=24m` mount to watch the launcher refuse cleanly). That
+# would be a false infra-abort: a case working as designed, misread as the box failing. VERIFIED
+# 2026-09-12 under docker that it does NOT fire — `cache_filesystem_is_far_too_small` grades
+# REFUSED, 1/1 as expected, because the launcher WRAPS the OS error in its own `haru-pack: …`
+# diagnostic and never surfaces the raw marker string into the graded child's output. So the
+# collision is latent, not live; if a future launcher (or a package's uv/python) ever leaked a
+# raw ENOSPC/quota string into a graded case, scope the marker to the harness's own writes (as
+# the journal marker already is) rather than widening it. The `while writing the journal` suffix
+# on the read-only marker is that scoping done right — it only fires on the HARNESS's own write.
 INFRA_MARKERS = (
     "Disk quota exceeded", "errno: 122", "[Errno 122]",
     "No space left on device", "errno: 28", "[Errno 28]",
@@ -4589,8 +4600,12 @@ def main() -> int:
         if not (target / "journal.jsonl").exists():
             print(f"no journal in {target}", file=sys.stderr)
             return 1
-        print(format_analysis(analyze_run(target)))
-        return 0
+        analysis = analyze_run(target)
+        print(format_analysis(analysis))
+        # --analyze is a gate, not just a reader (INV-CHAOS-14): a run with findings, a setup
+        # failure, or an environment abort must NOT exit 0, or a CI step that trusts --analyze
+        # reads a false pass.
+        return analyze_exit_code(analysis)
 
     # Selection is fail-loud (INV-CHAOS-12). A requested persona/case name that matches nothing
     # is a SETUP FAILURE (exit 2), never a silent drop: `--persona forger,typo` must not quietly

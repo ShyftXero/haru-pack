@@ -55,6 +55,11 @@ blame distributions, and the slowest cases. The census is the one that matters: 
 produced M distinct results*. A 25-fixture sweep with a 25:1 ratio confirmed the same facts
 once per fixture — which is not 25× the assurance, and the report says so in those words.
 
+`--analyze` is also a **gate**, not just a reader (INV-CHAOS-14): it exits **2** on a setup
+failure or an environment abort (zero findings there is an absence of data, not a pass), **1**
+when the run produced findings or did not finish, and **0** only for a completed run with nothing
+to report. So a CI step can trust `busybody.py --analyze <run>` and never read a false pass.
+
 **`--calibrate`** measures the resource band between fixtures and prints a threshold to
 paste, along with the per-fixture requirements to paste beside it. It stages each fixture
 unrestricted first, so what gets measured is the *application's* requirement rather than

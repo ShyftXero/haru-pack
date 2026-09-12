@@ -19,6 +19,13 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
   forger and prints a clean verdict. Ported from lotek's BusyBody #558 (an unmatched selection
   is fatal, not dropped). *A run that silently skipped what you asked for reads exactly like a
   healthy one* — the whole reason both guards exist.
+- **`--analyze` is a gate now (INV-CHAOS-14).** It used to always exit 0 — a reader, not a
+  verdict — so a CI step that trusted it read a false pass on a run full of findings. It now
+  exits 2 on a setup failure / environment abort, 1 on findings or an unfinished run, and 0 only
+  for a clean completed run. From an audit of `--analyze` against lotek's false-clean hardening
+  (#418/#682); the audit also confirmed under docker that the broad `No space left on device`
+  infra marker does NOT false-abort the FS-inducing personas (the launcher wraps the OS error),
+  so that stayed as-is with a documenting note rather than a needless change.
 
 ### Security
 

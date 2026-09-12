@@ -28,7 +28,7 @@ from pathlib import Path
 
 from busybody_ledger import human_bytes, read_jsonl  # noqa: F401
 
-__all__ = ["analyze_run", "format_analysis", "RESOURCE_LADDER"]
+__all__ = ["analyze_run", "analyze_exit_code", "format_analysis", "RESOURCE_LADDER"]
 
 W = 78
 
@@ -83,6 +83,26 @@ def analyze_run(run_dir: Path) -> dict:
                                         if c["name"] == n]), 1))
              for n in matrix), key=lambda kv: -kv[1])[:6],
     }
+
+
+def analyze_exit_code(a: dict) -> int:
+    """The run's verdict as an exit code, so `--analyze` can gate CI and can never be a false
+    pass (INV-CHAOS-14). Mirrors the SWEEP's own exit-code contract when it re-reads a finished
+    run:
+
+      2  no verdict was possible — a SETUP FAILURE (the harness never reached the start line) or
+         an environment ABORT. 'Zero findings' in these states is not a pass; it is an absence of
+         data, and returning 0 would be the false-clean this guards against.
+      1  a human needs to look — the run produced findings, OR it did not finish (INTERRUPTED),
+         so its counts are not a verdict on the whole suite.
+      0  the run COMPLETED and had nothing to report.
+
+    A pure function of the analysis dict, so it is unit-testable without a live sweep."""
+    if a["state"] in ("SETUP FAILURE", "ABORTED (environment)"):
+        return 2
+    if a["findings"] or a["state"] == "INTERRUPTED":
+        return 1
+    return 0
 
 
 def _bar(label: str, n: int, total: int, width: int = 28) -> str:
