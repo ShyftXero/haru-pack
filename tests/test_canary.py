@@ -28,7 +28,8 @@ CANARY_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 @pytest.mark.invariant("INV-CANARY-02")
 def test_default_canary_is_haru_for_every_knob():
     assert resolve_canary() == {"secret": "HARU", "uv_ver": "HARU",
-                                "source_url": "HARU", "base_path": "HARU"}
+                                "source_url": "HARU", "base_path": "HARU",
+                                "ephemeral": "HARU"}
 
 
 @pytest.mark.invariant("INV-CANARY-02")
@@ -40,7 +41,7 @@ def test_env_canary_sets_all_knobs():
 def test_per_knob_override_touches_only_that_knob():
     c = resolve_canary(per_knob={"uv_ver": "MARK"})
     assert c == {"secret": "HARU", "uv_ver": "MARK",
-                 "source_url": "HARU", "base_path": "HARU"}
+                 "source_url": "HARU", "base_path": "HARU", "ephemeral": "HARU"}
 
 
 @pytest.mark.invariant("INV-CANARY-02")
@@ -48,7 +49,7 @@ def test_per_knob_beats_all_knobs_default():
     """Precedence: --stub-env-<knob>-canary > --env-canary > built-in HARU."""
     c = resolve_canary(env_canary="BASE", per_knob={"secret": "MARK"})
     assert c["secret"] == "MARK"
-    assert c["uv_ver"] == c["source_url"] == c["base_path"] == "BASE"
+    assert c["uv_ver"] == c["source_url"] == c["base_path"] == c["ephemeral"] == "BASE"
 
 
 @pytest.mark.invariant("INV-CANARY-02")
@@ -61,7 +62,7 @@ def test_random_canary_is_valid_and_recorded():
     assert len(set(c.values())) == 1
     # ...and the packager is told exactly what env name to set at runtime.
     logged = "\n".join(log)
-    for knob in ("SECRET", "UV_VER", "SOURCE_URL", "BASE_PATH"):
+    for knob in ("SECRET", "UV_VER", "SOURCE_URL", "BASE_PATH", "EPHEMERAL"):
         assert f"{c['secret']}_{knob}" in logged
 
 
@@ -163,7 +164,8 @@ def test_build_emits_a_v2_binary_carrying_the_canary_map(stub_toolchain, script_
     assert 'secret = "MARK"' in v["stub_config"]
     assert 'uv_ver = "HARU"' in v["stub_config"]
     assert info["canary"] == {"secret": "MARK", "uv_ver": "HARU",
-                              "source_url": "HARU", "base_path": "HARU"}
+                              "source_url": "HARU", "base_path": "HARU",
+                              "ephemeral": "HARU"}
 
 
 @pytest.mark.invariant("INV-INJECT-01")

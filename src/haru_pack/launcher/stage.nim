@@ -192,6 +192,56 @@ proc ramBackedRoot*(): string =
                      "(no RAM-backed filesystem); staging to the persistent cache instead."
     return baseDir()
 
+# --------------------------------------------------- RAM-fit detection (docs/adr/0005)
+#
+# A machine with little free memory (a 512 MB CI runner, a small VPS) cannot hold a staged
+# interpreter + payload in a tmpfs. Before auto-staging to /dev/shm the stub asks whether the
+# tree PROVABLY fits; if it cannot prove it, it falls back to the persistent cache rather than
+# filling RAM and dying mid-extract. Flat by design (early returns, one small proc per source),
+# and fail-safe: anything unmeasurable answers "does not fit", never a gamble.
+
+proc shmFreeBytes(): int64 =
+  ## Free bytes on the /dev/shm tmpfs, or -1 when it cannot be measured.
+  when defined(linux):
+    var st: Statvfs
+    if statvfs("/dev/shm", st) != 0: return -1
+    return int64(st.f_bavail) * int64(st.f_frsize)
+  else:
+    return -1
+
+proc memAvailableBytes(): int64 =
+  ## `/proc/meminfo` MemAvailable in bytes, or -1 when it cannot be read/parsed.
+  when defined(linux):
+    var text: string
+    try:
+      text = readFile("/proc/meminfo")
+    except CatchableError:
+      return -1
+    for line in text.splitLines():
+      if not line.startsWith("MemAvailable:"): continue
+      let parts = line.splitWhitespace()          # ["MemAvailable:", "12345", "kB"]
+      if parts.len < 2: return -1
+      try:
+        return parseBiggestInt(parts[1]) * 1024
+      except ValueError:
+        return -1
+    return -1
+  else:
+    return -1
+
+proc ramWouldFit*(unpackedBytes: int64): bool =
+  ## Fail-safe RAM-fit check (docs/adr/0005): the staged tree plus 20% headroom must fit in BOTH
+  ## the /dev/shm tmpfs AND MemAvailable. An unknown size (0), an overflow, a non-Linux host, or
+  ## an unreadable measurement all answer false — the stub never stages to RAM it cannot prove.
+  if unpackedBytes <= 0: return false
+  let need = unpackedBytes + unpackedBytes div 5      # x1.2
+  if need < unpackedBytes: return false               # overflow guard -> fail-safe
+  let shm = shmFreeBytes()
+  if shm < 0: return false
+  let mem = memAvailableBytes()
+  if mem < 0: return false
+  return shm >= need and mem >= need
+
 # --------------------------------------------------- shred-on-reap: matching-length overwrite
 #
 # --overwrite (docs/adr/0004 §5b, INV-SHRED-01). Before the reaper unlinks a staged file it

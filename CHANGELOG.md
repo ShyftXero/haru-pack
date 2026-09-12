@@ -103,6 +103,26 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
   binary carries none of it. An appended build never flips to a network fetch because someone
   set an env var. Proxy-aware through the OS HTTP stack (libcurl `*_proxy` on Linux; system
   proxy on Windows/macOS).
+- **`--ephemeral` is now safe on small machines and controllable at runtime (docs/adr/0005).**
+  Three changes, one theme — RAM-backed staging shouldn't hurt you on a box that can't afford it,
+  and the target gets the final say:
+  - **`--ephemeral` implies `--reap`** (opt out with `--no-reap`). "Ephemeral" means "not
+    permanent", so the stage cleans itself up after the app exits by default; `--no-reap` keeps it
+    for a restart-heavy service that wants to reuse the RAM tree. The build receipt reports the
+    effective `reap` (INV-EPHEMERAL-02).
+  - **RAM-fit detection (INV-EPHEMERAL-01).** Before auto-staging to `/dev/shm` the launcher checks
+    that the payload (`unpacked_bytes × 1.2`, baked into the stub-config) fits BOTH the tmpfs free
+    space and `/proc/meminfo` MemAvailable; if not, it falls back to the persistent cache with an
+    honest note instead of filling RAM and dying mid-extract on a 512 MB CI runner or small VPS.
+    Fail-safe: an unknown or unmeasurable size stays on disk rather than gambling RAM.
+  - **Runtime override via a fifth canary knob, `EPHEMERAL` (INV-EPHEMERAL-03).** The target reads
+    `<canary>_EPHEMERAL`: `0` forces disk, `1` forces RAM and skips the fit-check (and turns RAM on
+    even for a binary not built `--ephemeral` — target autonomy), unset is auto. The knob is
+    additive: its `[canary]` key is emitted only when non-default, so the v1 stub-config corpus is
+    byte-identical and neither the footer nor `stub_config_version` moves. This RAM-fit check also
+    covers a remotely-fetched payload (`--source-url`): the fetched bytes are staged through the
+    same `resolveStagingRoot`/fit-check pipeline as an appended payload, so remote-fetch and
+    `--ephemeral` compose safely together.
 
 ## 2026-09-11
 

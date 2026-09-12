@@ -18,7 +18,10 @@ that knob's. So after `--stub-env-uv-ver-canary=MARK`: `MARK_UV_VER` is read for
 ## knob
 A single stub-input setting, read at runtime as `<canary>_<KNOB>`. The catalogue is closed:
 `SECRET` (decryption key), `UV_VER` (uv version to fetch), `SOURCE_URL` (remote-fetch payload
-URL), `BASE_PATH` (where the stub stages uv/python and the payload tree). The **license
+URL), `BASE_PATH` (where the stub stages uv/python and the payload tree), and `EPHEMERAL` (the
+RAM/disk staging toggle: `0` disk, `1` RAM, unset auto — docs/adr/0005). Adding a knob is a
+deliberate format change on both halves (INV-CANARY-02); `EPHEMERAL` is **additive** (its
+`[canary]` key is emitted only when non-default, so the v1 corpus is unchanged). The **license
 policy is NOT a knob** — expiry/machine/user/geo can never be set or overridden by the end
 user, by design.
 
@@ -44,6 +47,15 @@ so there `--ephemeral` is best-effort and falls back to the persistent cache wit
 (docs/adr/0004 §4). The **stub-config wire key stays `ram_only`** — the surface renamed, the key
 did not (ADR 0004 §2.2 pins the v1 byte-corpus). For packagers concerned about disk-based
 artifacts. Distinct from the normal **cache**, which is persistent and reused.
+
+**Phase 3 (docs/adr/0005) makes it safe and controllable.** `--ephemeral` now **implies
+`--reap`** (opt out with `--no-reap`) — not permanent means it cleans up. On the auto path the
+stub runs a **RAM-fit check** before committing to `/dev/shm`: it stages to RAM only when the
+baked `unpacked_bytes × 1.2` fits BOTH the tmpfs free space and `MemAvailable`, else it falls back
+to the cache with a note — so a 512 MB CI runner or small VPS never fills RAM and dies mid-extract
+(fail-safe: an unknown/unmeasurable size stays on disk). The target gets the final say through the
+`EPHEMERAL` **knob**: `<canary>_EPHEMERAL=0` forces disk, `=1` forces RAM and skips the fit-check
+(and turns RAM on even for a binary NOT built `--ephemeral` — target autonomy).
 
 ## detached reap
 The stub's fire-and-forget final act when `--reap` is baked in: after the app exits it spawns
