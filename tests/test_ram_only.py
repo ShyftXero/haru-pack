@@ -211,10 +211,16 @@ def test_build_accepts_a_real_directory_and_empty(tmp_path):
                     reason="/dev/shm not available/writable")
 def test_ram_only_stages_under_dev_shm(nim_launcher, tmp_path):
     """ram-only stages under /dev/shm/haru-pack on Linux. Red-path: make ramBackedRoot return
-    baseDir() -> staging lands in the cache and this goes red."""
+    baseDir() -> staging lands in the cache and this goes red.
+
+    A real ram_only build always bakes `unpacked_bytes` (docs/adr/0005), and the launcher stages
+    to RAM only when that size fits (INV-EPHEMERAL-01); a small fitting hint is passed here so
+    this exercises the RAM path rather than the fit-fallback (that fallback is covered by
+    tests/test_ephemeral_safe.py)."""
     src = make_payload(tmp_path / "p")
     exe = tmp_path / "app.exe"
-    pack(nim_launcher, build_payload_zip(src), exe, stub_config=stub_toml2(ram_only=True))
+    pack(nim_launcher, build_payload_zip(src), exe,
+         stub_config=stub_toml2(ram_only=True, unpacked_bytes=4096))
     stage = None
     try:
         r = run(exe, tmp_path)

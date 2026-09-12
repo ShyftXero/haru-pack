@@ -3,7 +3,27 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
-## 2026-09-11
+## 2026-09-12
+
+### Added
+
+- **`--ephemeral` is now safe on small machines and controllable at runtime (docs/adr/0005).**
+  Three changes, one theme — RAM-backed staging shouldn't hurt you on a box that can't afford it,
+  and the target gets the final say:
+  - **`--ephemeral` implies `--reap`** (opt out with `--no-reap`). "Ephemeral" means "not
+    permanent", so the stage cleans itself up after the app exits by default; `--no-reap` keeps it
+    for a restart-heavy service that wants to reuse the RAM tree. The build receipt reports the
+    effective `reap` (INV-EPHEMERAL-02).
+  - **RAM-fit detection (INV-EPHEMERAL-01).** Before auto-staging to `/dev/shm` the launcher checks
+    that the payload (`unpacked_bytes × 1.2`, baked into the stub-config) fits BOTH the tmpfs free
+    space and `/proc/meminfo` MemAvailable; if not, it falls back to the persistent cache with an
+    honest note instead of filling RAM and dying mid-extract on a 512 MB CI runner or small VPS.
+    Fail-safe: an unknown or unmeasurable size stays on disk rather than gambling RAM.
+  - **Runtime override via a fifth canary knob, `EPHEMERAL` (INV-EPHEMERAL-03).** The target reads
+    `<canary>_EPHEMERAL`: `0` forces disk, `1` forces RAM and skips the fit-check (and turns RAM on
+    even for a binary not built `--ephemeral` — target autonomy), unset is auto. The knob is
+    additive: its `[canary]` key is emitted only when non-default, so the v1 stub-config corpus is
+    byte-identical and neither the footer nor `stub_config_version` moves.
 
 ### Security
 

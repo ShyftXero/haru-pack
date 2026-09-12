@@ -77,8 +77,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                shake=False, shake_keep=(), env_canary="", env_canary_random=False,
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
-               reap=False, ephemeral=False, ram_only=False, overwrite=False, base_path="",
-               env_append=None, cc="") -> None:
+               stub_env_ephemeral_canary="",
+               reap=False, ephemeral=False, ram_only=False, no_reap=False, overwrite=False,
+               base_path="", env_append=None, cc="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -127,7 +128,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                          stub_env_source_url_canary=stub_env_source_url_canary,
                          stub_env_base_path_canary=stub_env_base_path_canary,
-                         reap=reap, overwrite=overwrite, ram_only=ram_only, base_path=base_path,
+                         stub_env_ephemeral_canary=stub_env_ephemeral_canary,
+                         reap=reap, overwrite=overwrite, ram_only=ram_only, no_reap=no_reap,
+                         base_path=base_path,
                          env_append=list(env_append or []),
                          log=lambda m: print(
                              f"{prog()}: {m}",
@@ -457,16 +460,24 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
               metavar="TOKEN", help="override the SOURCE_URL knob's canary only"),
           stub_env_base_path_canary: str = typer.Option("", "--stub-env-base-path-canary",
               metavar="TOKEN", help="override the BASE_PATH knob's canary only"),
+          stub_env_ephemeral_canary: str = typer.Option("", "--stub-env-ephemeral-canary",
+              metavar="TOKEN", help="override the EPHEMERAL knob's canary only"),
           reap: bool = typer.Option(False, "--reap",
               help="after the app exits, spawn a DETACHED process that deletes the staged "
-                   "subtree, then exit without waiting (fire-and-forget cleanup)"),
+                   "subtree, then exit without waiting (fire-and-forget cleanup). Implied by "
+                   "--ephemeral"),
           ephemeral: bool = typer.Option(False, "--ephemeral",
               help="best-effort RAM-backed (ephemeral) staging: Linux stages under /dev/shm when "
-                   "available (else falls back to the cache with a note) - truly RAM-only ONLY on "
-                   "Linux. Windows/macOS have no unprivileged RAM disk, so it is best-effort there. "
-                   "Governs only where the STUB stages, not the app's own disk writes"),
+                   "available AND the payload fits free RAM (else falls back to the cache with a "
+                   "note) - truly RAM-only ONLY on Linux. Windows/macOS have no unprivileged RAM "
+                   "disk, so it is best-effort there. Implies --reap (opt out with --no-reap). The "
+                   "target can override at runtime via <canary>_EPHEMERAL (0=disk, 1=RAM). Governs "
+                   "only where the STUB stages, not the app's own disk writes"),
           ram_only: bool = typer.Option(False, "--ram-only", hidden=True,
               help="deprecated alias for --ephemeral (kept working for one release)"),
+          no_reap: bool = typer.Option(False, "--no-reap",
+              help="opt out of the --reap that --ephemeral implies (keep the staged tree after "
+                   "exit, e.g. to reuse a RAM stage across restarts)"),
           overwrite: bool = typer.Option(False, "--overwrite",
               help="shred-on-reap: the detached reaper overwrites each staged file with "
                    "matching-length random data and fsyncs before unlinking, so a plaintext blob "
@@ -494,8 +505,9 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                stub_env_source_url_canary=stub_env_source_url_canary,
                stub_env_base_path_canary=stub_env_base_path_canary,
-               reap=reap, ephemeral=ephemeral, ram_only=ram_only, overwrite=overwrite,
-               base_path=base_path, env_append=env_append)
+               stub_env_ephemeral_canary=stub_env_ephemeral_canary,
+               reap=reap, ephemeral=ephemeral, ram_only=ram_only, no_reap=no_reap,
+               overwrite=overwrite, base_path=base_path, env_append=env_append)
 
 @app.command()
 def verify(exe: Path):

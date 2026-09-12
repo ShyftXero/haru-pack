@@ -11,9 +11,12 @@ import std/strutils
 import parsetoml
 
 type
-  ## The closed knob catalogue. Adding a knob is a format change, on purpose.
+  ## The closed knob catalogue. Adding a knob is a format change, on purpose (INV-CANARY-02).
+  ## `kEphemeral` (docs/adr/0005) is the fifth knob: the runtime RAM/disk staging toggle read
+  ## from `<canary>_EPHEMERAL`. It is ADDITIVE — its `[canary]` key is optional and defaults to
+  ## HARU when absent, so a four-key v1 stub-config still parses byte-for-byte unchanged.
   Knob* = enum
-    kSecret, kUvVer, kSourceUrl, kBasePath
+    kSecret, kUvVer, kSourceUrl, kBasePath, kEphemeral
   StubConfig* = object
     version*: int
     canary*: array[Knob, string]
@@ -29,6 +32,10 @@ type
     ramOnly*: bool       ## build-time --ephemeral (wire key still `ram_only`): best-effort
                          ## RAM-backed staging root
     basePath*: string    ## build-time --base-path: staging-root default ("" = normal cache)
+    unpackedBytes*: int  ## build-time size of the staged tree (docs/adr/0005): lets the stub
+                         ## size its RAM-fit check BEFORE staging. 0 = unknown (fail-safe to disk
+                         ## on auto). Emitted only alongside ram_only, so it never changes a
+                         ## non-ephemeral binary's stub-config bytes.
 
 const
   SupportedStubConfigVersion* = 1
@@ -41,6 +48,7 @@ proc knobToken*(k: Knob): string =
   of kUvVer:     "UV_VER"
   of kSourceUrl: "SOURCE_URL"
   of kBasePath:  "BASE_PATH"
+  of kEphemeral: "EPHEMERAL"
 
 proc canaryKey(k: Knob): string =
   ## The `[canary]` TOML key for a knob (the lowercase of its token).
@@ -49,6 +57,7 @@ proc canaryKey(k: Knob): string =
   of kUvVer:     "uv_ver"
   of kSourceUrl: "source_url"
   of kBasePath:  "base_path"
+  of kEphemeral: "ephemeral"
 
 proc defaultStubConfig*(): StubConfig =
   ## Every knob -> "HARU". Used for a v1 (single-payload) binary that carries no stub. The
@@ -59,6 +68,7 @@ proc defaultStubConfig*(): StubConfig =
   result.overwrite = false
   result.ramOnly = false
   result.basePath = ""
+  result.unpackedBytes = 0
 
 proc isValidCanary(tok: string): bool =
   ## ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced at build time
@@ -98,14 +108,17 @@ proc parseStubConfig*(raw: string): StubConfig =
   if canaryNode.kind != TomlValueKind.Table:
     raise newException(ValueError, "stub-config: [canary] must be a table")
   let tbl = canaryNode.getTable()[]
-  # The catalogue is closed: reject any key that is not one of the four knobs.
+  # The catalogue is closed: reject any key that is not one of the five knobs.
   for key in tbl.keys:
-    if key notin ["secret", "uv_ver", "source_url", "base_path"]:
+    if key notin ["secret", "uv_ver", "source_url", "base_path", "ephemeral"]:
       raise newException(ValueError, "stub-config: unknown key in [canary]: '" & key & "'")
-  # Every knob MUST be present, a string, and a valid env-name prefix.
+  # `ephemeral` is the ADDITIVE knob (docs/adr/0005): default it to HARU so a four-key v1
+  # stub-config parses unchanged; the other four remain mandatory.
+  result.canary[kEphemeral] = DefaultCanary
   for k in Knob:
     let key = canaryKey(k)
     if not tbl.hasKey(key):
+      if k == kEphemeral: continue          # optional — keep the HARU default set above
       raise newException(ValueError, "stub-config: [canary] missing key '" & key & "'")
     let v = tbl[key]
     if v.kind != TomlValueKind.String:
@@ -123,6 +136,7 @@ proc parseStubConfig*(raw: string): StubConfig =
   result.overwrite = false
   result.ramOnly = false
   result.basePath = ""
+  result.unpackedBytes = 0
   if t.contains("reap"):
     let n = t["reap"]
     if n.kind != TomlValueKind.Bool:
@@ -143,6 +157,11 @@ proc parseStubConfig*(raw: string): StubConfig =
     if n.kind != TomlValueKind.String:
       raise newException(ValueError, "stub-config: base_path must be a string")
     result.basePath = n.getStr()
+  if t.contains("unpacked_bytes"):
+    let n = t["unpacked_bytes"]
+    if n.kind != TomlValueKind.Int:
+      raise newException(ValueError, "stub-config: unpacked_bytes must be an integer")
+    result.unpackedBytes = n.getInt()
 
 proc envForKnob*(sc: StubConfig, k: Knob): string =
   ## The single runtime resolution rule (INV-CANARY-01): knob K is read from
