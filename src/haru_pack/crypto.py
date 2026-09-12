@@ -91,7 +91,11 @@ def encrypt(payload: bytes, secret: bytes, *, expires: str = "", geo=None,
     if machine: flags |= BIND_MACHINE
     if user:    flags |= BIND_USER
     if embed_secret: flags |= EMBED_SECRET
-    policy = json.dumps({"expires": expires, "geo": geo or [],
+    # `geo` is the Phase-4 execution-gate OBJECT {endpoints, consensus, allow[]} (or {} for no
+    # gate) — assembled by build.build_geo_policy and resolved ONLINE by the launcher's execgate
+    # with no env bypass (INV-GATE-01/INV-GEO-01). It stays INSIDE the ciphertext, so a
+    # reverse-engineer sees no location policy and cannot edit it without the key.
+    policy = json.dumps({"expires": expires, "geo": geo or {},
                          "machine": machine, "user": user},
                         separators=(",", ":"), sort_keys=True).encode()
     key = derive_key(secret, salt, iters, machine or None, user or None)

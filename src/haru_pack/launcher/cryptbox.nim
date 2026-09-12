@@ -18,6 +18,7 @@
 ## No PKI.
 import std/[os, osproc, strutils, times, json, terminal]
 import nimcrypto/[pbkdf2, bcmode, rijndael, sha2]
+import execgate
 
 const
   Magic = "HPAKENC1"
@@ -102,22 +103,35 @@ proc resolveSecret(box: Box, secretEnv: string): string =
     result = readPasswordFromStdin("")
 
 proc checkPolicy(policy: seq[byte]) =
-  ## date + geo (machine/user are cryptographically bound via the key). Runs POST-decrypt
-  ## so the policy is never visible in cleartext to a reverse-engineer.
+  ## The execution gates (INV-GATE-01). Uniform shape: resolve a current value, match an
+  ## allow-policy, fail closed. Runs POST-decrypt so the policy is never visible in cleartext to
+  ## a reverse-engineer, and NO environment variable can satisfy or bypass a gate.
+  ##   * date  (expiry)                         — checked here
+  ##   * geo/ip (location/address)              — checked online by execgate.checkGeoGate
+  ##   * machine/user                           — cryptographically bound via the key: a wrong
+  ##                                              value means the payload never decrypts, so
+  ##                                              reaching this proc already proves them (strictly
+  ##                                              stronger than a checked rule).
   let j = parseJson(cast[string](policy))
   let expires = j{"expires"}.getStr("")
   if expires.len > 0:
     let exp = parse(expires, "yyyy-MM-dd", utc())
     if now().utc > exp + initDuration(days = 1):
       quit("haru-pack: license expired (" & expires & ")", 3)
+  # geo/ip execution gate (INV-GEO-01). Current builds emit a JSON OBJECT
+  # {endpoints, consensus, allow[]} that execgate resolves online and fails closed on. The
+  # retired HARUPACK_GEO env bypass is GONE — no env can set the location. A pre-Phase-4
+  # array-form geo policy depended on that bypass and can no longer be honored, so a non-empty
+  # array is refused rather than silently ignored (a dropped location restriction is a breach).
   let geo = j{"geo"}
-  if not geo.isNil and geo.len > 0:
-    let cur = getEnv("HARUPACK_GEO")   # offline geo is weak; online lookup is future work
-    var ok = false
-    for g in geo:
-      if g.getStr == cur and cur.len > 0: ok = true
-    if not ok:
-      quit("haru-pack: not licensed for this location (allowed: " & $geo & ")", 3)
+  if geo != nil:
+    case geo.kind
+    of JObject: checkGeoGate(geo)
+    of JArray:
+      if geo.len > 0:
+        quit("haru-pack: this build carries a retired geo-policy format; rebuild with a " &
+             "current haru-pack (INV-GEO-01)", 3)
+    else: discard
 
 proc openContainer*(raw: string, secretEnv: string): string =
   ## derive key, GCM-decrypt, THEN parse+check the (hidden) policy -> returns payload zip.

@@ -6,7 +6,7 @@ from pathlib import Path
 from . import tomlio, discovery, crypto, toolchain
 from .paths import launcher_src_dir
 from .payload import build_payload_zip
-from .overlay import attach
+from .overlay import attach, FOOTER_FLAG_ENCRYPTED
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier, bundles_uv
 from .sources import Sources
@@ -168,16 +168,127 @@ def resolve_base_path(base_path: str) -> str:
     return base_path
 
 
+def resolve_source_url(source_url: str) -> str:
+    """Validate the Phase-3 remote-fetch URL (docs/adr/0005, INV-REMOTE-01). "" = appended
+    delivery (the default). This is a build-time sanity check to catch a typo, NOT a security
+    boundary: the launcher does not trust the URL at all — it fetches from it and verifies the
+    bytes against the build-baked footer digest, so a hostile URL can only cause a fail-closed
+    refusal. We require an http/https scheme (the launcher's puppy HTTP client speaks those)
+    and a non-empty host, and reject leading/trailing whitespace that would smuggle into TOML."""
+    if not source_url:
+        return ""
+    if source_url != source_url.strip():
+        raise BuildError("--source-url has leading or trailing whitespace.")
+    lo = source_url.lower()
+    if not (lo.startswith("http://") or lo.startswith("https://")):
+        raise BuildError(
+            f"--source-url {source_url!r} must be an http:// or https:// URL — the launcher "
+            f"fetches the payload over HTTP (and verifies it against the baked digest). "
+            f"Host the payload sidecar this build writes at that URL.")
+    rest = source_url.split("://", 1)[1]
+    host = rest.split("/", 1)[0]
+    if not host:
+        raise BuildError(f"--source-url {source_url!r} has no host.")
+    return source_url
+
+
+# ── Phase-4 execution gates: online geo/ip (docs/adr/0006, INV-GATE-01 / INV-GEO-01) ──
+DEFAULT_GEO_ENDPOINT = "https://ipwho.is/"
+
+
+def _normalize_geo(geo) -> dict:
+    """Coerce a geo spec into the Phase-4 gate OBJECT {endpoints?, consensus?, allow[]}.
+
+    {} / None -> {} (no gate); a dict -> as-is; a list of country codes (a haru_pack.toml
+    `[encryption] geo = [...]` or a legacy caller) -> allow-rules on country_code. This keeps a
+    declared-in-TOML country list working while the wire format is the uniform gate object."""
+    if not geo:
+        return {}
+    if isinstance(geo, dict):
+        return geo
+    return {"allow": [{"country_code": str(g)} for g in geo if g]}
+
+
+def build_geo_policy(countries, restrict, api_urls, consensus) -> dict:
+    """Assemble the encrypted geo/ip execution-gate policy from CLI inputs (INV-GATE-01 /
+    INV-GEO-01). Returns {} when no allow-rule is given (no gate). The gate is uniform: resolve
+    the caller's IP+geo from a consensus of online resolvers, match an allow-policy, fail closed.
+
+      * --geo US,CA            -> two rules {country_code: US} OR {country_code: CA}
+      * --geo-restrict "a=1,b=2" -> one rule {a:1, b:2} (AND within), OR'd across repeats
+      * --geo-restrict-api-url -> resolver endpoints (default ipwho.is)
+      * --geo-restrict-consensus -> K endpoints must resolve AND agree (default 1)
+
+    Any resolver field can be asserted (so ip=1.2.3.4 is an ip gate) — one mechanism, not a
+    bespoke rule per gate. Refuses a consensus that can never be reached, and endpoints/consensus
+    set with no rule (a gate that does nothing is the SILENT-WEDGE class, INV-CHAOS-07)."""
+    allow: list[dict] = [{"country_code": c} for c in (countries or []) if c]
+    for spec in (restrict or []):
+        rule: dict = {}
+        for pair in spec.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                raise BuildError(
+                    f"--geo-restrict rule {spec!r} has a term without '=': {pair!r}. Use "
+                    f"field=value[,field=value] (e.g. country_code=US,region=Texas).")
+            k, v = (p.strip() for p in pair.split("=", 1))
+            if not k or not v:
+                raise BuildError(f"--geo-restrict rule {spec!r} has an empty field or value.")
+            rule[k] = v
+        if rule:
+            allow.append(rule)
+    if not allow:
+        if api_urls or (consensus and consensus != 1):
+            raise BuildError(
+                "--geo-restrict-api-url / --geo-restrict-consensus configure a geo gate but no "
+                "allow-rule was given, so nothing would be enforced. Add --geo or --geo-restrict, "
+                "or drop the endpoint/consensus flags.")
+        return {}
+    # Dedup while preserving order: a consensus is only meaningful across DISTINCT resolvers.
+    # Listing the same URL K times would otherwise let one server (or one on-path MITM that
+    # intercepts it) satisfy the whole quorum — silently voiding "one endpoint lying doesn't
+    # decide the gate". Consensus is checked against the UNIQUE count.
+    seen: set = set()
+    endpoints: list[str] = []
+    for u in (api_urls or []):
+        u = u.strip()
+        if not u:
+            continue
+        if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
+            raise BuildError(f"--geo-restrict-api-url {u!r} must be an http:// or https:// URL.")
+        if u not in seen:
+            seen.add(u)
+            endpoints.append(u)
+    if not endpoints:
+        endpoints = [DEFAULT_GEO_ENDPOINT]
+    k = consensus or 1
+    if k < 1:
+        raise BuildError("--geo-restrict-consensus must be >= 1.")
+    if k > len(endpoints):
+        raise BuildError(
+            f"--geo-restrict-consensus={k} exceeds the {len(endpoints)} DISTINCT resolver "
+            f"endpoint(s) configured, so consensus can never be reached and the gate would "
+            f"fail closed forever. Add more distinct --geo-restrict-api-url, or lower the "
+            f"consensus.")
+    return {"endpoints": endpoints, "consensus": k, "allow": allow}
+
+
 def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = False,
-                      ram_only: bool = False, base_path: str = "") -> bytes:
+                      ram_only: bool = False, base_path: str = "",
+                      source_url: str = "") -> bytes:
     """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2), UTF-8,
     in fixed order. Canary tokens are validated env-name prefixes, so no escaping is needed.
 
-    The Phase-2 keys `reap`/`overwrite`/`ram_only`/`base_path` are emitted ONLY when non-default,
-    so a build that uses none of them is byte-identical to the Phase-1 stub-config (the v1 corpus
-    and its exact-bytes test are unchanged). Their absence is today's behaviour, so no
-    stub_config_version bump is needed (docs/adr/0004 §2). Read before decryption by
-    launcher/stubconfig.parseStubConfig; sha-checked first (INV-STUB-01)."""
+    The optional keys `reap`/`overwrite`/`ram_only`/`base_path`/`source_url` are emitted ONLY
+    when non-default, so a build that uses none of them is byte-identical to the Phase-1
+    stub-config (the v1 corpus and its exact-bytes test are unchanged). Their absence is today's
+    behaviour, so no stub_config_version bump is needed (docs/adr/0004 §2, docs/adr/0005 §2).
+    `source_url` (Phase 3, INV-REMOTE-01) names WHERE to fetch the payload; it is not a trust
+    anchor (the footer digest is), so it needs no escaping beyond TOML basic-string quoting.
+    Read before decryption by launcher/stubconfig.parseStubConfig; sha-checked first
+    (INV-STUB-01)."""
     lines = ["stub_config_version = 1"]
     # Top-level keys must precede the [canary] table (TOML). Emit only when non-default.
     if reap:
@@ -188,6 +299,8 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = Fal
         lines.append("ram_only = true")
     if base_path:
         lines.append(f"base_path = {_toml_basic_str(base_path)}")
+    if source_url:
+        lines.append(f"source_url = {_toml_basic_str(source_url)}")
     lines += ["", "[canary]"]
     lines += [f'{knob} = "{canary[knob]}"' for knob in CANARY_KNOBS]
     return ("\n".join(lines) + "\n").encode("utf-8")
@@ -468,17 +581,29 @@ def _resolve(project: Path, tier: str, python_cli: str,
     pyver = (python_cli or decl.get("python", "") or disc.get("python", "")
          or DEFAULT_PYTHON)
     e = decl.get("encryption", {})
+    # `geo` arrives as the assembled gate object (build_geo_policy) or {}; fall back to a
+    # haru_pack.toml `[encryption] geo = [...]` country list, normalized to the same object
+    # shape (INV-GEO-01). Resolve it ONCE and use the SAME object for both the enabled test and
+    # the policy value — otherwise a geo declared only in TOML sets no enabled bit and is
+    # silently dropped (ships plaintext, no gate: the SILENT-WEDGE class, INV-CHAOS-07).
+    geo_obj = _normalize_geo(geo) if geo else _normalize_geo(e.get("geo", []))
+    exp = expires or e.get("expires", "")
+    mach = machine or e.get("machine", "")
+    usr = user or e.get("user", "")
+    embed = embed_secret or bool(e.get("embed_secret"))
     enc = {
         # INV-BUILD-02: an explicit --encrypt must enable encryption on its own. It was
         # previously dropped here, so `--encrypt --secret X` with no policy flag attached a
-        # PLAINTEXT payload and exited 0.
+        # PLAINTEXT payload and exited 0. Every policy field — from CLI OR haru_pack.toml —
+        # forces encryption, so a declared licence/gate can never silently ship unenforced;
+        # a missing secret then fails LOUDLY at the `enabled and secret is None` guard below.
         "enabled": bool(encrypt) or bool(e.get("enabled"))
-                   or any([expires, geo, machine, user, embed_secret]),
-        "expires": expires or e.get("expires", ""),
-        "geo": geo or e.get("geo", []),
-        "machine": machine or e.get("machine", ""),
-        "user": user or e.get("user", ""),
-        "embed_secret": embed_secret or bool(e.get("embed_secret")),
+                   or any([exp, geo_obj.get("allow"), mach, usr, embed]),
+        "expires": exp,
+        "geo": geo_obj,
+        "machine": mach,
+        "user": usr,
+        "embed_secret": embed,
     }
     validate_manifest(manifest)
     if enc["enabled"]:
@@ -698,6 +823,7 @@ def target_is_host(tgt) -> bool:
 
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
+          geo_restrict=(), geo_api_urls=(), geo_consensus: int = 1,
           machine: str = "", user: str = "", embed_secret: bool = False,
           obfuscate: str = "none", obfuscate_args=(),
           python: str = "", wine: bool = False, encrypt: bool = False,
@@ -706,7 +832,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
-          base_path: str = "", env_append=None, cc: str = "", log=None) -> dict:
+          base_path: str = "", source_url: str = "", env_append=None,
+          cc: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -726,7 +853,11 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"needs no system packages.")
     else:
         tc = {"ok": True, "compiler": f"zig ({tgt.zig_triple()})", "advice": ""}
-    manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
+    # Phase 4: fold --geo / --geo-restrict / --geo-restrict-api-url / --geo-restrict-consensus
+    # into the uniform gate object BEFORE resolve, so enc["geo"] carries the online-gate policy
+    # (INV-GATE-01 / INV-GEO-01). {} = no geo gate.
+    geo_policy = build_geo_policy(geo, geo_restrict, geo_api_urls, geo_consensus)
+    manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo_policy,
                                                      machine, user, embed_secret, encrypt,
                                                      entry_point, log=log)
     # Record the requested engine on the manifest so assemble_payload can apply it. Validated
@@ -773,6 +904,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # only where the STUB stages the payload tree — haru cannot control the packed app's OWN
     # disk writes, and on Windows/macOS there is no guaranteed RAM filesystem.
     base_path = resolve_base_path(base_path)
+    source_url = resolve_source_url(source_url)   # Phase 3 (INV-REMOTE-01); "" = appended delivery
     # --overwrite is shred-ON-reap: the reaper is what runs the shred, so overwrite without reap
     # would silently do nothing. Refuse it at build rather than ship a binary that ignores a
     # security flag the packager asked for (INV-SHRED-01).
@@ -781,6 +913,15 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                          "nothing deletes the stage, so nothing shreds it. Add --reap, or drop "
                          "--overwrite.")
     say = log or (lambda _m: None)
+    if enc["geo"].get("allow"):
+        gp = enc["geo"]
+        say(f"--geo-restrict: online location gate — {len(gp['allow'])} allow-rule(s), "
+            f"{len(gp.get('endpoints', [DEFAULT_GEO_ENDPOINT]))} resolver endpoint(s), consensus "
+            f"{gp.get('consensus', 1)}. It resolves the caller's IP+geo at runtime and FAILS "
+            f"CLOSED if fewer than the consensus resolve or agree — no env var can set or bypass "
+            f"it (the old HARUPACK_GEO bypass is gone). HONEST LIMIT: this is an IP check, not a "
+            f"presence check — a VPN/proxy whose exit IP is in an allowed location passes. Lives "
+            f"inside the encrypted policy, so it needs --encrypt (and a secret).")
     if overwrite:
         say("--overwrite: shred-on-reap. The detached reaper overwrites each staged file with "
             "matching-length random data and fsyncs BEFORE unlinking, so a plaintext blob on disk "
@@ -827,7 +968,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
             payload = crypto.encrypt(payload, secret, expires=enc["expires"], geo=enc["geo"],
                                      machine=enc["machine"], user=enc["user"],
                                      embed_secret=enc["embed_secret"])
-            flags = 1
+            flags = FOOTER_FLAG_ENCRYPTED
         # INV-BUILD-01: never report a protection we did not apply. Checked against the
         # bytes about to be attached, not against the intent that produced them.
         if enc["enabled"] != payload.startswith(crypto.MAGIC):
@@ -836,11 +977,28 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
                 "Refusing to emit a binary whose build receipt would be wrong.")
         launcher = compile_launcher(nim, tgt, tdp, cc=cc, log=log)
+        sc_bytes = stub_config_bytes(canary, reap=reap, overwrite=overwrite,
+                                     ram_only=ram_only, base_path=base_path,
+                                     source_url=source_url)
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
-        info = attach(launcher, payload, out, flags=flags,
-                      stub_config=stub_config_bytes(canary, reap=reap, overwrite=overwrite,
-                                                    ram_only=ram_only, base_path=base_path))
+        if source_url:
+            # Phase 3 remote-fetch (INV-REMOTE-01): the payload is NOT embedded. attach records
+            # its digest as the trust anchor and sets the remote flag; we write the exact
+            # container bytes to a sidecar the packager hosts at source_url. The binary carries
+            # only [launcher][stub-config][footer].
+            info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes, remote=True)
+            sidecar = out.with_name(out.name + ".haru-payload")
+            sidecar.write_bytes(payload)
+            info["source_url"] = source_url
+            info["payload_sidecar"] = str(sidecar)
+            say(f"--source-url: remote-fetch delivery. The binary carries NO payload — host these "
+                f"exact bytes at {source_url}:\n  {sidecar}\n  ({len(payload)} bytes, sha256 "
+                f"{info['sha256']}). The launcher fetches the URL and refuses any bytes whose "
+                f"sha256 is not exactly that digest (INV-REMOTE-01), so a mirror or CDN must "
+                f"serve these bytes unchanged.")
+        else:
+            info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes)
     try:
         out.chmod(0o755)
     except Exception:
@@ -857,7 +1015,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 # Phase-2 staging knobs (docs/adr/0004): not secret, and recording them lets an
                 # auditor see whether a binary reaps / stages to RAM / relocates its cache.
                 staging={"reap": bool(reap), "overwrite": bool(overwrite),
-                         "ram_only": bool(ram_only), "base_path": base_path},
+                         "ram_only": bool(ram_only), "base_path": base_path,
+                         "source_url": source_url},
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
     if shake_report:

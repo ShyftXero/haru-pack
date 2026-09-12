@@ -8,11 +8,15 @@ FOOTER_V1_SIZE = 8 + 2 + 2 + 8 + 8 + 32 + 8               # = 68  (payload only)
 FOOTER_V2_SIZE = 8 + 2 + 2 + 8 + 8 + 32 + 8 + 8 + 32 + 8  # = 116 (payload + stub locator)
 FOOTER_SIZE = FOOTER_V1_SIZE                              # back-compat alias (v1)
 
+# Footer flag bits — MUST match launcher/overlay.nim FooterFlag* constants.
+FOOTER_FLAG_ENCRYPTED = 1   # bit0: payload is an encrypted container (crypto.MAGIC)
+FOOTER_FLAG_REMOTE = 2      # bit1: payload is fetched at runtime, not appended (Phase 3)
+
 _FOOTER_SIZES = {1: FOOTER_V1_SIZE, 2: FOOTER_V2_SIZE}
 
 
 def attach(launcher: Path, payload: bytes, out: Path, flags: int = 0,
-           stub_config: bytes | None = None) -> dict:
+           stub_config: bytes | None = None, remote: bool = False) -> dict:
     """Append `payload` (+ optional cleartext `stub_config`) + a versioned footer to the
     launcher PE/ELF. Run BEFORE signing: an Authenticode cert table appended afterward sits
     past the footer, which the launcher relocates by scanning backward for MAGIC.
@@ -20,10 +24,30 @@ def attach(launcher: Path, payload: bytes, out: Path, flags: int = 0,
     `stub_config=None` emits a v1 (68B) footer, byte-identical to the single-payload format
     every existing build and v1 test corpus loads. Passing bytes emits a v2 (116B) footer
     and lays the file out as [launcher][payload][stub-config][footer], the stub-config
-    covered by the signature and located only by the footer (docs/adr/0003 §1)."""
+    covered by the signature and located only by the footer (docs/adr/0003 §1).
+
+    `remote=True` (Phase 3 remote-fetch, INV-REMOTE-01) records the payload DIGEST as the
+    trust anchor but embeds NO payload bytes: the file is laid out [launcher][stub-config]
+    [footer] with payload_len=0 and the remote flag bit set. The caller hosts `payload` at the
+    stub-config's source_url; the launcher fetches it and verifies it against this digest, so
+    the byte SOURCE is the only difference from an appended build. A remote build MUST carry a
+    stub-config (it holds source_url)."""
     stub = Path(launcher).read_bytes()
     off = len(stub)
     paysha = hashlib.sha256(payload).digest()
+    if remote:
+        if stub_config is None:
+            raise ValueError("remote build requires a stub_config (it carries source_url)")
+        flags |= FOOTER_FLAG_REMOTE
+        stub_off = off                     # stub-config right after the launcher; no payload between
+        stub_sha = hashlib.sha256(stub_config).digest()
+        footer = (MAGIC + struct.pack("<HHQQ", 2, flags, off, 0) + paysha
+                  + struct.pack("<QQ", stub_off, len(stub_config)) + stub_sha + TAIL)
+        assert len(footer) == FOOTER_V2_SIZE, len(footer)
+        Path(out).write_bytes(stub + stub_config + footer)
+        return {"format_ver": 2, "remote": True, "payload_off": off, "payload_len": 0,
+                "sha256": paysha.hex(), "stub_off": stub_off, "stub_len": len(stub_config),
+                "stub_sha256": stub_sha.hex()}
     if stub_config is None:
         footer = MAGIC + struct.pack("<HHQQ", 1, flags, off, len(payload)) + paysha + TAIL
         assert len(footer) == FOOTER_V1_SIZE, len(footer)

@@ -104,17 +104,63 @@ proc checkUvArchive*(data: string, expectedSha: string): string =
     return "digest mismatch: manifest pins " & expectedSha & ", download is " & got
   return ""
 
-proc contentLengthOver(url: string): bool =
+proc contentLengthOver(url: string, cap: int, timeout = FetchTimeoutSecs): bool =
   ## Advisory pre-flight: refuse an obviously oversized asset before pulling it into
   ## memory. A server that lies or omits content-length just falls through to the
-  ## post-download check in `checkUvArchive`.
+  ## post-download size check in the caller.
   try:
-    let h = head(url, timeout = FetchTimeoutSecs)
+    let h = head(url, timeout = timeout)
     let cl = h.headers["content-length"]
     if cl.len == 0: return false
-    return parseBiggestInt(cl) > MaxUvArchiveBytes
+    return parseBiggestInt(cl) > cap
   except CatchableError:
     return false
+
+const
+  MaxPayloadBytes* = 1024 * 1024 * 1024      ## 1 GiB in-memory cap on a remotely-fetched
+                                             ## payload container (INV-REMOTE-01). puppy has
+                                             ## no streaming API, so the whole body is
+                                             ## buffered in memory before we can size-check
+                                             ## it — a payload larger than this must ship
+                                             ## APPENDED, not remote. Honest limit, same shape
+                                             ## as the uv-archive cap above.
+  PayloadFetchTimeoutSecs* = 300'f32
+
+proc fetchPayload*(url: string): tuple[body: string, err: string] =
+  ## Phase 3 remote-fetch (INV-REMOTE-01). Fetch a payload container over HTTP. Returns
+  ## (body, "") on success or ("", reason) on ANY failure. This proc makes NO trust decision:
+  ## the caller verifies the returned bytes against the build-baked footer digest (the trust
+  ## anchor) and dies fail-closed on mismatch, so a hostile URL/server can only cause a
+  ## refusal, never execution of unverified bytes. Here we only bound size + time and report
+  ## transport failures.
+  ##
+  ## Proxy is honored by the OS HTTP stack puppy uses: libcurl reads http_proxy / https_proxy /
+  ## no_proxy on Linux; WinHTTP uses the Windows system/auto proxy; macOS uses the system
+  ## proxy. (Windows and macOS do NOT read the *_proxy environment variables — they read the
+  ## OS proxy configuration.)
+  if url.len == 0: return ("", "empty source URL")
+  # Restrict the scheme at RUNTIME, not just at build. The URL can come from the env override
+  # (`<canary>_SOURCE_URL`), which a local user sets, and puppy's libcurl backend also speaks
+  # file:// / ftp:// / gopher:// / dict:// — a blind-SSRF / local-file surface. The fetched
+  # bytes are digest-anchored so this is defense-in-depth, but a delivery URL is HTTP by
+  # definition, so anything else is refused rather than handed to libcurl.
+  let lo = url.toLowerAscii
+  if not (lo.startsWith("http://") or lo.startsWith("https://")):
+    return ("", "refusing a non-http(s) source URL")
+  if contentLengthOver(url, MaxPayloadBytes, PayloadFetchTimeoutSecs):
+    return ("", "server advertises more than the " & $MaxPayloadBytes & " byte cap")
+  try:
+    let res = get(url, timeout = PayloadFetchTimeoutSecs)
+    if res.code != 200:
+      return ("", "HTTP " & $res.code)
+    if res.body.len == 0:
+      return ("", "empty response body")
+    if res.body.len > MaxPayloadBytes:
+      return ("", "payload is " & $res.body.len & " bytes, over the " &
+                  $MaxPayloadBytes & " byte cap")
+    return (res.body, "")
+  except CatchableError as e:
+    return ("", e.msg)
 
 proc ensureUv*(stageRoot, uvVersion: string, expectedShaOverride = ""): string =
   ## returns a usable uv path, downloading it if needed. "" on failure.
@@ -138,7 +184,7 @@ proc ensureUv*(stageRoot, uvVersion: string, expectedShaOverride = ""): string =
   let arc = tmp / asset
   stderr.writeLine "haru-pack: fetching uv " & uvVersion & " ..."
   try:
-    if contentLengthOver(url):
+    if contentLengthOver(url, MaxUvArchiveBytes):
       stderr.writeLine "haru-pack: refusing uv download: server advertises more than the " &
         $MaxUvArchiveBytes & " byte cap"
       return ""

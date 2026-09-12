@@ -2287,6 +2287,98 @@ Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, sr
 
 ---
 
+## REMOTE — the payload can arrive over the wire, and the wire is not trusted
+
+### INV-REMOTE-01
+Status: active
+Statement: A remote-fetch build (`--source-url`, footer remote flag) embeds NO payload bytes; it
+fetches the payload over HTTP at runtime and runs it through the SAME pipeline as an appended
+build — the build-baked footer digest (`ft.payloadSha`) is verified against the fetched bytes
+BEFORE decrypt/license/stage, so only bytes matching the digest ever run. The byte SOURCE is the
+only difference between appended and remote delivery: no pipeline step is skippable by choosing a
+mode. Delivery mode is fixed at build time by the footer flag; the `SOURCE_URL` knob (env
+`<canary>_SOURCE_URL` over the baked value) only relocates WHERE to fetch (mirror/failover) — an
+APPENDED build never flips to a network fetch because of an env var, and any fetch/transport
+failure is fail-closed (`ExitRemoteFetch`), never a fallback to running something else.
+Actors: an attacker on the network path (or a hostile/compromised mirror) who can substitute the
+fetched bytes, and a local user who can set `<canary>_SOURCE_URL` to repoint the fetch. Neither can
+cause unverified bytes to execute: substituted bytes fail the digest check, a repointed URL is
+still digest-anchored.
+Assets: the property that where the payload comes from is untrusted input and the build-time digest
+is the sole trust anchor — so remote delivery is exactly as safe as appended delivery, and a
+down/lying host degrades to a refusal, not to arbitrary code.
+Red-path: Remove the `verifyPayloadDigest(payload, ft.payloadSha)` call after the fetch/read split
+in `main.launch`, rebuild, and run a remote binary whose server returns tampered bytes: the app
+RUNS on the tampered payload (returncode 0, no "integrity check FAILED"), and
+`test_remote_tampered_bytes_fail_closed` goes red. Separately, make `main.launch` swallow the
+`fetchPayload` error instead of `die(..., ExitRemoteFetch)` and `test_remote_server_down_fail_closed`
+goes red. Walked 2026-09-12 on this Linux host (the digest neutralization was observed to run
+tampered bytes — zippy tolerates the trailing junk, so the digest check is exactly what stops it).
+Source: docs/adr/0005-remote-fetch.md. CONTEXT.md "remote-fetch" / "payload pipeline". Issue #10.
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/uvfetch.nim, src/haru_pack/launcher/overlay.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/overlay.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_remote_fetch.py
+
+---
+
+## GATE — a pre-run condition is resolved, matched, and failed closed
+
+### INV-GATE-01
+Status: active
+Statement: Every rule-checked execution gate has ONE shape — resolve a current value, match it
+against an allow-policy, FAIL CLOSED — and all gates live inside the encrypted policy (checked
+post-decrypt, invisible to a reverse-engineer). The online geo/ip gate resolves the caller's
+IP+geo from a consensus of N resolver endpoints and returns normally ONLY when at least
+`consensus` endpoints resolve AND at least `consensus` of them agree the caller is allowed;
+anything less — too few reachable, too few agreeing, an unparseable body, `success != true` — is
+a refusal (`quit 3`), never a pass. `date` (expiry) is the same shape; `machine`/`user` are
+strictly stronger (cryptographically bound via the key). Designing one gate is designing them all.
+Actors: an operator on a down or lying network (a resolver that times out, 500s, or returns junk)
+who would benefit if "cannot check" silently became "allowed"; and the packager who must trust
+that a location restriction actually restricts.
+Assets: the fail-closed property — an execution gate that cannot resolve its input denies rather
+than admits, so a DoS'd or partitioned resolver stops the app instead of waving it through.
+Red-path: In `execgate.checkGeoGate` disable the two guards (`if resolved < gp.consensus: quit`
+and `if allowed < gp.consensus: quit`), rebuild, and run an encrypted binary whose resolver
+reports a denied location (and, separately, one whose resolver is unreachable): the app RUNS
+(returncode 0), and `test_geo_denied_location_fails_closed` /
+`test_geo_resolver_unreachable_fails_closed` go red. Walked 2026-09-12 on this Linux host.
+Source: docs/adr/0006-execution-gates.md. CONTEXT.md "execution gate" / "geo / ip". Issue #11.
+Territory: src/haru_pack/launcher/execgate.nim, src/haru_pack/launcher/cryptbox.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py
+
+### INV-GEO-01
+Status: active
+Statement: The geo/ip gate is decided by the online resolver consensus against the encrypted
+allow-policy, and haru-pack reads NO environment variable to decide it — no haru-pack knob or env
+can satisfy or bypass it. The retired `HARUPACK_GEO` bypass (a user-settable var that used to pass
+the geo check outright) is removed; `cryptbox.checkPolicy` reads no env for location, a pre-Phase-4
+array-form geo policy (which depended on that bypass) is refused rather than silently ignored, and
+a declared-but-unparseable allow-list fails closed. Allow-rules are `field=value` assertions
+against the resolver JSON — AND within a rule, OR across rules — so the same mechanism gates geo
+(`country_code=US`) and ip (`ip=1.2.3.4`).
+Actors: a licensed user outside the allowed region who sets `HARUPACK_GEO` (or any other var
+haru-pack might read) to an allowed value to run anyway — exactly the bypass that made the old geo
+check theatre. This invariant closes THAT bypass; it does not (cannot) close the transport itself —
+see the Limit.
+Assets: the property that the location decision is not local state that haru-pack itself trusts;
+setting an env var that haru-pack reads cannot turn a denied location into an allowed one.
+Red-path: Re-add `if getEnv("HARUPACK_GEO").len > 0: return` to `cryptbox.checkPolicy` before the
+gate, rebuild, and run an encrypted binary whose resolver denies (FR) with `HARUPACK_GEO=US` in
+the environment: the app RUNS and `test_env_cannot_bypass_the_geo_gate` goes red. Walked
+2026-09-12 on this Linux host (observed the app run under the reintroduced bypass).
+Note: HONEST LIMIT (load-bearing — do not read the Statement wider than this). The gate is an
+HTTP(S) call made ON THE END USER'S OWN MACHINE. A user with local privilege controls their own
+proxy (`https_proxy`), CA trust (`SSL_CERT_FILE`/`SSL_CERT_DIR`), and DNS/`/etc/hosts`, so they can
+MITM the resolver and forge `country_code=US` — and N-endpoint consensus does NOT help, because one
+on-path position intercepts every endpoint identically (and the shipped default K=1 trusts a single
+response). So this gate is REAL against a casual user and honest network faults (fail-closed
+offline), but it is ADVISORY against a determined local adversary; consensus defends only against a
+minority of compromised/lying EXTERNAL resolvers. The durable control against a hostile HOST is not
+client-side geo — it is not shipping to them. Documented in docs/adr/0006 §"Honest limits".
+Source: docs/adr/0006-execution-gates.md §3. CONTEXT.md "geo / ip (execution gates)". Issue #11 —
+the security gap this phase was asked to close.
+Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/execgate.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py
+
+---
+
 ## TOOL — the kitchen sink is the default, and all of it is declinable
 
 ### INV-TOOL-01
