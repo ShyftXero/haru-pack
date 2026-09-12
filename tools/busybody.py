@@ -4408,6 +4408,79 @@ def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: 
     return 0
 
 
+# ── Single-instance run control (INV-CHAOS-13, adopted from lotek BusyBody #738) ──
+# A busybody sweep stages a REAL interpreter per worker (tens of MB each at the thick tier), so
+# two sweeps on one box thrash disk and memory — a thick top-50 sweep was killed by the OOM guard
+# every time a second sweep ran alongside it (2026-09-12). A sweep therefore registers itself and
+# REFUSES to start while another is genuinely LIVE, and REAPS a registry left by a DEAD run rather
+# than trusting it (a bare pid is not proof; the heartbeat it owns is). Project-tagged: this
+# NEVER reads or writes another project's busybody registry — lotek keeps its own /tmp dir, so do
+# we. Checks pids directly with os.kill(pid, 0), so there is no ps-grep self-match trap.
+BB_REGISTRY = Path(tempfile.gettempdir()) / "harupack-busybody"
+BB_STALE_S = 900.0                       # heartbeat/birth older than this = wedged or dead -> reap
+BB_FORCE_ENV = "HARUPACK_BUSYBODY_FORCE"
+
+
+def _bb_live(entry: dict) -> bool:
+    """True only if the entry names a process still genuinely working: its pid is alive AND its
+    heartbeat (or, before its first beat, its birth time) is fresh. A recycled pid with a stale
+    or absent heartbeat is NOT live — so a dead run's marker never blocks a new one."""
+    pid = entry.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)                  # signal 0: exists + signalable; ProcessLookupError if gone
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass                             # alive but owned by another user — still alive
+    beat = None
+    hb = entry.get("heartbeat")
+    if hb:
+        try:
+            beat = float(Path(hb).read_text().strip())
+        except (OSError, ValueError):
+            beat = None
+    if beat is None:                     # not yet beating -> fall back to birth so a just-started
+        beat = entry.get("born")         # run is not mistaken for a corpse
+    if not isinstance(beat, (int, float)):
+        return False
+    return (time.time() - beat) < BB_STALE_S
+
+
+def guard_single_instance(run_id: str, heartbeat: Path, log=print) -> Path:
+    """Refuse to start while another sweep is LIVE (exit 3); reap a DEAD one's registry and carry
+    on. Returns this run's registry-file path — remove it on exit. `HARUPACK_BUSYBODY_FORCE=1`
+    overrides the refusal (a logged, deliberate override beats a guard someone deletes)."""
+    BB_REGISTRY.mkdir(parents=True, exist_ok=True)
+    forced = os.environ.get(BB_FORCE_ENV) == "1"
+    for f in sorted(BB_REGISTRY.glob("*.json")):
+        try:
+            entry = json.loads(f.read_text())
+        except (OSError, ValueError):
+            f.unlink(missing_ok=True)    # unreadable marker is junk, not a live run
+            continue
+        if entry.get("pid") == os.getpid():
+            continue                     # never match our own pid
+        if _bb_live(entry):
+            if forced:
+                log(f"another busybody sweep is live (pid {entry.get('pid')}, run "
+                    f"{entry.get('run_id')}); {BB_FORCE_ENV}=1 set — starting anyway")
+                continue
+            print(f"busybody: another sweep is already running (pid {entry.get('pid')}, run "
+                  f"{entry.get('run_id')}).\nTwo sweeps each stage a real interpreter and thrash "
+                  f"this box into the OOM killer.\nWait for it to finish, or set "
+                  f"{BB_FORCE_ENV}=1 to run anyway.", file=sys.stderr)
+            raise SystemExit(3)
+        log(f"reaping a stale busybody registry: {f.name} (pid {entry.get('pid')} dead or "
+            f"idle > {int(BB_STALE_S)}s)")
+        f.unlink(missing_ok=True)
+    mine = BB_REGISTRY / f"{run_id}.json"
+    mine.write_text(json.dumps({"pid": os.getpid(), "run_id": run_id,
+                                "heartbeat": str(heartbeat), "born": time.time()}))
+    return mine
+
+
 def main() -> int:
     global WORK_ROOT, SCRATCH_CAP_GB, DEFAULT_TIMEOUT_S, HERD_N
     ap = argparse.ArgumentParser(description=__doc__,
@@ -4519,12 +4592,27 @@ def main() -> int:
         print(format_analysis(analyze_run(target)))
         return 0
 
+    # Selection is fail-loud (INV-CHAOS-12). A requested persona/case name that matches nothing
+    # is a SETUP FAILURE (exit 2), never a silent drop: `--persona forger,typo` must not quietly
+    # run only forger and print a clean verdict, because a run that silently skipped what you
+    # asked for reads exactly like a healthy one. (Adopted from lotek's BusyBody #558 —
+    # an unmatched selection is fatal, not dropped.)
     picked = CASES
     if a.persona:
-        want = {s.strip() for s in a.persona.split(",")}
+        want = {s.strip() for s in a.persona.split(",") if s.strip()}
+        known = {c["persona"] for c in CASES}
+        if unknown := (want - known):
+            print(f"unknown persona(s): {', '.join(sorted(unknown))}\n"
+                  f"known personas: {', '.join(sorted(known))}", file=sys.stderr)
+            return 2
         picked = [c for c in picked if c["persona"] in want]
     if a.case:
-        want = {s.strip() for s in a.case.split(",")}
+        want = {s.strip() for s in a.case.split(",") if s.strip()}
+        known = {c["name"] for c in CASES}
+        if unknown := (want - known):
+            print(f"unknown case(s): {', '.join(sorted(unknown))}\n"
+                  f"known cases: {', '.join(sorted(known))}", file=sys.stderr)
+            return 2
         picked = [c for c in picked if c["name"] in want]
     if not picked:
         print("nothing selected", file=sys.stderr)
@@ -4545,6 +4633,10 @@ def main() -> int:
     # can say "the 14:05 run" without consulting anything.
     run_id = "bb" + time.strftime("%Y%m%d-%H%M%S")
     run_dir = RUNS / run_id
+    # Single-instance guard (INV-CHAOS-13): refuse to start (exit 3) while another sweep is live;
+    # reap a dead run's stale registry. Done BEFORE creating the journal dir so a refusal litters
+    # nothing. Released in the finally below.
+    bb_reg = guard_single_instance(run_id, run_dir / "heartbeat", log=lambda m: print(f"  {m}"))
     jr = Journal(run_dir, run_id)
     reaper = Reaper(log=lambda m: print(f"  {m}"))
 
@@ -4722,6 +4814,9 @@ def main() -> int:
         print()
         reaper.reap()
         prune_runs(RUNS, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
+        # Release the single-instance registry (INV-CHAOS-13) so the next sweep can start. A
+        # crash that skips this leaves a marker whose pid is now dead, which the next run reaps.
+        bb_reg.unlink(missing_ok=True)
 
     bad = [r for r in results if not r["ok"]]
     if aborted:

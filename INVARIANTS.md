@@ -592,6 +592,51 @@ fault performed inside a helper the case calls, and says so.
 Note: `Journal.write` flushes and fsyncs per record for this reason, which is the same property
 INV-CHAOS-01 needs for an interrupted run.
 Territory: tools/busybody.py, tools/busybody_ledger.py, tests/test_busybody_faults.py
+
+### INV-CHAOS-12
+Status: active
+Statement: A `--persona` / `--case` selection whose name matches nothing is a SETUP FAILURE
+(exit 2), never a silent drop. `--persona forger,typo` (one good name masking a typo) must refuse
+and name the typo, not quietly run only forger and print a clean verdict — a run that silently
+skipped what you asked for reads exactly like a healthy one.
+Actors: whoever narrows a sweep to a persona/case and trusts the exit code — a typo that silently
+runs a shorter matrix (or nothing) and exits 0/clean is the false-green this forbids.
+Assets: the property that the verdict describes the run you asked for; an unmatched selection can
+never masquerade as a clean pass of it.
+Red-path: In `busybody.main` replace the `--case` unknown-name check with `if False and ...`,
+rebuild nothing, and run `busybody.py --case truncated_binary,tyop`: the typo is dropped,
+truncated_binary runs alone, the process exits 0, and
+`test_a_typo_mixed_with_a_real_name_still_fails_loud` goes red. Walked 2026-09-12 on this Linux
+host (observed the typo silently swallowed and rc 0).
+Source: adopted from lotek BusyBody #558 (`_corpus_scripts` — an unmatched selection is fatal,
+not dropped). docs/BUSYBODY.md "Selection is fail-loud".
+Territory: tools/busybody.py, tests/test_busybody_runcontrol.py
+
+### INV-CHAOS-13
+Status: active
+Statement: A busybody sweep registers itself under a project-tagged registry and REFUSES to start
+(exit 3) while another sweep is genuinely LIVE — its pid is alive AND its heartbeat (or, before
+its first beat, its birth time) is fresh (< `BB_STALE_S`). A registry left by a DEAD or WEDGED run
+(pid gone, or heartbeat older than `BB_STALE_S`) is REAPED, never trusted, so one crashed run
+cannot wedge the harness forever. `HARUPACK_BUSYBODY_FORCE=1` overrides the refusal (a logged,
+deliberate override), and the marker is released on exit. The registry is project-tagged and never
+reads or writes another project's.
+Actors: an operator (or a second agent session) who launches a sweep while one is already running.
+Two sweeps each stage a real interpreter per worker and thrash the box into the OOM killer — the
+failure observed 2026-09-12, when a concurrent thick top-50 sweep was killed at every concurrency.
+Assets: the property that only one interpreter-staging sweep runs at a time unless forced, so a
+sweep's resource use is bounded and its results are not polluted by a co-runner's contention; and
+that a dead run's leftover marker degrades to reapable, not to a permanent block.
+Red-path: In `guard_single_instance` replace `raise SystemExit(3)` on the live branch with `pass`,
+and `test_a_live_sweep_blocks_a_second_one` goes red (DID NOT RAISE — a second sweep starts beside
+a live one). Separately, make `_bb_live` ignore the heartbeat/birth freshness (return True on a
+live pid alone) and `test_a_stale_heartbeat_makes_even_a_live_pid_reapable` goes red. Walked
+2026-09-12 on this Linux host (observed the refusal removed and the second sweep proceeding).
+Source: adopted from lotek BusyBody #738 (single-instance reaper, graceful stop, project-tagged
+registry — lotek explicitly reserves its own tag so haru-pack gets its own). docs/BUSYBODY.md "Run control".
+Checks pids directly with `os.kill(pid, 0)`, so there is no ps-grep self-match trap (CLAUDE.md).
+Territory: tools/busybody.py, tests/test_busybody_runcontrol.py
+
 ### INV-FLEX-01
 Status: active
 Statement: `flex/packages.toml` is a pure function of two committed files —
