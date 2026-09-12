@@ -168,16 +168,44 @@ def resolve_base_path(base_path: str) -> str:
     return base_path
 
 
+def resolve_source_url(source_url: str) -> str:
+    """Validate the Phase-3 remote-fetch URL (docs/adr/0005, INV-REMOTE-01). "" = appended
+    delivery (the default). This is a build-time sanity check to catch a typo, NOT a security
+    boundary: the launcher does not trust the URL at all — it fetches from it and verifies the
+    bytes against the build-baked footer digest, so a hostile URL can only cause a fail-closed
+    refusal. We require an http/https scheme (the launcher's puppy HTTP client speaks those)
+    and a non-empty host, and reject leading/trailing whitespace that would smuggle into TOML."""
+    if not source_url:
+        return ""
+    if source_url != source_url.strip():
+        raise BuildError("--source-url has leading or trailing whitespace.")
+    lo = source_url.lower()
+    if not (lo.startswith("http://") or lo.startswith("https://")):
+        raise BuildError(
+            f"--source-url {source_url!r} must be an http:// or https:// URL — the launcher "
+            f"fetches the payload over HTTP (and verifies it against the baked digest). "
+            f"Host the payload sidecar this build writes at that URL.")
+    rest = source_url.split("://", 1)[1]
+    host = rest.split("/", 1)[0]
+    if not host:
+        raise BuildError(f"--source-url {source_url!r} has no host.")
+    return source_url
+
+
 def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = False,
-                      ram_only: bool = False, base_path: str = "") -> bytes:
+                      ram_only: bool = False, base_path: str = "",
+                      source_url: str = "") -> bytes:
     """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2), UTF-8,
     in fixed order. Canary tokens are validated env-name prefixes, so no escaping is needed.
 
-    The Phase-2 keys `reap`/`overwrite`/`ram_only`/`base_path` are emitted ONLY when non-default,
-    so a build that uses none of them is byte-identical to the Phase-1 stub-config (the v1 corpus
-    and its exact-bytes test are unchanged). Their absence is today's behaviour, so no
-    stub_config_version bump is needed (docs/adr/0004 §2). Read before decryption by
-    launcher/stubconfig.parseStubConfig; sha-checked first (INV-STUB-01)."""
+    The optional keys `reap`/`overwrite`/`ram_only`/`base_path`/`source_url` are emitted ONLY
+    when non-default, so a build that uses none of them is byte-identical to the Phase-1
+    stub-config (the v1 corpus and its exact-bytes test are unchanged). Their absence is today's
+    behaviour, so no stub_config_version bump is needed (docs/adr/0004 §2, docs/adr/0005 §2).
+    `source_url` (Phase 3, INV-REMOTE-01) names WHERE to fetch the payload; it is not a trust
+    anchor (the footer digest is), so it needs no escaping beyond TOML basic-string quoting.
+    Read before decryption by launcher/stubconfig.parseStubConfig; sha-checked first
+    (INV-STUB-01)."""
     lines = ["stub_config_version = 1"]
     # Top-level keys must precede the [canary] table (TOML). Emit only when non-default.
     if reap:
@@ -188,6 +216,8 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = Fal
         lines.append("ram_only = true")
     if base_path:
         lines.append(f"base_path = {_toml_basic_str(base_path)}")
+    if source_url:
+        lines.append(f"source_url = {_toml_basic_str(source_url)}")
     lines += ["", "[canary]"]
     lines += [f'{knob} = "{canary[knob]}"' for knob in CANARY_KNOBS]
     return ("\n".join(lines) + "\n").encode("utf-8")
@@ -706,7 +736,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
-          base_path: str = "", env_append=None, cc: str = "", log=None) -> dict:
+          base_path: str = "", source_url: str = "", env_append=None,
+          cc: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -773,6 +804,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # only where the STUB stages the payload tree — haru cannot control the packed app's OWN
     # disk writes, and on Windows/macOS there is no guaranteed RAM filesystem.
     base_path = resolve_base_path(base_path)
+    source_url = resolve_source_url(source_url)   # Phase 3 (INV-REMOTE-01); "" = appended delivery
     # --overwrite is shred-ON-reap: the reaper is what runs the shred, so overwrite without reap
     # would silently do nothing. Refuse it at build rather than ship a binary that ignores a
     # security flag the packager asked for (INV-SHRED-01).
@@ -836,11 +868,28 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
                 "Refusing to emit a binary whose build receipt would be wrong.")
         launcher = compile_launcher(nim, tgt, tdp, cc=cc, log=log)
+        sc_bytes = stub_config_bytes(canary, reap=reap, overwrite=overwrite,
+                                     ram_only=ram_only, base_path=base_path,
+                                     source_url=source_url)
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
-        info = attach(launcher, payload, out, flags=flags,
-                      stub_config=stub_config_bytes(canary, reap=reap, overwrite=overwrite,
-                                                    ram_only=ram_only, base_path=base_path))
+        if source_url:
+            # Phase 3 remote-fetch (INV-REMOTE-01): the payload is NOT embedded. attach records
+            # its digest as the trust anchor and sets the remote flag; we write the exact
+            # container bytes to a sidecar the packager hosts at source_url. The binary carries
+            # only [launcher][stub-config][footer].
+            info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes, remote=True)
+            sidecar = out.with_name(out.name + ".haru-payload")
+            sidecar.write_bytes(payload)
+            info["source_url"] = source_url
+            info["payload_sidecar"] = str(sidecar)
+            say(f"--source-url: remote-fetch delivery. The binary carries NO payload — host these "
+                f"exact bytes at {source_url}:\n  {sidecar}\n  ({len(payload)} bytes, sha256 "
+                f"{info['sha256']}). The launcher fetches the URL and refuses any bytes whose "
+                f"sha256 is not exactly that digest (INV-REMOTE-01), so a mirror or CDN must "
+                f"serve these bytes unchanged.")
+        else:
+            info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes)
     try:
         out.chmod(0o755)
     except Exception:
@@ -857,7 +906,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 # Phase-2 staging knobs (docs/adr/0004): not secret, and recording them lets an
                 # auditor see whether a binary reaps / stages to RAM / relocates its cache.
                 staging={"reap": bool(reap), "overwrite": bool(overwrite),
-                         "ram_only": bool(ram_only), "base_path": base_path},
+                         "ram_only": bool(ram_only), "base_path": base_path,
+                         "source_url": source_url},
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
     if shake_report:

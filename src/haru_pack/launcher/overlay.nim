@@ -15,6 +15,11 @@ const
   FooterV1Size* = 8 + 2 + 2 + 8 + 8 + 32 + 8            # = 68  (payload only)
   FooterV2Size* = 8 + 2 + 2 + 8 + 8 + 32 + 8 + 8 + 32 + 8  # = 116 (payload + stub locator)
   ScanWindow*  = 256 * 1024   # bytes from EOF to search
+  FooterFlagEncrypted* = 1'u16 ## bit0: payload is an encrypted container (matches crypto.py)
+  FooterFlagRemote*    = 2'u16 ## bit1: payload is FETCHED at runtime, not appended (Phase 3,
+                               ## INV-REMOTE-01). payloadLen is 0 and no payload bytes are
+                               ## embedded; payloadSha remains the trust anchor for the bytes
+                               ## fetched from the SOURCE_URL knob.
 
 type Footer* = object
   formatVer*: uint16
@@ -93,14 +98,21 @@ proc footerFault*(ft: Footer, fileSize, footerAt: int): string =
   if fileSize <= 0: return "cannot determine the size of the executable"
   if footerAt < 0 or footerAt > fileSize: return "footer offset is outside the file"
   let fs = uint64(fileSize)
-  if ft.payloadLen == 0'u64: return "footer declares a zero-length payload"
-  # Compare each term against the file size BEFORE adding them, so the sum cannot wrap.
-  if ft.payloadOff > fs: return "payload offset lies past the end of the file"
-  if ft.payloadLen > fs: return "payload length exceeds the size of the file"
-  if ft.payloadOff + ft.payloadLen > fs:
-    return "payload extends past the end of the file"
-  if ft.payloadOff + ft.payloadLen > uint64(footerAt):
-    return "payload overlaps its own footer"
+  # Phase 3 remote-fetch (INV-REMOTE-01): a remote build embeds NO payload bytes, so the
+  # payload extent is legitimately empty (payloadLen == 0). Skip the payload-extent checks
+  # for such a footer; readPayload is never called on it (main.launch fetches instead), and
+  # the stub-config — which is mandatory for a remote build (it carries source_url) — still
+  # gets the full validation below. An APPENDED build (the default) is unchanged.
+  let remote = (ft.flags and FooterFlagRemote) != 0'u16
+  if not remote:
+    if ft.payloadLen == 0'u64: return "footer declares a zero-length payload"
+    # Compare each term against the file size BEFORE adding them, so the sum cannot wrap.
+    if ft.payloadOff > fs: return "payload offset lies past the end of the file"
+    if ft.payloadLen > fs: return "payload length exceeds the size of the file"
+    if ft.payloadOff + ft.payloadLen > fs:
+      return "payload extends past the end of the file"
+    if ft.payloadOff + ft.payloadLen > uint64(footerAt):
+      return "payload overlaps its own footer"
   # v2 only: the stub-config locator gets the same up-front validation (INV-LAUNCH-08).
   if ft.hasStub:
     if ft.stubLen == 0'u64: return "footer declares a zero-length stub-config"

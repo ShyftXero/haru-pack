@@ -29,6 +29,14 @@ type
     ramOnly*: bool       ## build-time --ephemeral (wire key still `ram_only`): best-effort
                          ## RAM-backed staging root
     basePath*: string    ## build-time --base-path: staging-root default ("" = normal cache)
+    sourceUrl*: string   ## build-time --source-url (Phase 3, INV-REMOTE-01): when non-empty
+                         ## the payload is FETCHED from this URL instead of read from the
+                         ## appended overlay. The runtime value is env-overridable through the
+                         ## SOURCE_URL knob (`<canary>_SOURCE_URL`), which is SAFE: the fetched
+                         ## bytes are still verified against the build-baked footer digest
+                         ## (the trust anchor), so repointing the URL can change WHERE bytes
+                         ## come from but never WHICH bytes are accepted. "" = appended
+                         ## delivery (today's behaviour).
 
 const
   SupportedStubConfigVersion* = 1
@@ -59,6 +67,7 @@ proc defaultStubConfig*(): StubConfig =
   result.overwrite = false
   result.ramOnly = false
   result.basePath = ""
+  result.sourceUrl = ""
 
 proc isValidCanary(tok: string): bool =
   ## ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced at build time
@@ -123,6 +132,7 @@ proc parseStubConfig*(raw: string): StubConfig =
   result.overwrite = false
   result.ramOnly = false
   result.basePath = ""
+  result.sourceUrl = ""
   if t.contains("reap"):
     let n = t["reap"]
     if n.kind != TomlValueKind.Bool:
@@ -143,6 +153,15 @@ proc parseStubConfig*(raw: string): StubConfig =
     if n.kind != TomlValueKind.String:
       raise newException(ValueError, "stub-config: base_path must be a string")
     result.basePath = n.getStr()
+  if t.contains("source_url"):
+    # Phase 3 (INV-REMOTE-01). Absent -> appended delivery. A present value only names WHERE
+    # to fetch; the footer digest still decides WHICH bytes run, so this key is not a trust
+    # anchor and needs no scheme allow-list here (a hostile URL just fails digest-verify,
+    # fail-closed). We do reject an obviously malformed non-string.
+    let n = t["source_url"]
+    if n.kind != TomlValueKind.String:
+      raise newException(ValueError, "stub-config: source_url must be a string")
+    result.sourceUrl = n.getStr()
 
 proc envForKnob*(sc: StubConfig, k: Knob): string =
   ## The single runtime resolution rule (INV-CANARY-01): knob K is read from

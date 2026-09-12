@@ -2287,6 +2287,38 @@ Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, sr
 
 ---
 
+## REMOTE — the payload can arrive over the wire, and the wire is not trusted
+
+### INV-REMOTE-01
+Status: active
+Statement: A remote-fetch build (`--source-url`, footer remote flag) embeds NO payload bytes; it
+fetches the payload over HTTP at runtime and runs it through the SAME pipeline as an appended
+build — the build-baked footer digest (`ft.payloadSha`) is verified against the fetched bytes
+BEFORE decrypt/license/stage, so only bytes matching the digest ever run. The byte SOURCE is the
+only difference between appended and remote delivery: no pipeline step is skippable by choosing a
+mode. Delivery mode is fixed at build time by the footer flag; the `SOURCE_URL` knob (env
+`<canary>_SOURCE_URL` over the baked value) only relocates WHERE to fetch (mirror/failover) — an
+APPENDED build never flips to a network fetch because of an env var, and any fetch/transport
+failure is fail-closed (`ExitRemoteFetch`), never a fallback to running something else.
+Actors: an attacker on the network path (or a hostile/compromised mirror) who can substitute the
+fetched bytes, and a local user who can set `<canary>_SOURCE_URL` to repoint the fetch. Neither can
+cause unverified bytes to execute: substituted bytes fail the digest check, a repointed URL is
+still digest-anchored.
+Assets: the property that where the payload comes from is untrusted input and the build-time digest
+is the sole trust anchor — so remote delivery is exactly as safe as appended delivery, and a
+down/lying host degrades to a refusal, not to arbitrary code.
+Red-path: Remove the `verifyPayloadDigest(payload, ft.payloadSha)` call after the fetch/read split
+in `main.launch`, rebuild, and run a remote binary whose server returns tampered bytes: the app
+RUNS on the tampered payload (returncode 0, no "integrity check FAILED"), and
+`test_remote_tampered_bytes_fail_closed` goes red. Separately, make `main.launch` swallow the
+`fetchPayload` error instead of `die(..., ExitRemoteFetch)` and `test_remote_server_down_fail_closed`
+goes red. Walked 2026-09-12 on this Linux host (the digest neutralization was observed to run
+tampered bytes — zippy tolerates the trailing junk, so the digest check is exactly what stops it).
+Source: docs/adr/0005-remote-fetch.md. CONTEXT.md "remote-fetch" / "payload pipeline". Issue #10.
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/uvfetch.nim, src/haru_pack/launcher/overlay.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/overlay.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_remote_fetch.py
+
+---
+
 ## TOOL — the kitchen sink is the default, and all of it is declinable
 
 ### INV-TOOL-01

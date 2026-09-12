@@ -24,6 +24,10 @@ const
   ExitBadStub*        = 10  ## stub-config: digest mismatch, unparseable TOML, unsupported
                             ## stub_config_version, or an invalid/missing canary. One-line
                             ## diagnostic, never a traceback (INV-LAUNCH-06 / INV-STUB-01).
+  ExitRemoteFetch*    = 11  ## remote-fetch delivery: the payload could not be fetched over
+                            ## HTTP (network down, non-200, over the size cap, timeout). A
+                            ## fetched-but-tampered payload is ExitDigestMismatch, not this —
+                            ## this is transport-level, always fail-closed (INV-REMOTE-01).
 
 proc die(msg: string, code = 1) =
   stderr.writeLine "haru-pack: " & msg
@@ -197,10 +201,32 @@ proc launch(): int =
         sc = parseStubConfig(stubBytes)
       except ValueError as e:
         die(e.msg, ExitBadStub)
-    # TODO(phase-remote): SOURCE_URL knob — when getEnv(sc.envForKnob(kSourceUrl)) is set,
-    # fetch the payload over HTTP through the one payload pipeline instead of readPayload.
-    var payload = readPayload(self, ft, footerAt)
-    verifyPayloadDigest(payload, ft.payloadSha)   # INV-LAUNCH-01 — before we decrypt
+    # Payload source (Phase 3 remote-fetch, INV-REMOTE-01). The DELIVERY MODE is fixed at build
+    # time by the footer's remote flag; only the URL is a runtime knob. For a remote build the
+    # SOURCE_URL knob supplies where to fetch — env `<canary>_SOURCE_URL` overrides the baked
+    # `--source-url` (mirror/failover) — and the fetched bytes run through the SAME pipeline as
+    # an appended payload: verifyPayloadDigest against the build-baked footer digest is the one
+    # trust anchor, so a hostile URL can only cause a fail-closed refusal, never execution of
+    # unverified bytes. An APPENDED build reads its overlay and ignores any SOURCE_URL env — a
+    # baked-in payload is never redirected to the network by an environment variable.
+    var payload: string
+    if (ft.flags and FooterFlagRemote) != 0'u16:
+      let srcUrl = block:
+        let envUrl = getEnv(sc.envForKnob(kSourceUrl))
+        if envUrl.len > 0: envUrl else: sc.sourceUrl
+      if srcUrl.len == 0:
+        die("this build fetches its payload remotely but no source URL is configured " &
+            "(neither a baked --source-url nor the " & sc.envForKnob(kSourceUrl) &
+            " environment variable)", ExitBadStub)
+      stderr.writeLine "haru-pack: fetching payload ..."
+      let (body, err) = fetchPayload(srcUrl)
+      if err.len > 0:
+        die("remote-fetch of the payload failed (" & srcUrl & "): " & err &
+            " — a --source-url build needs network on first run.", ExitRemoteFetch)
+      payload = body
+    else:
+      payload = readPayload(self, ft, footerAt)
+    verifyPayloadDigest(payload, ft.payloadSha)   # INV-LAUNCH-01 / INV-REMOTE-01 — before decrypt
     let shahex = hexOf(ft.payloadSha)
     if (ft.flags and 1'u16) != 0'u16 or isEncrypted(payload):
       # SECRET knob (INV-CANARY-01): the decryption key's env NAME is sc.envForKnob(kSecret)

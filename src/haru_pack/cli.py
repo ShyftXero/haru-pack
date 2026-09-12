@@ -78,7 +78,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
                reap=False, ephemeral=False, ram_only=False, overwrite=False, base_path="",
-               env_append=None, cc="") -> None:
+               source_url="", env_append=None, cc="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -128,7 +128,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          stub_env_source_url_canary=stub_env_source_url_canary,
                          stub_env_base_path_canary=stub_env_base_path_canary,
                          reap=reap, overwrite=overwrite, ram_only=ram_only, base_path=base_path,
-                         env_append=list(env_append or []),
+                         source_url=source_url, env_append=list(env_append or []),
                          log=lambda m: print(
                              f"{prog()}: {m}",
                              style="warn" if "WARNING" in m else "info"))
@@ -476,6 +476,12 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           base_path: str = typer.Option("", "--base-path", metavar="DIR",
               help="staging-root default baked into the stub-config (a canary-named BASE_PATH "
                    "env var overrides it at runtime). Refused if it is a root/drive/home path"),
+          source_url: str = typer.Option("", "--source-url", metavar="URL",
+              help="remote-fetch delivery: the payload is fetched from URL at runtime instead of "
+                   "appended. The binary carries only the launcher + a build-baked digest; the "
+                   "build writes a .haru-payload sidecar you host at URL. Fetched bytes are "
+                   "verified against that digest, so the URL is not trusted (INV-REMOTE-01). "
+                   "A canary-named SOURCE_URL env var overrides it at runtime (mirror/failover)"),
           env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
               help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
                    "Lives in the payload — use --encrypt to hide a secret value")):
@@ -495,7 +501,7 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_source_url_canary=stub_env_source_url_canary,
                stub_env_base_path_canary=stub_env_base_path_canary,
                reap=reap, ephemeral=ephemeral, ram_only=ram_only, overwrite=overwrite,
-               base_path=base_path, env_append=env_append)
+               base_path=base_path, source_url=source_url, env_append=env_append)
 
 @app.command()
 def verify(exe: Path):
