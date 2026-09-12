@@ -324,6 +324,41 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = Fal
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def _staged_tree_bytes(payload_dir: Path) -> int:
+    """Size of the tree the launcher will STAGE, for the RAM-fit check (docs/adr/0005,
+    INV-EPHEMERAL-01).
+
+    Not `du` of the payload dir: `uv` ships XZ-compressed (`uv.xz`, ~14 MB) and the launcher
+    EXPANDS it on stage (~56 MB) via `expandCompressedMembers`. Summing the compressed bytes
+    would under-count by ~40 MB and could hand the RAM gate a "fits" verdict for a tree that
+    then OOMs the small box the gate exists to protect (adversarial review C1). So for every
+    `.xz` member the build wrote a `.xz.size` sidecar for (see `bundle.compress_uv`), count the
+    EXPANDED size, and drop the `.xz` and its metadata sidecars from the count entirely — they
+    are removed before the launcher records the tree. The result is the staged tree's real size;
+    the launcher applies the ×1.2 headroom on top (INV-EPHEMERAL-01)."""
+    total = 0
+    for p in payload_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        name = p.name
+        if name.endswith((".xz.size", ".xz.sha256")):
+            continue                        # metadata sidecars, not part of the staged tree
+        if name.endswith(".xz"):
+            sidecar = p.with_name(name + ".size")
+            if sidecar.exists():
+                try:
+                    total += int(sidecar.read_text().strip())   # EXPANDED size
+                    continue
+                except ValueError:
+                    pass
+            # No sidecar: the launcher would refuse to stage this member at all, so the build
+            # would never ship it. Count the compressed size as the best available fallback.
+            total += p.stat().st_size
+            continue
+        total += p.stat().st_size
+    return total
+
+
 def _looks_secret_shaped(key: str, value: str) -> bool:
     """Deterministic 'this inject looks like a credential' test (docs/adr/0003 §4.3)."""
     ku = key.upper()
@@ -983,6 +1018,23 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
             "tmpfs; a RAM disk needs a signed kernel driver + admin), so it is best-effort there. "
             "It governs only where the STUB stages the payload tree - not the packed app's own "
             "disk writes.")
+    # --encrypt + --ephemeral is often reached for as "nothing plaintext ever hits disk". It is
+    # NOT absolute, and saying so at build time is the same honesty INV-SECRET-02 / INV-BUILD-01
+    # require (adversarial review W1). On a low-RAM target the RAM stage FALLS BACK to the
+    # persistent cache and the decrypted tree lands on disk. (There is no env value that forces
+    # disk — the EPHEMERAL knob only enables RAM — so this is an availability fallback, not an
+    # attacker-controlled downgrade.) That fallback is still reaped, but a plain unlink is
+    # recoverable; --overwrite shreds it (INV-SHRED-01).
+    if ram_only and enc["enabled"]:
+        if overwrite:
+            say("--encrypt + --ephemeral: on a low-RAM target the decrypted tree can fall back to "
+                "disk; --overwrite is set, so that fallback is shredded on reap. Still not a secure "
+                "erase (THREAT_MODEL.md).")
+        else:
+            say("WARNING: --encrypt + --ephemeral is NOT an absolute 'nothing reaches disk'. On a "
+                "low-RAM target the decrypted tree FALLS BACK to the persistent cache; that fallback "
+                "is reaped but a plain unlink is recoverable. Add --overwrite to shred the fallback, "
+                "or accept the residual (THREAT_MODEL.md, docs/adr/0005 §5).")
     if reap:
         say("--reap: after the app exits the stub spawns a detached, fire-and-forget deletion "
             "of the staged subtree it created this run, then exits without waiting. Only that "
@@ -1010,12 +1062,10 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
             # its size or not at all.
             raise BuildError(f"--shake refused to ship: {e}") from e
         # The staged-tree size baked into the stub-config so the launcher can size its RAM-fit
-        # check BEFORE staging (docs/adr/0005, INV-EPHEMERAL-01). Measured from the assembled
-        # payload dir — the bytes the launcher extracts. Only needed when staging may go to RAM.
-        unpacked_bytes = 0
-        if ram_only:
-            unpacked_bytes = sum(p.stat().st_size
-                                 for p in payload_dir.rglob("*") if p.is_file())
+        # check BEFORE staging (docs/adr/0005, INV-EPHEMERAL-01). This is the EXPANDED tree the
+        # launcher stages (uv is un-XZ'd on stage), not the compressed payload dir — see
+        # _staged_tree_bytes. Only needed when staging may go to RAM.
+        unpacked_bytes = _staged_tree_bytes(payload_dir) if ram_only else 0
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:

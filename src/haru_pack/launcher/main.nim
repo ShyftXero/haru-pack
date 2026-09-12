@@ -140,16 +140,13 @@ proc runInstallSteps(uv, appDir: string, m: Manifest, steps: seq[InstallStep],
     ran = true
   if ran or steps.len > 0: writeFile(sentinel, "1")
 
-proc ephemeralOverride(sc: StubConfig): string =
-  ## The runtime EPHEMERAL knob (docs/adr/0005), read from `<canary>_EPHEMERAL`:
-  ##   "0" -> force disk · "1" -> force RAM (skip the fit-check) · anything else -> "" (auto).
-  let v = getEnv(sc.envForKnob(kEphemeral)).strip()
-  if v == "0" or v == "1": return v
-  return ""
-
-proc diskRoot(sc: StubConfig): string =
-  ## The non-RAM staging root: a build-time base_path if one was baked, else the per-user cache.
-  if sc.basePath.len > 0: sc.basePath else: baseDir()
+proc forceRamRequested(sc: StubConfig): bool =
+  ## The runtime EPHEMERAL knob (docs/adr/0005) is 2-STATE: `<canary>_EPHEMERAL=1` forces the
+  ## RAM-backed root and SKIPS the fit-check (target-autonomy enable, even on a binary not built
+  ## `--ephemeral`). There is deliberately NO force-DISK value — an env toggle that pushed an
+  ## `--encrypt --ephemeral` payload onto disk would be a confidentiality downgrade an attacker
+  ## could set, so any non-"1" value (including "0") is treated as unset/auto, never a downgrade.
+  getEnv(sc.envForKnob(kEphemeral)).strip() == "1"
 
 proc autoEphemeralRoot(sc: StubConfig): string =
   ## Auto ephemeral (docs/adr/0005): stage to RAM only if the payload PROVABLY fits, else fall
@@ -167,7 +164,7 @@ proc resolveStagingRoot(sc: StubConfig): string =
   ## INV-BASE-01 / INV-EPHEMERAL-01):
   ##
   ##   BASE_PATH env (explicit path)                                        [highest]
-  ##     > EPHEMERAL env  =0 -> disk  /  =1 -> RAM (skip fit-check; target autonomy)
+  ##     > EPHEMERAL env =1 -> RAM (skip fit-check; target-autonomy enable). No force-disk value.
   ##     > stub-config base_path (build-time default)
   ##     > ram_only ? (auto: RAM if it fits, else the cache) : the per-user cache
   ##
@@ -176,9 +173,7 @@ proc resolveStagingRoot(sc: StubConfig): string =
   ## stages, so a hostile BASE_PATH can relocate staging but never becomes arbitrary-delete.
   let envVal = getEnv(sc.envForKnob(kBasePath))   # BASE_PATH knob (explicit path) wins
   if envVal.len > 0: return envVal
-  let ov = ephemeralOverride(sc)
-  if ov == "0": return diskRoot(sc)               # target forces disk
-  if ov == "1": return ramBackedRoot()            # target forces RAM, even on a non-ephemeral binary
+  if forceRamRequested(sc): return ramBackedRoot()  # =1: force RAM, even on a non-ephemeral binary
   if sc.basePath.len > 0: return sc.basePath      # baked path beats baked ram_only (explicit dir)
   if sc.ramOnly: return autoEphemeralRoot(sc)     # auto: RAM iff it fits, else cache
   return baseDir()

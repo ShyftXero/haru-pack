@@ -92,11 +92,21 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     """
     if thin: tier = "thin"
     if thick or chonky: tier = "thick"
-    # --ram-only is the deprecated surface name of --ephemeral (docs/adr/0004). The WIRE key
-    # stays `ram_only`, so the internal kwarg does too; only the flag the user types moved.
+    # NAMING (N1): three names, one concept split across build-time and runtime.
+    #   --ephemeral   the flag a packager types (build-time)
+    #   ram_only      the WIRE key it maps to in the stub-config / build() kwarg (unchanged since
+    #                 ADR 0004 §2.2 pins the v1 corpus) — so `ram_only == ephemeral` here
+    #   EPHEMERAL     the RUNTIME canary knob (<canary>_EPHEMERAL) the TARGET sets (docs/adr/0005)
+    # --ram-only is the deprecated surface name of --ephemeral (docs/adr/0004).
     if ram_only and not ephemeral:
         print(f"{prog()}: --ram-only is deprecated; use --ephemeral (same behavior)", style="warn")
     ram_only = ephemeral or ram_only
+    # N2: --no-reap only opts out of the reap that --ephemeral IMPLIES; with neither --ephemeral
+    # nor --reap there is no reap to opt out of, so it is a no-op. Say so rather than let it look
+    # like it did something.
+    if no_reap and not (ram_only or reap):
+        print(f"{prog()}: --no-reap has no effect without --ephemeral (or --reap) — nothing "
+              f"implies a reap to opt out of", style="warn")
     if tier not in TIERS:
         print(f"unknown tier '{tier}' ({'|'.join(TIERS)})", style="error"); raise typer.Exit(2)
     if chonky:

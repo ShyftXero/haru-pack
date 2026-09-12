@@ -124,6 +124,13 @@ proc checkPolicy(policy: seq[byte]) =
   # array-form geo policy depended on that bypass and can no longer be honored, so a non-empty
   # array is refused rather than silently ignored (a dropped location restriction is a breach).
   let geo = j{"geo"}
+  # The online-consensus execution gate (execgate.checkGeoGate, INV-GATE-01/INV-GEO-01, ADR
+  # 0006) has since landed on main, superseding the offline fail-closed placeholder this branch
+  # wrote before that gate existed. It reads NO environment variable (no honor-system bypass —
+  # INV-CANARY-03 stays satisfied), resolves the caller's IP+geo from a consensus of resolvers,
+  # and fails closed exactly like the placeholder did on anything it cannot verify. A pre-Phase-4
+  # ARRAY-form geo policy (which depended on the retired HARUPACK_GEO bypass) can no longer be
+  # honored at all, so it is refused outright rather than silently ignored.
   if geo != nil:
     case geo.kind
     of JObject: checkGeoGate(geo)

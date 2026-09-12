@@ -97,6 +97,33 @@ def test_stub_config_bytes_shape_matches_the_launcher_reader():
                  b'source_url = "HARU"\nbase_path = "HARU"\n')
 
 
+@pytest.mark.invariant("INV-CANARY-03")
+def test_no_plain_haru_named_input_env_read():
+    """Every haru-named runtime INPUT must resolve through the canary model (envForKnob's dynamic
+    `<canary>_<KNOB>` name), so the launcher source carries no `getEnv("HARU…")` string LITERAL —
+    the honor-system bypass class (e.g. the removed HARUPACK_GEO geo bypass). The one exception is
+    the dev-only HARUPACK_DEV_STAGE (guarded by -d:haruDev, never in a release binary). Child-facing
+    vars are set with putEnv (outputs), so they never match this getEnv scan.
+
+    Red-path: add `getEnv("HARUPACK_FOO")` to any launcher .nim, or restore the HARUPACK_GEO read,
+    and this goes red naming the offending var."""
+    from pathlib import Path
+
+    launcher = Path(__file__).resolve().parent.parent / "src/haru_pack/launcher"
+    allowed = {"HARUPACK_DEV_STAGE"}
+    pat = re.compile(r'getEnv\(\s*"(HARU[A-Z0-9_]*)"')
+    offenders: dict[str, list[str]] = {}
+    for nim in sorted(launcher.glob("*.nim")):
+        for raw in nim.read_text(encoding="utf-8").splitlines():
+            code = raw.split("#", 1)[0]      # drop Nim line/doc comments — a described read is not a read
+            for var in pat.findall(code):
+                if var not in allowed:
+                    offenders.setdefault(nim.name, []).append(var)
+    assert not offenders, (
+        f"launcher reads haru-named env INPUT outside the canary model: {offenders}. "
+        f"Route it through stubconfig.envForKnob, or (for a security gate) do not read env at all.")
+
+
 # ── inject / env-append (INV-INJECT-01) ───────────────────────────────────────────────────
 
 @pytest.mark.invariant("INV-INJECT-01")

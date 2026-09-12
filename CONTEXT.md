@@ -19,7 +19,8 @@ that knob's. So after `--stub-env-uv-ver-canary=MARK`: `MARK_UV_VER` is read for
 A single stub-input setting, read at runtime as `<canary>_<KNOB>`. The catalogue is closed:
 `SECRET` (decryption key), `UV_VER` (uv version to fetch), `SOURCE_URL` (remote-fetch payload
 URL), `BASE_PATH` (where the stub stages uv/python and the payload tree), and `EPHEMERAL` (the
-RAM/disk staging toggle: `0` disk, `1` RAM, unset auto — docs/adr/0005). Adding a knob is a
+RAM staging ENABLE: `1` forces RAM, unset/anything else is auto — 2-state, no force-disk value,
+docs/adr/0005). Adding a knob is a
 deliberate format change on both halves (INV-CANARY-02); `EPHEMERAL` is **additive** (its
 `[canary]` key is emitted only when non-default, so the v1 corpus is unchanged). The **license
 policy is NOT a knob** — expiry/machine/user/geo can never be set or overridden by the end
@@ -54,8 +55,14 @@ stub runs a **RAM-fit check** before committing to `/dev/shm`: it stages to RAM 
 baked `unpacked_bytes × 1.2` fits BOTH the tmpfs free space and `MemAvailable`, else it falls back
 to the cache with a note — so a 512 MB CI runner or small VPS never fills RAM and dies mid-extract
 (fail-safe: an unknown/unmeasurable size stays on disk). The target gets the final say through the
-`EPHEMERAL` **knob**: `<canary>_EPHEMERAL=0` forces disk, `=1` forces RAM and skips the fit-check
-(and turns RAM on even for a binary NOT built `--ephemeral` — target autonomy).
+`EPHEMERAL` **knob**, which is 2-state: `<canary>_EPHEMERAL=1` forces RAM and skips the fit-check
+(and turns RAM on even for a binary NOT built `--ephemeral` — target autonomy); anything else,
+including `0`, is auto. There is **no force-disk value** — an env toggle that pushed an encrypted
+ephemeral payload onto disk would be weak protection an attacker could set, so the knob can only
+enable RAM. **Known limitation:** with `--encrypt --ephemeral`, the low-RAM AUTO fallback still
+lands the decrypted tree on disk (availability, not attacker-controlled) — so ephemeral is not an
+absolute "nothing plaintext hits disk". That fallback is reaped; `--overwrite` shreds it (still not
+a secure erase — THREAT_MODEL.md, docs/adr/0005 §5).
 
 ## detached reap
 The stub's fire-and-forget final act when `--reap` is baked in: after the app exits it spawns
