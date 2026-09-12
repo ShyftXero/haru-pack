@@ -1643,8 +1643,13 @@ owner — which is INV-SECRET-02's whole point.
 Note: A secret that must never be recovered must never be shipped to the client. The correct
 architecture for a must-not-leak key is a server the client authenticates to, not a key in an
 artifact the client holds. haru-pack's job is to be honest that packing is not that.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, tools/busybody.py,
-tests/test_reverse_engineer.py
+Note: `--emit-nim` widens what sits on the packager's OWN disk, not what the customer gets: the
+kit's `payload.bin` is the exact bytes the binary already carries (ciphertext under `--encrypt`,
+plaintext otherwise), so it exposes nothing new. The build SECRET/key is derived-from, not
+stored, and is never written to any kit file —
+`test_emit_kit_never_contains_the_build_secret` greps every emitted file to prove it.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, src/haru_pack/emit.py,
+tools/busybody.py, tests/test_reverse_engineer.py, tests/test_emit_nim.py
 
 ---
 
@@ -2690,8 +2695,7 @@ busybody imposed that limit, not haru-pack.
 
 ## EMIT — an emitted reproduction kit rebuilds the binary it came from, not a plausible lookalike
 
-`--emit-nim` (and `--emit-c`) exist so a packager can inspect, modify and manually recompile
-the launcher stub. That is only worth anything if what comes out is genuinely what haru-pack
+`--emit-nim` exists so a packager can inspect, modify and manually recompile the launcher stub. That is only worth anything if what comes out is genuinely what haru-pack
 would have shipped. A kit that carries a hand-written compile command, a stale copy of the
 Nim source, or a reassembler that packs the footer differently is worse than no kit: it reads
 as authoritative and produces a binary the tool never would. This section is the honesty
@@ -2699,27 +2703,43 @@ control for the emit path, in the same spirit as BUILD.
 
 ### INV-EMIT-01
 Status: active
-Statement: A `--emit-nim` kit reassembles the exact binary the same build shipped. The stub
-source it contains is byte-identical to `launcher_src_dir()`, the `payload.bin` and
-`stubconfig.bin` are the exact bytes attached to the binary, and the emitted `assemble.py`
-reproduces `overlay.attach`'s footer, offsets and digests — for both an appended and a
-remote-fetch build.
-Actors: a packager who wants to audit or modify the stub and still ship the real thing; anyone
-who later trusts a binary compiled from an emitted kit.
-Assets: the meaning of the kit. If the emitted parts do not reconstitute the shipped binary,
-"here is exactly what I built" is a lie, and every modification made against the kit diverges
-from what runs on a customer's machine.
-Red-path: (a) make `emit.emit_nim_kit` copy a stale or partial Nim tree (e.g. skip `xz/`, or
-mutate a file) and `test_kit_source_is_byte_identical_to_what_haru_compiles` goes red; (b)
-change `assemble.py`'s footer packing (wrong struct order, drop the remote branch, or re-OR
-the flags) and `test_assemble_reproduces_overlay_attach` /
-`test_emit_nim_through_a_real_build_reassembles_the_shipped_binary` go red. Walked 2026-09-12.
-Source: 2026-09-12, from the `--emit-nim` / `--emit-c` design. The stub is a single generic
-binary whose per-build config is DATA (payload + stub-config), not compiled-in branches, so a
-faithful kit is source + those blobs + a reassembler; the risk the whole time was a kit that
-looks right and rebuilds something subtly different.
+Statement: A `--emit-nim` kit faithfully reproduces the build it came from, to the extent a
+recompile allows. The stub source in the kit is byte-identical to `launcher_src_dir()`; the
+emitted `assemble.py` reproduces `overlay.attach`'s footer, offsets and digests for the same
+stub (appended and remote-fetch); the `nim c` flag set the kit's `compile.sh` uses is the same
+`build.compile_launcher` uses (`emit.nim_target_flags`, one source), so the recipe cannot
+drift; and a real recompile of the emitted stub with the emitted `compile.sh` yields a WORKING
+binary — its overlay verifies and its payload and stub-config bytes are the exact bytes this
+build shipped. Byte-for-byte identity of the launcher is NOT claimed: a Nim/C recompile is not
+reproducible in general.
+Actors: a packager who wants to audit or modify the stub and still ship a genuine equivalent;
+anyone who later trusts a binary compiled from an emitted kit.
+Assets: the meaning of the kit. If the emitted parts do not reconstitute a working equivalent
+of the shipped binary, "here is what I built" is a lie, and every modification made against the
+kit diverges from what runs on a customer's machine.
+Red-path: (a) make `emit.emit_nim_kit` copy a stale or partial Nim tree (skip `xz/`, mutate a
+file) and `test_kit_source_is_byte_identical_to_what_haru_compiles` goes red; (b) change
+`assemble.py`'s footer packing (wrong struct order, drop the remote branch, re-OR the flags)
+and `test_assemble_reproduces_overlay_attach` goes red; (c) add a `nim c` flag directly in
+`build.compile_launcher` instead of `emit.nim_target_flags` and
+`test_nim_target_flags_are_the_same_object_compile_launcher_uses` goes red; (d) break the
+emitted `compile.sh` (wrong flag, bad path) and `test_a_real_recompile_yields_a_working_
+equivalent` goes red. All walked 2026-09-12; (c) demonstrated by injecting `--opt:size` into
+`compile_launcher` and observing the lockstep test fail.
+Source: 2026-09-12, from the `--emit-nim` design (and adversarial review the same day, which
+BLOCKED an earlier version whose only "recompile" test re-appended bytes it had just carved
+back out of the shipped binary). The stub is a single generic binary whose per-build config is
+DATA (payload + stub-config), not compiled-in branches, so a faithful kit is source + those
+blobs + a reassembler; the risk the whole time was a kit that looks right and rebuilds
+something subtly different.
 Note: The kit exposes exactly what the shipped binary already exposes — an unencrypted
 `payload.bin` is the same recoverable source the binary carries, and an encrypted one stays
-encrypted. The build secret/key is never written to the kit (INV-SECRET-02).
+encrypted. For a remote-fetch build the appended binary carries no payload, so the exposure is
+the binary plus its hosted payload sidecar, which is what a remote build already ships. The
+build secret/key is never written to the kit (INV-SECRET-02).
+Note: The kit is refused rather than written when the destination is unsafe — a symlinked
+target dir or `stub/`, or a non-empty `stub/` that is not a prior haru kit — matching the
+INV-BASE-01 posture. A kit failure is a warning, never a build failure: the binary is already
+written before the kit is attempted.
 Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
 tests/test_emit_nim.py

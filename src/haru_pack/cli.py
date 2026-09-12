@@ -162,6 +162,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                 f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", style="ok")
     if info.get("emit_nim"):
         print(f"emit-nim kit: {info['emit_nim']}  (edit stub/, then `sh compile.sh`)", style="ok")
+    elif info.get("emit_nim_error"):
+        print(f"emit-nim kit NOT written: {info['emit_nim_error']}  (the binary above is fine)",
+              style="warn")
 
 
 @app.command()
