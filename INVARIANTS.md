@@ -2708,16 +2708,27 @@ or an auditor reproducing a shipped artifact from its parts.
 Assets: the meaning of the feature. A kit that does not rebuild the stub, or rebuilds it and
 then assembles the wrong bytes, is worse than no kit: it looks like a faithful reproduction
 and is not, and the operator finds out only when the artifact behaves differently.
-Red-path: (1) Make `emit._rewrite_compile` emit a literal `gcc` (or any token that is not the
-passed shim); `test_transform_uses_the_zig_shim_and_keeps_per_file_flags` goes red — the kit
-would drive a compiler that is not the one haru uses. (2) Corrupt `assemble.py`'s footer
-packing (wrong offset, flags, or layout), or drop `nimbase.h` from the vendored set; the
-`assemble`-fidelity tests go red on a bare box, and the nim+zig-gated integration test's
-`sh compile.sh` fails to produce a verifying binary where the toolchain is present.
-Source: Added 2026-09-12 with `--emit-c`. Verified during development: the Nim C backend
-assigns per-file flags (`-mssse3`/`-mavx2` for nimcrypto's SHA-2 paths) that a blanket
-`zig cc *.c` drops — proving the recipe must come from Nim's own build manifest, not a
-hand-written command — and the mangled `@…`-prefixed C filenames are read as response files
-unless `./`-prefixed. Both are exactly the kind of silent divergence this invariant pins.
+Red-path: all four halves are red-able WITHOUT a toolchain, so the invariant is defended on a
+bare CI box. (1) Compiler token — make `emit._rewrite_compile` emit a literal `gcc` (or any
+token that is not the passed shim); `test_transform_uses_the_zig_shim_and_keeps_per_file_flags`
+goes red. (2) Vendoring/self-containment — drop the `nimbase.h` (or an xz-header) copy in
+`emit_c_sources`, or let an absolute `-I` survive; `test_emit_c_sources_vendors_headers_without_toolchain`
+goes red (it runs against a fixture launcher.json, no Nim/zig needed). (3) Overlay fidelity —
+corrupt `assemble.py`'s footer packing (wrong offset/flags/layout); the
+`test_assemble_reproduces_overlay_*` tests go red. (4) Injection safety — interpolate `out`
+as `"{out}"` instead of `{out!r}`; `test_assemble_py_is_not_injectable_via_out_name` goes red
+as the injected `os.system` runs. The nim+zig-gated `test_emitted_c_compiles_with_zig_and_reassembles`
+adds the end-to-end proof where the toolchain is present.
+Source: Added 2026-09-12 with `--emit-c`, hardened after an adversarial review. Verified during
+development: the Nim C backend assigns per-file flags (`-mssse3`/`-mavx2` for nimcrypto's SHA-2
+paths) that a blanket `zig cc *.c` drops — proving the recipe must come from Nim's own build
+manifest, not a hand-written command — and the mangled `@…`-prefixed C filenames are read as
+response files unless `./`-prefixed. The review also caught a command-injection sink: a hostile
+`--out` name interpolated raw into the emitted `assemble.py`, now `repr`-escaped and pinned by a
+test. All are exactly the kind of silent divergence this invariant pins.
+Note: The emitted kit is NOT fully self-contained — it needs a `zig` on `PATH` (or `HARU_ZIG`).
+The shim is relocatable (`${HARU_ZIG:-zig}`), so no build-host absolute path is baked in. The
+`--emit-c` directory is refused up front if it is a symlink or a non-empty directory, and a kit
+failure is a WARNING that never reports an already-written binary as failed.
 Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
 tests/test_emit_c.py

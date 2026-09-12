@@ -5,20 +5,27 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-12
 
-### Feature — `--emit-c`: a zig-only C reproduction kit (INV-EMIT-02)
+### Feature — `--emit-c`: a C reproduction kit for the launcher stub (INV-EMIT-02)
 
-- **`haru build … --emit-c DIR`** writes, beside the binary, a self-contained kit for
-  inspecting, modifying, or manually compiling the launcher stub: the stub as C (the Nim C
-  backend's output for your `--target`), `nimbase.h` + the xz headers vendored so it needs
-  **no Nim toolchain**, a `zig-cc` shim, this build's `payload.bin` (the exact bytes the
-  binary carries — encrypted iff `--encrypt`; never the secret key) and `stubconfig.bin`, plus
-  `assemble.py`. `sh compile.sh` recompiles every `.c` with zig alone and reassembles the exact
-  binary (payload + stub-config + footer), remote-fetch builds included.
+- **`haru build … --emit-c DIR`** writes, beside the binary, a kit for inspecting, modifying,
+  or manually compiling the launcher stub: the stub as C (the Nim C backend's output for your
+  `--target`), `nimbase.h` + the xz headers vendored so it needs **no Nim toolchain**, a
+  relocatable `zig-cc` shim, this build's `payload.bin` + `stubconfig.bin`, and `assemble.py`.
+  `sh compile.sh` recompiles every `.c` with **zig** and reassembles the exact binary (payload
+  + stub-config + footer), remote-fetch builds included. The kit needs a `zig` on `PATH` (or
+  point `HARU_ZIG` at one); no build-host absolute paths are baked in.
 - The recipe is Nim's own: `compile.sh` is derived from Nim's build manifest, so it carries the
   per-file flags nimcrypto's SHA-2 fast paths need and drives the same zig compiler haru uses —
   not a hand-written approximation. `assemble.py` reproduces `overlay.attach`'s bytes exactly.
   The stub is generic — every capability (decrypt, license gates, remote-fetch, reap/shred) is
   always-present C; what varies per build is the two data blobs the functions read.
+- **`payload.bin` exposes nothing the shipped binary does not** — it is byte-identical to what
+  the binary carries. So an unencrypted payload is as readable here as in the binary, and under
+  `--embed-secret` the obfuscated key rides inside it exactly as it rides in the binary; the kit
+  directory deserves the same care as the artifact (INV-SECRET-02).
+- Safe by default: the `--emit-c` directory is refused up front if it is a symlink or a
+  non-empty directory (INV-BASE-01 posture), and a kit-emit failure is a warning that never
+  reports an already-written binary as failed.
 - Honest limit stated in the emitted README: the *overlay* is byte-identical to what haru
   writes, but the recompiled *stub* is not guaranteed byte-identical (a C compile embeds build
   paths); it is a working launcher, and you sign the reassembled binary yourself.
