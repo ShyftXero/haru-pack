@@ -462,6 +462,55 @@ def test_the_analysis_questions_are_reachable_from_the_command_line():
     assert "format_analysis" in src, "--analyze must use the shared formatter"
 
 
+def _journal_custom(tmp_path, name, lines):
+    run = tmp_path / name
+    run.mkdir()
+    (run / "journal.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    return run
+
+
+@pytest.mark.invariant("INV-CHAOS-14")
+def test_analyze_is_a_gate_not_just_a_reader(tmp_path):
+    """--analyze must exit non-zero when the run is not a clean, completed pass — otherwise a
+    CI step that trusts it reads a false pass. RED-PATH: change `return analyze_exit_code(...)`
+    in main back to `return 0`, and a findings / setup-failure / aborted run reports success.
+    """
+    a = _analyze()
+    started = {"kind": "started", "total": 1, "planned": []}
+
+    clean = a.analyze_run(_journal_custom(tmp_path, "clean",
+        [started, _case("c1", "synthetic"), {"kind": "finished"}]))
+    assert a.analyze_exit_code(clean) == 0, "a completed run with no findings is a pass"
+
+    finding = a.analyze_run(_journal_custom(tmp_path, "finding",
+        [started, _case("c1", "synthetic", "SILENT", ok=False), {"kind": "finished"}]))
+    assert a.analyze_exit_code(finding) == 1, "a finding must not read clean"
+
+    setup = a.analyze_run(_journal_custom(tmp_path, "setup",
+        [{"kind": "started", "total": 0, "planned": []},
+         {"kind": "setup_failure", "detail": "fixture build failed"}]))
+    assert a.analyze_exit_code(setup) == 2, "a setup failure is not zero findings, it is no data"
+
+    aborted = a.analyze_run(_journal_custom(tmp_path, "aborted",
+        [started, _case("c1", "synthetic"),
+         {"kind": "infra_failure", "detail": "No space left on device"}]))
+    assert a.analyze_exit_code(aborted) == 2, "an environment abort is not a verdict"
+
+    interrupted = a.analyze_run(_journal_custom(tmp_path, "interrupted",
+        [{"kind": "started", "total": 5, "planned": []}, _case("c1", "synthetic"),
+         {"kind": "interrupted", "completed": 1}]))
+    assert a.analyze_exit_code(interrupted) == 1, "an incomplete run is not a clean pass"
+
+
+@pytest.mark.invariant("INV-CHAOS-14")
+def test_analyze_exit_code_is_wired_into_the_cli():
+    """The gate is only real if main() actually returns it, not just prints the report."""
+    code = _module_code(REPO / "tools" / "busybody.py")
+    assert "return analyze_exit_code(analysis)" in code, (
+        "main()'s --analyze branch must return analyze_exit_code, or the gate is decorative"
+    )
+
+
 @pytest.mark.invariant("INV-CHAOS-04")
 def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
     """A fingerprint folds in the diagnostic TEXT, so the same outcome with two different
