@@ -210,10 +210,14 @@ def test_a_stack_is_only_a_finding_if_it_hit_the_fatal_floor():
     assert "ok = r['outcome'] not in FATAL" in src, (
         "a composed stack must be judged against the FATAL floor and nothing narrower"
     )
-    # STALLED joined the floor on 2026-09-11 with the herd persona (INV-CHAOS-09). Pinned
-    # exactly rather than loosely: the floor is the pass condition for every composed
-    # stack, so a name appearing in or leaving it should have to be stated here.
-    assert set(bb.FATAL) == {"CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "STALLED"}
+    # Pinned exactly rather than loosely: the floor is the pass condition for every composed
+    # stack, so a name appearing in or leaving it has to be stated HERE, in one place, by
+    # whoever changed it. Two additions landed on 2026-09-11 from branches that were each
+    # green alone and red together, which is exactly what this assertion is for:
+    #   STALLED            the herd persona    (INV-CHAOS-09)
+    #   ESCAPED, SMUGGLED  the trojan persona  (#7)
+    assert set(bb.FATAL) == {"CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "STALLED",
+                             "ESCAPED", "SMUGGLED"}
     for good in ("RAN", "REFUSED", "APP-CRASHED"):
         assert good not in bb.FATAL, f"{good} is an acceptable outcome for a stack"
 
