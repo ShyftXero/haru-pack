@@ -2685,3 +2685,39 @@ Source: busybody `trojan` persona, cases `a_broken_symlink_stops_the_build`,
 print a rich-rendered `shutil.py` traceback with absolute build-host paths. The device-node
 case additionally reads `/dev/zero` into the payload until a resource limit stops it; only
 busybody imposed that limit, not haru-pack.
+
+---
+
+## EMIT — the reproduction kit rebuilds what haru shipped, or it is a lie
+
+`--emit-nim` / `--emit-c` hand the operator the stub source plus this build's payload and
+config so they can inspect, modify, and recompile it themselves. A kit is only worth
+shipping if it actually reproduces the binary: a plausible-looking `compile.sh` that does not
+rebuild the stub, or an assembler that emits different bytes, is the same over-claim
+`INV-BUILD-01` forbids — one layer out.
+
+### INV-EMIT-02
+Status: active
+Statement: The `--emit-c` kit is faithful. Its `compile.sh` invokes the zig compiler
+haru-pack itself uses (the emitted `./zig-cc` shim), never a fabricated or hand-written
+command, and preserves Nim's per-file compile flags; its `assemble.py` reproduces
+`overlay.attach`'s bytes exactly, appended and remote-fetch alike. So the emitted C compiles
+with zig alone — no Nim — and reassembles a binary whose payload and stub-config verify.
+Actors: not an attacker — an operator who wants to read the stub, patch it, and recompile,
+or an auditor reproducing a shipped artifact from its parts.
+Assets: the meaning of the feature. A kit that does not rebuild the stub, or rebuilds it and
+then assembles the wrong bytes, is worse than no kit: it looks like a faithful reproduction
+and is not, and the operator finds out only when the artifact behaves differently.
+Red-path: (1) Make `emit._rewrite_compile` emit a literal `gcc` (or any token that is not the
+passed shim); `test_transform_uses_the_zig_shim_and_keeps_per_file_flags` goes red — the kit
+would drive a compiler that is not the one haru uses. (2) Corrupt `assemble.py`'s footer
+packing (wrong offset, flags, or layout), or drop `nimbase.h` from the vendored set; the
+`assemble`-fidelity tests go red on a bare box, and the nim+zig-gated integration test's
+`sh compile.sh` fails to produce a verifying binary where the toolchain is present.
+Source: Added 2026-09-12 with `--emit-c`. Verified during development: the Nim C backend
+assigns per-file flags (`-mssse3`/`-mavx2` for nimcrypto's SHA-2 paths) that a blanket
+`zig cc *.c` drops — proving the recipe must come from Nim's own build manifest, not a
+hand-written command — and the mangled `@…`-prefixed C filenames are read as response files
+unless `./`-prefixed. Both are exactly the kind of silent divergence this invariant pins.
+Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+tests/test_emit_c.py

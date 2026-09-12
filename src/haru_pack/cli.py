@@ -79,7 +79,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
                reap=False, ephemeral=False, ram_only=False, overwrite=False, base_path="",
-               source_url="", env_append=None, cc="") -> None:
+               source_url="", env_append=None, cc="", emit_c="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -126,7 +126,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          obfuscate=obfuscate,
                          obfuscate_args=[a for a in obfuscate_args.split() if a],
                          entry_point=entry_point, shake=shake,
-                         shake_keep=list(shake_keep or []), cc=cc,
+                         shake_keep=list(shake_keep or []), cc=cc, emit_c=emit_c,
                          env_canary=env_canary, env_canary_random=env_canary_random,
                          stub_env_secret_canary=stub_env_secret_canary,
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
@@ -159,6 +159,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                     f"{sh['tracer']} — receipt {sh['report']}", style="ok")
     print(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
                 f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", style="ok")
+    if info.get("emit_c"):
+        print(f"emitted C reproduction kit: {info['emit_c']}  (recompile: sh compile.sh)",
+              style="ok")
 
 
 @app.command()
@@ -501,7 +504,12 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                    "A canary-named SOURCE_URL env var overrides it at runtime (mirror/failover)"),
           env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
               help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
-                   "Lives in the payload — use --encrypt to hide a secret value")):
+                   "Lives in the payload — use --encrypt to hide a secret value"),
+          emit_c: str = typer.Option("", "--emit-c", metavar="DIR",
+              help="also write a self-contained C reproduction kit to DIR: the launcher stub "
+                   "as C (recompiles with zig alone, no Nim), this build's payload + "
+                   "stub-config, and a compile.sh that rebuilds the exact binary. For "
+                   "inspecting, modifying, or manually compiling the stub")):
     """Build a single-file launcher from a project payload dir.
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
@@ -521,7 +529,8 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_source_url_canary=stub_env_source_url_canary,
                stub_env_base_path_canary=stub_env_base_path_canary,
                reap=reap, ephemeral=ephemeral, ram_only=ram_only, overwrite=overwrite,
-               base_path=base_path, source_url=source_url, env_append=env_append)
+               base_path=base_path, source_url=source_url, env_append=env_append,
+               emit_c=emit_c)
 
 @app.command()
 def verify(exe: Path):

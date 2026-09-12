@@ -6,7 +6,7 @@ from pathlib import Path
 from . import tomlio, discovery, crypto, toolchain
 from .paths import launcher_src_dir
 from .payload import build_payload_zip
-from .overlay import attach, FOOTER_FLAG_ENCRYPTED
+from .overlay import attach, FOOTER_FLAG_ENCRYPTED, FOOTER_FLAG_REMOTE
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier, bundles_uv
 from .sources import Sources
@@ -447,13 +447,19 @@ def resolve_cc(cc: str = "", target=None, log=None) -> str:
     return want
 
 
-def compile_launcher(nim: str, target, workdir: Path, cc: str = "", log=None) -> Path:
+def compile_launcher(nim: str, target, workdir: Path, cc: str = "", log=None,
+                     emit_c: Path | None = None) -> Path:
     tgt = target if isinstance(target, Target) else Target.parse(target)
     src = launcher_src_dir() / "main.nim"
     if not src.exists():
         raise BuildError(f"launcher source missing: {src}")
     out = workdir / ("launcher" + tgt.exe_suffix)
     args = [nim, "c", "-d:release", f"--nimcache:{workdir/'nimcache'}", f"--out:{out}"]
+    # Nim writes its build manifest (nimcache/launcher.json: the exact per-file compile
+    # commands + the link command) on every build, and leaves the generated C in the
+    # nimcache. That is what `--emit-c` turns into a zig-only compile.sh — the recipe is the
+    # one Nim actually used, never a hand-written approximation (INV-EMIT-02). No extra Nim
+    # flag is needed; --genScript would SKIP linking, which would break this real build.
 
     provider = resolve_cc(cc, target=tgt, log=log)
     if provider == "zig":
@@ -475,6 +481,14 @@ def compile_launcher(nim: str, target, workdir: Path, cc: str = "", log=None) ->
     if r.returncode != 0 or not out.exists():
         raise BuildError(f"nim compile failed (cc={provider}):\n"
                          + (r.stderr or r.stdout)[-2000:])
+    if emit_c is not None:
+        # The C reproduction kit recompiles with zig regardless of which compiler THIS build
+        # used, so ensure a managed zig for the emitted shim even under `--cc system`.
+        from . import emit
+        zig = toolchain.find_managed_zig() or toolchain.install_zig(
+            log=log or (lambda _m: None))
+        emit.emit_c_sources(workdir / "nimcache", emit_c, tgt.zig_triple(), str(zig),
+                            "launcher" + tgt.exe_suffix, log=log)
     return out
 
 
@@ -833,8 +847,11 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
           base_path: str = "", source_url: str = "", env_append=None,
-          cc: str = "", log=None) -> dict:
+          cc: str = "", emit_c: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
+    # --emit-c: a self-contained C reproduction kit written beside the binary. Resolve the
+    # directory now (before any tempdir/chdir) so a relative path lands where the user expects.
+    emit_c_dir = Path(emit_c).resolve() if emit_c else None
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
     if not nim:
@@ -976,7 +993,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 "internal: encryption state does not match the payload "
                 f"(requested={enc['enabled']}, container={payload.startswith(crypto.MAGIC)}). "
                 "Refusing to emit a binary whose build receipt would be wrong.")
-        launcher = compile_launcher(nim, tgt, tdp, cc=cc, log=log)
+        launcher = compile_launcher(nim, tgt, tdp, cc=cc, log=log, emit_c=emit_c_dir)
         sc_bytes = stub_config_bytes(canary, reap=reap, overwrite=overwrite,
                                      ram_only=ram_only, base_path=base_path,
                                      source_url=source_url)
@@ -999,6 +1016,18 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"serve these bytes unchanged.")
         else:
             info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes)
+        if emit_c_dir is not None:
+            # Finish the reproduction kit: the same payload + stub-config bytes that were just
+            # attached, plus the assembler that reproduces this exact overlay. The footer
+            # flags include the remote bit iff this was a remote-fetch build, matching attach.
+            from . import emit
+            emit.finish_kit(emit_c_dir, payload=payload, stub_config=sc_bytes,
+                            flags=flags | (FOOTER_FLAG_REMOTE if source_url else 0),
+                            remote=bool(source_url),
+                            exe="launcher" + tgt.exe_suffix, out_name=out.name,
+                            triple=tgt.zig_triple(), encrypted=bool(enc["enabled"]),
+                            source_url=source_url)
+            info["emit_c"] = str(emit_c_dir)
     try:
         out.chmod(0o755)
     except Exception:

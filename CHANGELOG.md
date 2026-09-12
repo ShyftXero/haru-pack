@@ -5,6 +5,24 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-12
 
+### Feature — `--emit-c`: a zig-only C reproduction kit (INV-EMIT-02)
+
+- **`haru build … --emit-c DIR`** writes, beside the binary, a self-contained kit for
+  inspecting, modifying, or manually compiling the launcher stub: the stub as C (the Nim C
+  backend's output for your `--target`), `nimbase.h` + the xz headers vendored so it needs
+  **no Nim toolchain**, a `zig-cc` shim, this build's `payload.bin` (the exact bytes the
+  binary carries — encrypted iff `--encrypt`; never the secret key) and `stubconfig.bin`, plus
+  `assemble.py`. `sh compile.sh` recompiles every `.c` with zig alone and reassembles the exact
+  binary (payload + stub-config + footer), remote-fetch builds included.
+- The recipe is Nim's own: `compile.sh` is derived from Nim's build manifest, so it carries the
+  per-file flags nimcrypto's SHA-2 fast paths need and drives the same zig compiler haru uses —
+  not a hand-written approximation. `assemble.py` reproduces `overlay.attach`'s bytes exactly.
+  The stub is generic — every capability (decrypt, license gates, remote-fetch, reap/shred) is
+  always-present C; what varies per build is the two data blobs the functions read.
+- Honest limit stated in the emitted README: the *overlay* is byte-identical to what haru
+  writes, but the recompiled *stub* is not guaranteed byte-identical (a C compile embeds build
+  paths); it is a working launcher, and you sign the reassembled binary yourself.
+
 ### Tooling — BusyBody run-control hardening (adopted from lotek)
 
 - **Single-instance run control (INV-CHAOS-13).** Two busybody sweeps each stage a real
