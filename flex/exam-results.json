@@ -1,6 +1,6 @@
 {
   "aiobotocore": {
-    "error": "\u001b[31m\u001b[33m57 deselected\u001b[0m, \u001b[33m16 warnings\u001b[0m, \u001b[31m\u001b[1m1 error\u001b[0m\u001b[31m in 2.93s\u001b[0m\u001b[0m",
+    "error": "57 deselected, 16 warnings, 1 error in 2.93s",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
     "mb": 151.1,
@@ -13,7 +13,7 @@
     "version": "3.9.1"
   },
   "anyio": {
-    "error": "\u001b[31m\u001b[33m5 warnings\u001b[0m, \u001b[31m\u001b[1m8 errors\u001b[0m\u001b[31m in 6.98s\u001b[0m\u001b[0m",
+    "error": "5 warnings, 8 errors in 6.98s",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
     "mb": 101.1,
@@ -37,7 +37,7 @@
     "version": "1.43.93"
   },
   "botocore": {
-    "error": "\u001b[31m\u001b[33m55 warnings\u001b[0m, \u001b[31m\u001b[1m1 error\u001b[0m\u001b[31m in 126.80s (0:02:06)\u001b[0m\u001b[0m",
+    "error": "55 warnings, 1 error in 126.80s (0:02:06)",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
     "mb": 103.2,
@@ -61,7 +61,7 @@
     "version": "2026.7.22"
   },
   "cffi": {
-    "error": "\u001b[31m\u001b[33m1 skipped\u001b[0m, \u001b[31m\u001b[1m1 error\u001b[0m\u001b[31m in 12.92s\u001b[0m\u001b[0m",
+    "error": "1 skipped, 1 error in 12.92s",
     "last_run": "2026-09-11",
     "layout": "dir:testing",
     "mb": 85.3,
@@ -74,7 +74,7 @@
     "version": "2.1.1"
   },
   "charset-normalizer": {
-    "error": "\u001b[31m\u001b[31m\u001b[1m33 failed\u001b[0m, \u001b[32m164 passed\u001b[0m, \u001b[32m11 subtests passed\u001b[0m\u001b[31m in 31.07s\u001b[0m\u001b[0m",
+    "error": "33 failed, 164 passed, 11 subtests passed in 31.07s",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
     "mb": 86.3,
@@ -180,7 +180,7 @@
     "version": "1.6.0"
   },
   "pycparser": {
-    "error": "\u001b[31m\u001b[31m\u001b[1m3 failed\u001b[0m, \u001b[32m131 passed\u001b[0m\u001b[31m in 4.27s\u001b[0m\u001b[0m",
+    "error": "3 failed, 131 passed in 4.27s",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
     "mb": 84.7,
@@ -193,10 +193,10 @@
     "version": "3.0"
   },
   "pydantic": {
-    "error": "build: m\u001b[2m\u2502   \u2502   \u001b[0m                                                               \u001b[31m\u2502\u001b[0m\n\u001b[31m\u2502\u001b[0m   \u001b[2m431 \u001b[0m\u001b[2m\u2502   \u2502   \u001b[0mpos = skip_comments_and_array_ws(src, pos)                     \u001b[31m\u2502\u001b[0m\n\u001b[31m\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\u001b[0m\n\u001b[1;91mTOMLDecodeError: \u001b[0mUnclosed array \u001b[1m(\u001b[0mat line \u001b[1;36m5\u001b[0m, column \u001b[1;36m288\u001b[0m\u001b[1m)\u001b[0m",
+    "error": "E   ValueError: Not a file or directory: '/tmp/haru-exam-pydantic-eqavf829/cold/haru-pack/700537d1f27b6a6d-700537d1f27b6a6d7380cab8ea5f302c/app/exam/_suite/pydantic'",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
-    "mb": 109.6,
+    "mb": 125.9,
     "name": "pydantic",
     "passed": false,
     "pypi_url": "https://pypi.org/project/pydantic/",
@@ -206,9 +206,10 @@
     "version": "2.13.5"
   },
   "pydantic-core": {
-    "error": "build: m\u001b[2m\u2502   \u2502   \u001b[0m                                                               \u001b[31m\u2502\u001b[0m\n\u001b[31m\u2502\u001b[0m   \u001b[2m431 \u001b[0m\u001b[2m\u2502   \u2502   \u001b[0mpos = skip_comments_and_array_ws(src, pos)                     \u001b[31m\u2502\u001b[0m\n\u001b[31m\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\u001b[0m\n\u001b[1;91mTOMLDecodeError: \u001b[0mUnclosed array \u001b[1m(\u001b[0mat line \u001b[1;36m5\u001b[0m, column \u001b[1;36m105\u001b[0m\u001b[1m)\u001b[0m",
+    "error": "E   ModuleNotFoundError: No module named 'pydantic'",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
+    "mb": 135.1,
     "name": "pydantic-core",
     "passed": false,
     "pypi_url": "https://pypi.org/project/pydantic-core/",
@@ -218,7 +219,7 @@
     "version": "2.49.0"
   },
   "pygments": {
-    "error": "\u001b[31m\u001b[33m3 warnings\u001b[0m, \u001b[31m\u001b[1m1 error\u001b[0m\u001b[31m in 13.56s\u001b[0m\u001b[0m",
+    "error": "3 warnings, 1 error in 13.56s",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
     "mb": 89.1,
@@ -231,7 +232,7 @@
     "version": "2.21.0"
   },
   "pytest": {
-    "error": "\u001b[31m\u001b[33m11 warnings\u001b[0m, \u001b[31m\u001b[1m8 errors\u001b[0m\u001b[31m in 9.98s\u001b[0m\u001b[0m",
+    "error": "11 warnings, 8 errors in 9.98s",
     "last_run": "2026-09-11",
     "layout": "dir:testing",
     "mb": 85.1,
@@ -244,7 +245,7 @@
     "version": "9.1.1"
   },
   "python-dateutil": {
-    "error": "\u001b[31m\u001b[33m40 warnings\u001b[0m, \u001b[31m\u001b[1m5 errors\u001b[0m\u001b[31m in 1.86s\u001b[0m\u001b[0m",
+    "error": "40 warnings, 5 errors in 1.86s",
     "last_run": "2026-09-11",
     "layout": "dir:tests",
     "mb": 85.0,
@@ -309,7 +310,7 @@
     "version": "4.16.0"
   },
   "urllib3": {
-    "error": "\u001b[31m\u001b[1m\u001b[31mE   ModuleNotFoundError: No module named 'dummyserver'\u001b[0m\u001b[0m",
+    "error": "E   ModuleNotFoundError: No module named 'dummyserver'",
     "last_run": "2026-09-11",
     "layout": "dir:test",
     "mb": 193.7,

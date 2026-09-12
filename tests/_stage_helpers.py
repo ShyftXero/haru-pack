@@ -75,14 +75,16 @@ def make_payload(root: Path, *, uv_body: str = UV_ECHO_STAGE) -> Path:
 
 
 def stub_toml2(*, secret: str = "HARU", uv_ver: str = "HARU", source_url: str = "HARU",
-               base_path_canary: str = "HARU", reap: bool = False, ram_only: bool = False,
-               base_path: str = "") -> bytes:
-    """A v2 stub-config carrying the Phase-2 staging keys (ADR 0004 §2). Optional keys are
-    emitted only when set, exactly as build.stub_config_bytes does — so the bytes a test feeds
-    the launcher are the same shape a real build produces."""
+               base_path_canary: str = "HARU", reap: bool = False, overwrite: bool = False,
+               ram_only: bool = False, base_path: str = "") -> bytes:
+    """A v2 stub-config carrying the Phase-2 staging keys (ADR 0004). Optional keys are emitted
+    only when set, exactly as build.stub_config_bytes does - so the bytes a test feeds the
+    launcher are the same shape a real build produces."""
     lines = ["stub_config_version = 1"]
     if reap:
         lines.append("reap = true")
+    if overwrite:
+        lines.append("overwrite = true")
     if ram_only:
         lines.append("ram_only = true")
     if base_path:
