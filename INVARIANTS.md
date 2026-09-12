@@ -2314,3 +2314,161 @@ system-GCC-by-default to avoid changing existing setups, which is inertia rather
 benefit, against a real ergonomic win of one less post-install step and no sudo.
 Territory: src/haru_pack/toolchain.py, src/haru_pack/build.py, src/haru_pack/targets.py,
 src/haru_pack/pins.toml, tests/test_zig_provider.py
+
+## TRUST — the project being packaged is an input, not an author
+
+Every other section here treats the operator's project as trusted and asks what happens to
+the artifact. This one asks the opposite question: **what can a source tree do to the
+machine that packages it, and to the binary that comes out?**
+
+The distinction is not theoretical. `haru-pack build .` is run against repositories cloned
+from the internet, against branches that arrive in CI, and against applications an agent
+wrote that nobody read line by line. In each of those the build host executes code the
+operator did not write, and the artifact is signed with the operator's identity.
+
+Mined from the `trojan` busybody persona, 2026-09-11. **All seven are `proposed`** — they
+are written down because six of them were demonstrated on the first real run, not because
+anything defends them yet. See `docs/BUSYBODY.md` for the run, and `THREAT_MODEL.md` for
+the actor these entries were derived from.
+
+### INV-TRUST-01
+Status: proposed
+Statement: Every command supplied by the packed project — each `[[bundle]]` step's argv —
+is printed to the build log before it is executed, so the operator sees what is about to run
+on their machine while there is still time to stop it.
+Actors: the author of a repository the operator cloned and packed; a contributor whose pull
+request added a `haru_pack.toml`; the operator, who typed `haru-pack build .` and expected a
+packaging tool rather than a script runner.
+Assets: the build host, its PATH, its credentials, and every artifact built on it
+afterwards — including ones signed with the vendor's key.
+Red-path: `build.py` runs `for step in steps: run_bundle_step(...)` with no log line. Add
+the print, then delete it again: a claiming test asserts the argv appears in the build's
+stdout, and goes red the moment the line is removed.
+Source: busybody `trojan` persona, case `a_bundle_step_runs_unannounced_on_the_build_host`,
+2026-09-11. The capability is documented in `docs/CONFIG.md`; that it is reachable from a
+file inside the packed tree, silently, is not.
+Note: The invariant deliberately asks for **visibility**, not refusal. Bundle steps are a
+feature and the operator's own project needs them. What is missing is the sentence that lets
+an operator distinguish their step from someone else's.
+
+### INV-TRUST-02
+Status: proposed
+Statement: `haru-pack build` does not execute code supplied by the packed project during
+dependency staging, or — if it must — says so before it does, and the docs state plainly
+that packing an untrusted tree is running that tree.
+Actors: the author of any repository with a `pyproject.toml`; the maintainer of any sdist
+in its dependency list.
+Assets: the build host and its toolchain — `INV-SUPPLY-01` through `-11` protect everything
+haru-pack *downloads*, and none of them cover the thing the operator handed it.
+Red-path: The case plants a project whose `[build-system]` names an in-tree backend via
+`backend-path`. At `--thick`, `bundle.warm_cache_and_lock` runs `uv sync --project`, which
+imports and calls that backend. A claiming test asserts the marker the backend would write
+does not appear; it goes red as soon as project installation is re-enabled unsandboxed.
+Source: busybody `trojan` persona, case `a_build_backend_owns_the_build_host`, 2026-09-11.
+This is the standard sdist supply-chain vector, pointed at a host that believes it is only
+copying files. There is no `haru_pack.toml` in the hostile project at all, so no amount of
+auditing haru-pack's own config format would see it.
+
+### INV-TRUST-03
+Status: proposed
+Statement: A `[[post_install]]` step is named in the build log at **every** tier that ships
+it, in a sentence that says it will run on the customer's machine.
+Actors: the operator who signs the binary; every customer who runs it.
+Assets: the vendor's code-signing identity, and the customer's machine — this is
+`THREAT_MODEL.md`'s worst case expressed as a configuration key.
+Red-path: `build.py` warns only on the `thick` path (`if tier == "thick" and
+manifest.get("post_install")`). Move the warning outside that condition; a claiming test
+builds at `default` and asserts the argv is in stdout, and goes red when the condition is
+put back.
+Source: busybody `trojan` persona, case `a_post_install_step_ships_code_to_the_customer`,
+2026-09-11.
+Note: **Measured, and better than assumed.** At the `default` tier the build named the step
+and the case reported `SANCTIONED`, not `SMUGGLED` — the capability, exercised visibly. The
+entry stays `proposed` for two reasons: nothing asserts the behaviour, so it can regress
+silently; and `thin` has not been measured. A narrower entry than the one first drafted,
+because the run said so.
+
+### INV-TRUST-04
+Status: proposed
+Statement: No file from the packed project can occupy a payload path the launcher treats as
+control data — `manifest.toml`, `vendor/`, or any other path read to decide what to execute.
+Actors: the author of a packed repository.
+Assets: the launcher's own instructions. A project that can write `manifest.toml` is not
+being packaged by haru-pack; it is configuring it.
+Red-path: `validate_manifest` rejects an `app_subdir` containing `..`, an absolute path or a
+drive letter, and accepts `"."` — which resolves the application tree onto the payload root.
+Reject a subdir that resolves to the root; a claiming test builds with `app_subdir = "."`
+and a project-supplied `vendor/uv`, and asserts the payload member is haru-pack's.
+Source: busybody `trojan` persona, case `the_project_supplies_the_payloads_control_files`,
+2026-09-11. **Demonstrated**: the project's own `vendor/uv` was the one in the payload.
+Note: A sibling of the `wedge` persona's first finding. That one found `..`; the validator
+was then written against the string `..` rather than against the property "stays strictly
+below the payload root", so the next spelling walked straight through it.
+
+### INV-TRUST-05
+Status: proposed
+Statement: The index a payload's wheels are downloaded from is the one the **operator**
+configured. A file inside the packed project cannot change it.
+Actors: the author of a packed repository; anyone who can land a `uv.toml` or a
+`[tool.uv]` table in a branch that CI packs.
+Assets: every dependency inside the signed artifact. `INV-SUPPLY-08` hash-checks wheels
+against `uv.lock`; a lock file resolved from an attacker's index is internally consistent
+and entirely wrong.
+Red-path: pass the operator's resolved index configuration explicitly on every `uv`
+invocation (`--index-url` / `--no-config`). A claiming test plants `[tool.uv] index-url` in
+the packed project pointing at a discard port and asserts the build still resolves; it goes
+red when the explicit flags are removed.
+Source: busybody `trojan` persona, case
+`the_project_chooses_where_its_dependencies_come_from`, 2026-09-11.
+Note: **The redirect is not confirmed.** `uv sync` exited 2 with the planted `index-url` in
+place, which is consistent with uv honouring it and failing to reach the discard port — and
+also consistent with several other failures. `bundle.warm_cache_and_lock` raises
+`CalledProcessError` with uv's stderr captured and discarded, so the build log cannot tell
+the difference. The case reports what it can prove (`CRASHED`: the build unwound with no
+diagnostic) and the index question stays open until uv's output is surfaced. Recorded rather
+than assumed, because assuming is how this entry would become a claim with nothing behind it.
+
+### INV-TRUST-06
+Status: proposed
+Statement: A path that leaves the source tree is not dereferenced into the payload. A
+symlink pointing outside the project is refused, skipped, or stored as a link — never
+followed and copied as content.
+Actors: the author of a packed repository; a contributor who added one file to it.
+Assets: everything `INV-PAYLOAD-01` protects — the operator's keys, `.env`, cloud
+credentials — published inside a binary that is distributed and often signed.
+Red-path: `build.py` calls `shutil.copytree(source, app, ignore=_IGNORE)`, whose default
+`symlinks=False` dereferences, and whose `ignore` callable is given the **name of the entry
+being copied**, never the target of a link. A claiming test plants `assets/logo.png` as a
+symlink to an out-of-tree key file and asserts the key's bytes are absent from every payload
+member; it goes red the moment the copy follows links again.
+Source: busybody `trojan` persona, case
+`a_symlink_walks_a_private_key_into_the_payload`, 2026-09-11. **Demonstrated**: three
+credential files outside the project reached the payload as `app/assets/logo.png`,
+`app/assets/theme.css` and `app/README.md`.
+Note: `INV-PAYLOAD-01` is satisfied throughout. Its Statement is about files *matching a
+credential pattern*, and the link names do not match one. That is a narrow invariant doing
+exactly what it says, which is why this entry exists beside it rather than as an amendment
+to it.
+Note: **Not addressed by the `INV-BASE-01` symlink fixes** (`0d804ed`, `ffa2dbc`, both on
+main). Those resolve symlinks in the launcher's *staging-root* refusal — run time, on the
+customer's machine, against whoever sets `HARU_BASE_PATH`. This entry is build time, on the
+operator's machine, against whoever wrote the packed tree. Re-run 2026-09-11 against main
+with both fixes in place: all nine `trojan` findings unchanged, and `build.py` still calls
+`shutil.copytree(source, app, ignore=_IGNORE)` untouched.
+
+### INV-TRUST-07
+Status: proposed
+Statement: A source tree the payload copy cannot handle produces a haru-pack diagnostic
+naming the offending path, not a language-level traceback.
+Actors: anyone who packs a repository containing a broken symlink, a symlink loop, a fifo or
+a device node — malice optional, and mostly absent.
+Assets: the operator's ability to act on the failure, and the build host's disk.
+Red-path: wrap the payload copy and convert `shutil.Error`/`OSError` into a `BuildError` that
+names the path. A claiming test packs a tree with a dangling symlink and asserts the output
+contains no traceback frame; it goes red when the handler is removed.
+Source: busybody `trojan` persona, cases `a_broken_symlink_stops_the_build`,
+`a_symlink_loop_makes_the_payload_infinite` and
+`a_character_device_feeds_the_payload_forever`, 2026-09-11. **Demonstrated**: all three
+print a rich-rendered `shutil.py` traceback with absolute build-host paths. The device-node
+case additionally reads `/dev/zero` into the payload until a resource limit stops it; only
+busybody imposed that limit, not haru-pack.

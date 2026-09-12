@@ -44,15 +44,25 @@ becomes a distribution channel."
 | A local attacker on the target | can write to the cache, PATH, or environment of the user running the launcher | hijack execution via the launcher |
 | A compromised upstream | serves Nim, uv, or python-build-standalone releases | reach every build host, then every artifact |
 | The operator | not hostile — busy | ships a `.env` by accident |
+| **The project being packaged** | supplies the source tree, its `pyproject.toml`, its `haru_pack.toml`, its dependency list and the symlinks in it | get code executed on the build host, or bytes into the signed artifact |
 | An AI agent working on this repo | writes code and the documentation that describes it | not hostile; produces confident text about work it did not do |
 
-That last row is deliberate. It is the actor this repo has actual incident history with.
+The packaged-project row was added 2026-09-11, after the `trojan` busybody persona
+demonstrated six ways to use it. It had been missing on the assumption that the operator
+writes what they pack — which holds for `haru-pack build .` in your own repository and
+nowhere else. `haru-pack build` is run against clones from the internet, against branches
+that arrive in CI, and against applications an agent wrote that nobody read line by line.
+In all three the operator is trusting the tree, and nothing told them that is what they
+were doing.
+
+The AI row is deliberate too. It is the actor this repo has actual incident history with.
 
 ## Trust boundaries
 
 | # | Boundary | Crossing | Status |
 |---|---|---|---|
-| B1 | project source → payload | `shutil.copytree` with an exclusion list | **[V]** filtered, `INV-PAYLOAD-01` |
+| B0 | project source → **build host** | `copytree`, `uv sync --project`, `[[bundle]]` argv | **[V]** *no boundary*: project-controlled code runs, `INV-TRUST-01`/`02` (proposed) |
+| B1 | project source → payload | `shutil.copytree` with an exclusion list | **[V]** filtered by NAME only; symlinks are dereferenced, `INV-PAYLOAD-01` + `INV-TRUST-06` (proposed) |
 | B2 | payload → launcher overlay | append + 68-byte footer | **[V]** build-time digest only, `INV-PAYLOAD-02` |
 | B3 | overlay → running process | launcher reads its own image and stages it | **[V]** *unverified at runtime*, `INV-LAUNCH-01` (proposed) |
 | B4 | environment → launcher behavior | `HARUPACK_DEV_STAGE` (dev-only), `HARU_SECRET` (SECRET-knob canary), `HARUPACK_GEO`, PATH | **[V]** `INV-LAUNCH-02`/`04`, `INV-CANARY-01` |
@@ -156,5 +166,11 @@ strictly more than this repo had, and strictly less than proof.
    No invariant yet.
 6. Nim library versions are unpinned, so the shipped crypto implementation is whatever
    resolved on build day. `INV-SUPPLY-02`.
-7. No cross-implementation interop test — `INV-CRYPTO-02` compares parsed byte offsets,
+7. The project being packaged is trusted absolutely. Its build backend runs during
+   dependency staging, its `[[bundle]]` argv runs unannounced, its symlinks are followed
+   out of the tree, its `index-url` chooses where the shipped wheels come from, and an
+   `app_subdir` of `.` puts its files where the launcher's control files live.
+   `INV-TRUST-01` through `-07`, all proposed, six of the seven demonstrated on
+   2026-09-11 by the `trojan` busybody persona.
+8. No cross-implementation interop test — `INV-CRYPTO-02` compares parsed byte offsets,
    which catches drift but does not run the Nim decryptor. Needs Nim in CI.
