@@ -4427,7 +4427,14 @@ def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: 
 # than trusting it (a bare pid is not proof; the heartbeat it owns is). Project-tagged: this
 # NEVER reads or writes another project's busybody registry — lotek keeps its own /tmp dir, so do
 # we. Checks pids directly with os.kill(pid, 0), so there is no ps-grep self-match trap.
-BB_REGISTRY = Path(tempfile.gettempdir()) / "harupack-busybody"
+#
+# The registry lives at a FIXED path, NOT `tempfile.gettempdir()` — because a sweep sets its own
+# `--work-root`/`$TMPDIR` to isolate scratch, and a gettempdir-derived registry would then move
+# WITH that scratch dir, so two sweeps with different scratch roots would register in different
+# places and never see each other — defeating the whole guard (found 2026-09-12: a top-100 sweep
+# under a custom TMPDIR registered under that TMPDIR, not the shared location). `$HARUPACK_BUSYBODY_REGISTRY`
+# overrides for an unusual host; otherwise it is a stable, shared /tmp path like lotek's.
+BB_REGISTRY = Path(os.environ.get("HARUPACK_BUSYBODY_REGISTRY") or "/tmp/harupack-busybody")
 BB_STALE_S = 900.0                       # heartbeat/birth older than this = wedged or dead -> reap
 BB_FORCE_ENV = "HARUPACK_BUSYBODY_FORCE"
 
