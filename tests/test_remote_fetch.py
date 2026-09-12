@@ -100,6 +100,9 @@ def _remote_exe(tmp_path: Path, launcher: Path, payload: bytes, source_url: str)
 
 @pytest.fixture(scope="module")
 def launcher(tmp_path_factory) -> Path:
+    import shutil
+    if shutil.which("nim") is None:
+        pytest.skip("nim not installed; the launcher cannot be built")
     return compile_launcher(tmp_path_factory.mktemp("nim") / "launcher")
 
 

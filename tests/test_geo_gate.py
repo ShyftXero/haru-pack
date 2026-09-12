@@ -102,6 +102,9 @@ def _run(exe: Path, tmp_path: Path, env_extra: dict | None = None):
 
 @pytest.fixture(scope="module")
 def launcher(tmp_path_factory) -> Path:
+    import shutil
+    if shutil.which("nim") is None:
+        pytest.skip("nim not installed; the launcher cannot be built")
     return compile_launcher(tmp_path_factory.mktemp("nim") / "launcher")
 
 
