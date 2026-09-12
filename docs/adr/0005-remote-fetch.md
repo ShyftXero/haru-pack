@@ -4,11 +4,15 @@ Status: accepted (2026-09-12) · Implements Phase 3 · Invariant: INV-REMOTE-01 
 
 ## Context
 
-A payload is normally appended to the launcher binary. For large payloads, or when the same
-launcher should pull an updatable payload from a CDN, the packager wants the bytes to arrive
+A payload is normally appended to the launcher binary. To keep the shipped binary small, or to
+deliver a large payload from a CDN without embedding it, the packager wants the bytes to arrive
 over the wire at runtime instead. This must not weaken anything: the network is untrusted, and
 choosing a delivery mode must never let a pipeline step (digest-verify, decrypt, license, stage)
 be skipped.
+
+**Not for updates.** The footer digest pins the *exact* bytes, so a remote payload is immutable:
+changing it means rebuilding the binary (new digest). Remote delivery decouples payload *size*
+from the binary, not payload *version*.
 
 ## Decision
 
@@ -73,5 +77,10 @@ bytes unchanged.
 - Orthogonal to tier and to `--encrypt`: a remote payload may be plaintext or an encrypted
   container; the digest covers whichever was built (an encrypted build's digest covers the
   container, as with appended builds).
-- The 1 GiB in-memory cap is a real limit inherited from puppy's lack of streaming; documented,
-  not hidden.
+- The 1 GiB in-memory cap is a real limit inherited from puppy's lack of streaming; it is checked
+  AFTER the body is buffered (a hostile server can make the launcher buffer more before it is
+  rejected → fail-closed crash, never code exec). Documented, not hidden.
+- **Fetched every launch.** There is no local persistence of the fetched payload: a remote build
+  pulls it on EACH run (into the stage cache, which `stageZip` still de-dupes by digest for the
+  extract step). A remote build therefore needs network at every launch, not only the first. The
+  runtime scheme is restricted to http/https even for the env-overridden URL.

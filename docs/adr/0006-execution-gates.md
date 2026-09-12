@@ -55,8 +55,29 @@ also refuses a consensus larger than the endpoint count (unreachable forever).
 
 ## Honest limits
 
+- **Local MITM defeats it (the load-bearing caveat).** The gate is an HTTP(S) call made on the END
+  USER'S OWN MACHINE. A user with local privilege controls their proxy (`https_proxy`), CA trust
+  (`SSL_CERT_FILE` / `SSL_CERT_DIR`), and DNS / `/etc/hosts`, so they can point the resolver
+  hostname at a server they run and have it return `{"success":true,"country_code":"US"}`.
+  N-endpoint consensus gives NO protection against this — one on-path position intercepts every
+  endpoint identically. So the gate is real against a casual user and honest network faults, but
+  **advisory** against a determined local adversary. Consensus defends only against a **minority of
+  compromised or lying EXTERNAL resolvers**, and only when K ≥ 2 (the shipped default K=1 trusts a
+  single response). The durable control against a hostile HOST is not client-side geo — it is not
+  shipping to them. This is why INV-GEO-01's claim is scoped to "haru-pack reads no env," not "no
+  one can bypass it."
+- **Consensus needs distinct endpoints.** `build_geo_policy` deduplicates `--geo-restrict-api-url`
+  and refuses a consensus larger than the distinct count, so a quorum cannot be faked by listing
+  one URL K times. It cannot, however, tell that two different hostnames resolve to the same
+  operator — diversity of endpoints is the packager's responsibility.
 - **VPN / proxy.** IP-consensus defeats a down or lying endpoint; it does NOT defeat a user whose
   VPN/proxy exit IP sits in an allowed location. This is an IP check, not a presence check.
+- **Latency.** Endpoints are queried serially, each with a 15 s timeout, on EVERY launch; a build
+  with N endpoints on a slow network can block up to N × 15 s before deciding (fail-closed).
+- **Body size.** The 64 KB resolver-body cap (and the 1 GiB remote-payload cap) is checked AFTER
+  the body is buffered — puppy has no streaming API — so a hostile resolver/mirror can make the
+  launcher buffer more than the cap before it is rejected. The outcome is a fail-closed crash on
+  launch, never code execution.
 - **Windows TLS.** puppy's HTTPS on Windows needs a `cacert.pem` beside the binary (same as
   thin-tier uv fetch). Without it the request fails to resolve — and the gate **fails closed**,
   never open.

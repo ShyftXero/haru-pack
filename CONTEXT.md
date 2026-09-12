@@ -82,13 +82,18 @@ declared in the same policy for uniformity.
 Location and address gates, "similarly shaped": resolve a value from a **consensus of online
 sources**, then match an allow-policy. A single bare TLS request to a resolver (default
 `https://ipwho.is/`) returns both the caller's IP and its geo — no second request needed. The
-packager may list **N resolver endpoints** and require a **consensus** of `K` (default 1) to
-be reachable and agree the user is allowed, so one endpoint being down or lying does not
-decide the gate. **Fail-closed:** if fewer than `K` endpoints resolve (TLS failure,
-unparseable body, `success != true`), the app does not run. The policy is a list of **allow
-rules**; a rule is a set of `field=value` assertions against the resolver JSON (e.g.
-`country_code=US, region=California`) — AND within a rule, OR across rules. The old
-`HARUPACK_GEO` env bypass is removed.
+packager may list **N distinct resolver endpoints** and require a **consensus** of `K` (default
+1) to be reachable and agree the user is allowed, so (at `K`≥2) a *minority* of external
+endpoints being down or lying does not decide the gate. **Fail-closed:** if fewer than `K`
+endpoints resolve (TLS failure, unparseable body, `success != true`) — or if an allow-list is
+present but unreadable — the app does not run. The policy is a list of **allow rules**; a rule
+is a set of `field=value` assertions against the resolver JSON (e.g. `country_code=US,
+region=California`) — AND within a rule, OR across rules. The old `HARUPACK_GEO` env bypass is
+removed and haru-pack reads no env for the location. **Honest caveat:** the check runs on the
+user's own machine, so a determined local user can MITM their own resolver traffic
+(proxy/CA/DNS) — consensus can't beat one on-path position, and it's an IP check, not a presence
+check (a VPN exit passes). Real against casual use and honest faults; **advisory** against a
+determined local adversary (INV-GEO-01, ADR 0006).
 
 ## reap (build-time)
 A packager choice, fixed at build with `--reap`, that bakes an always-on on-target action:

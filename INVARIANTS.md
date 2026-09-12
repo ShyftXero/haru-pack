@@ -2346,21 +2346,33 @@ Territory: src/haru_pack/launcher/execgate.nim, src/haru_pack/launcher/cryptbox.
 
 ### INV-GEO-01
 Status: active
-Statement: The geo/ip gate is decided ONLY by the online resolver consensus against the encrypted
-allow-policy — NO environment variable can satisfy or bypass it. The retired `HARUPACK_GEO` env
-bypass (a user-settable var that used to pass the geo check) is removed; `cryptbox.checkPolicy`
-reads no env for location, and a pre-Phase-4 array-form geo policy (which depended on that bypass)
-is refused rather than silently ignored. Allow-rules are `field=value` assertions against the
-resolver JSON — AND within a rule, OR across rules — so the same mechanism gates geo
+Statement: The geo/ip gate is decided by the online resolver consensus against the encrypted
+allow-policy, and haru-pack reads NO environment variable to decide it — no haru-pack knob or env
+can satisfy or bypass it. The retired `HARUPACK_GEO` bypass (a user-settable var that used to pass
+the geo check outright) is removed; `cryptbox.checkPolicy` reads no env for location, a pre-Phase-4
+array-form geo policy (which depended on that bypass) is refused rather than silently ignored, and
+a declared-but-unparseable allow-list fails closed. Allow-rules are `field=value` assertions
+against the resolver JSON — AND within a rule, OR across rules — so the same mechanism gates geo
 (`country_code=US`) and ip (`ip=1.2.3.4`).
-Actors: a licensed user outside the allowed region who sets `HARUPACK_GEO` (or any other env) to
-an allowed value to run anyway — exactly the bypass that made the old geo check theatre.
-Assets: the property that the location decision is not attacker-influenced local state; setting an
-env cannot turn a denied location into an allowed one.
+Actors: a licensed user outside the allowed region who sets `HARUPACK_GEO` (or any other var
+haru-pack might read) to an allowed value to run anyway — exactly the bypass that made the old geo
+check theatre. This invariant closes THAT bypass; it does not (cannot) close the transport itself —
+see the Limit.
+Assets: the property that the location decision is not local state that haru-pack itself trusts;
+setting an env var that haru-pack reads cannot turn a denied location into an allowed one.
 Red-path: Re-add `if getEnv("HARUPACK_GEO").len > 0: return` to `cryptbox.checkPolicy` before the
 gate, rebuild, and run an encrypted binary whose resolver denies (FR) with `HARUPACK_GEO=US` in
 the environment: the app RUNS and `test_env_cannot_bypass_the_geo_gate` goes red. Walked
 2026-09-12 on this Linux host (observed the app run under the reintroduced bypass).
+Note: HONEST LIMIT (load-bearing — do not read the Statement wider than this). The gate is an
+HTTP(S) call made ON THE END USER'S OWN MACHINE. A user with local privilege controls their own
+proxy (`https_proxy`), CA trust (`SSL_CERT_FILE`/`SSL_CERT_DIR`), and DNS/`/etc/hosts`, so they can
+MITM the resolver and forge `country_code=US` — and N-endpoint consensus does NOT help, because one
+on-path position intercepts every endpoint identically (and the shipped default K=1 trusts a single
+response). So this gate is REAL against a casual user and honest network faults (fail-closed
+offline), but it is ADVISORY against a determined local adversary; consensus defends only against a
+minority of compromised/lying EXTERNAL resolvers. The durable control against a hostile HOST is not
+client-side geo — it is not shipping to them. Documented in docs/adr/0006 §"Honest limits".
 Source: docs/adr/0006-execution-gates.md §3. CONTEXT.md "geo / ip (execution gates)". Issue #11 —
 the security gap this phase was asked to close.
 Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/execgate.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py

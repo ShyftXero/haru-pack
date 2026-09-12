@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from haru_pack import crypto
-from haru_pack.build import stub_config_bytes
+from haru_pack.build import BuildError, build_geo_policy, stub_config_bytes
 from haru_pack.overlay import attach
 
 from _stage_helpers import build_payload_zip, compile_launcher, make_payload, run
@@ -196,3 +196,44 @@ def test_consensus_met_by_two_agreeing_endpoints_runs(tmp_path, launcher):
         res = _run(exe, tmp_path)
     assert res.returncode == 0, res.stderr
     assert "PAYLOAD_UV_RAN" in res.stdout
+
+
+@pytest.mark.invariant("INV-GEO-01")
+def test_consensus_minority_lying_allowed_fails_closed(tmp_path, launcher):
+    """The point of consensus: 3 endpoints, K=2, one lies 'US' and two honestly say 'FR'.
+    allowed=1 < 2 -> fail closed. A single compromised resolver must NOT carry the quorum."""
+    with _Resolver(_allowed({"country_code": "US"})) as liar, \
+         _Resolver(_allowed({"country_code": "FR"})) as a, \
+         _Resolver(_allowed({"country_code": "FR"})) as b:
+        exe = _geo_exe(tmp_path, launcher,
+                       {"endpoints": [liar.url(), a.url(), b.url()], "consensus": 2,
+                        "allow": [{"country_code": "US"}]})
+        res = _run(exe, tmp_path)
+    assert res.returncode == EXIT_LICENSE, (res.returncode, res.stderr)
+    assert "PAYLOAD_UV_RAN" not in res.stdout
+
+
+@pytest.mark.invariant("INV-GATE-01")
+def test_declared_but_unparseable_allow_fails_closed(tmp_path, launcher):
+    """A geo policy whose `allow` array is present but has no usable (string) rule must fail
+    closed — a "fail closed" gate must not vanish because its rules were garbled."""
+    exe = _geo_exe(tmp_path, launcher,
+                   {"endpoints": [_dead_url()], "consensus": 1,
+                    "allow": [{"country_code": 123}]})   # non-string value -> unparseable
+    res = _run(exe, tmp_path)
+    assert res.returncode == EXIT_LICENSE, (res.returncode, res.stderr)
+    assert "PAYLOAD_UV_RAN" not in res.stdout
+
+
+# ---- build_geo_policy: consensus can't be faked by duplicate endpoints (G2a) ----
+
+def test_build_geo_policy_dedups_endpoints():
+    p = build_geo_policy(["US"], None, ["https://a/", "https://a/", "https://b/"], 2)
+    assert p["endpoints"] == ["https://a/", "https://b/"], "duplicate endpoints must collapse"
+    assert p["consensus"] == 2
+
+
+def test_build_geo_policy_refuses_consensus_over_distinct_endpoints():
+    """K=2 with one DISTINCT endpoint (listed twice) can never reach consensus -> refuse."""
+    with pytest.raises(BuildError, match="DISTINCT"):
+        build_geo_policy(["US"], None, ["https://a/", "https://a/"], 2)

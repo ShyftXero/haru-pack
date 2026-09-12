@@ -75,6 +75,34 @@ def test_no_trigger_means_no_encryption(script_project):
     assert enc["enabled"] is False
 
 
+@pytest.mark.invariant("INV-CHAOS-07")
+def test_geo_declared_only_in_toml_forces_encryption(script_project):
+    """A geo gate declared ONLY in haru_pack.toml [encryption] must force encryption and reach
+    the policy — not ship a plaintext binary with no gate (the SILENT-WEDGE class).
+
+    RED-PATH: base enc['enabled'] / enc['geo'] on the CLI `geo` object (empty here) instead of
+    the merged decl geo, and this goes red — enabled False, allow-rules dropped.
+    """
+    (script_project / "haru_pack.toml").write_text(
+        '[encryption]\ngeo = ["US"]\n', encoding="utf-8")
+    _, enc, _, _, _ = _resolve(script_project, "thin", "", "", [], "", "", False, False)
+    assert enc["enabled"] is True, "a TOML-declared geo must force encryption, not be dropped"
+    assert enc["geo"].get("allow") == [{"country_code": "US"}], (
+        "the TOML geo allow-rules must reach the policy object"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-07")
+def test_geo_declared_only_in_toml_without_a_secret_is_refused(stub_toolchain, script_project,
+                                                               tmp_path):
+    """The loud half: a TOML-declared geo with no secret must FAIL the build, never silently
+    ship an unenforced location restriction."""
+    (script_project / "haru_pack.toml").write_text(
+        '[encryption]\ngeo = ["US"]\n', encoding="utf-8")
+    with pytest.raises(BuildError, match="no secret"):
+        stub_toolchain.build(script_project, tmp_path / "app", tier="thin", secret=None)
+
+
 @pytest.mark.invariant("INV-BUILD-01")
 def test_unencrypted_build_does_not_claim_encryption(stub_toolchain, script_project, tmp_path):
     out = tmp_path / "app"

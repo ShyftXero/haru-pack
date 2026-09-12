@@ -104,6 +104,14 @@ proc footerFault*(ft: Footer, fileSize, footerAt: int): string =
   # the stub-config — which is mandatory for a remote build (it carries source_url) — still
   # gets the full validation below. An APPENDED build (the default) is unchanged.
   let remote = (ft.flags and FooterFlagRemote) != 0'u16
+  if remote:
+    # A remote footer embeds no payload: its extent MUST be empty. readPayload is never called
+    # on this path, but pin the fields to their only valid values so no future reader inherits
+    # an unvalidated, attacker-writable offset/length from a remote-flagged footer.
+    if ft.payloadLen != 0'u64:
+      return "remote footer declares a non-zero payload length"
+    if ft.payloadOff > fs:
+      return "remote footer payload offset lies past the end of the file"
   if not remote:
     if ft.payloadLen == 0'u64: return "footer declares a zero-length payload"
     # Compare each term against the file size BEFORE adding them, so the sum cannot wrap.

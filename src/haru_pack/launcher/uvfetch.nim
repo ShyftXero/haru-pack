@@ -139,6 +139,14 @@ proc fetchPayload*(url: string): tuple[body: string, err: string] =
   ## proxy. (Windows and macOS do NOT read the *_proxy environment variables — they read the
   ## OS proxy configuration.)
   if url.len == 0: return ("", "empty source URL")
+  # Restrict the scheme at RUNTIME, not just at build. The URL can come from the env override
+  # (`<canary>_SOURCE_URL`), which a local user sets, and puppy's libcurl backend also speaks
+  # file:// / ftp:// / gopher:// / dict:// — a blind-SSRF / local-file surface. The fetched
+  # bytes are digest-anchored so this is defense-in-depth, but a delivery URL is HTTP by
+  # definition, so anything else is refused rather than handed to libcurl.
+  let lo = url.toLowerAscii
+  if not (lo.startsWith("http://") or lo.startsWith("https://")):
+    return ("", "refusing a non-http(s) source URL")
   if contentLengthOver(url, MaxPayloadBytes, PayloadFetchTimeoutSecs):
     return ("", "server advertises more than the " & $MaxPayloadBytes & " byte cap")
   try:

@@ -30,6 +30,7 @@ type
     endpoints: seq[string]
     consensus: int
     allow: seq[GeoRule]
+    allowDeclared: bool             ## an `allow` array was present with >=1 entry (parsed or not)
 
 proc parseGeoPolicy(node: JsonNode): GeoPolicy =
   ## Read the geo object from the (already-decrypted) policy JSON, with safe defaults. Absent /
@@ -49,6 +50,7 @@ proc parseGeoPolicy(node: JsonNode): GeoPolicy =
   if result.endpoints.len == 0: result.endpoints = @[DefaultGeoEndpoint]
   let allow = node{"allow"}
   if allow != nil and allow.kind == JArray:
+    if allow.len > 0: result.allowDeclared = true
     for rule in allow:
       if rule.kind == JObject:
         var r: GeoRule = initTable[string, string]()
@@ -88,7 +90,16 @@ proc checkGeoGate*(node: JsonNode) =
   ## `consensus` endpoints resolve AND at least `consensus` of the resolved ones agree the caller
   ## is allowed. Otherwise it QUITS the process (fail closed). Consults no environment variable.
   let gp = parseGeoPolicy(node)
-  if gp.allow.len == 0: return                   # object present but no rules -> no gate
+  if gp.allow.len == 0:
+    # No usable allow-rules. Two very different cases, and the difference is fail-open vs
+    # fail-closed: if NO `allow` array was declared, this build simply has no geo gate (an
+    # encrypted expires-only policy, say) and must run. But if an `allow` array WAS declared
+    # and every rule failed to parse into a usable assertion, the gate is malformed — refuse
+    # rather than silently admit (a "fail closed" gate must not vanish on garbled input).
+    if gp.allowDeclared:
+      quit("haru-pack: location policy is present but unreadable — refusing to run " &
+           "(fail-closed)", 3)
+    return
   var resolved = 0
   var allowed = 0
   for url in gp.endpoints:

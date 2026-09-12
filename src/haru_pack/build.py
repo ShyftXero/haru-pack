@@ -6,7 +6,7 @@ from pathlib import Path
 from . import tomlio, discovery, crypto, toolchain
 from .paths import launcher_src_dir
 from .payload import build_payload_zip
-from .overlay import attach
+from .overlay import attach, FOOTER_FLAG_ENCRYPTED
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier, bundles_uv
 from .sources import Sources
@@ -246,18 +246,32 @@ def build_geo_policy(countries, restrict, api_urls, consensus) -> dict:
                 "allow-rule was given, so nothing would be enforced. Add --geo or --geo-restrict, "
                 "or drop the endpoint/consensus flags.")
         return {}
-    endpoints = [u.strip() for u in (api_urls or []) if u.strip()] or [DEFAULT_GEO_ENDPOINT]
-    for u in endpoints:
+    # Dedup while preserving order: a consensus is only meaningful across DISTINCT resolvers.
+    # Listing the same URL K times would otherwise let one server (or one on-path MITM that
+    # intercepts it) satisfy the whole quorum — silently voiding "one endpoint lying doesn't
+    # decide the gate". Consensus is checked against the UNIQUE count.
+    seen: set = set()
+    endpoints: list[str] = []
+    for u in (api_urls or []):
+        u = u.strip()
+        if not u:
+            continue
         if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
             raise BuildError(f"--geo-restrict-api-url {u!r} must be an http:// or https:// URL.")
+        if u not in seen:
+            seen.add(u)
+            endpoints.append(u)
+    if not endpoints:
+        endpoints = [DEFAULT_GEO_ENDPOINT]
     k = consensus or 1
     if k < 1:
         raise BuildError("--geo-restrict-consensus must be >= 1.")
     if k > len(endpoints):
         raise BuildError(
-            f"--geo-restrict-consensus={k} exceeds the {len(endpoints)} resolver endpoint(s) "
-            f"configured, so consensus can never be reached and the gate would fail closed "
-            f"forever. Add more --geo-restrict-api-url, or lower the consensus.")
+            f"--geo-restrict-consensus={k} exceeds the {len(endpoints)} DISTINCT resolver "
+            f"endpoint(s) configured, so consensus can never be reached and the gate would "
+            f"fail closed forever. Add more distinct --geo-restrict-api-url, or lower the "
+            f"consensus.")
     return {"endpoints": endpoints, "consensus": k, "allow": allow}
 
 
@@ -567,19 +581,29 @@ def _resolve(project: Path, tier: str, python_cli: str,
     pyver = (python_cli or decl.get("python", "") or disc.get("python", "")
          or DEFAULT_PYTHON)
     e = decl.get("encryption", {})
+    # `geo` arrives as the assembled gate object (build_geo_policy) or {}; fall back to a
+    # haru_pack.toml `[encryption] geo = [...]` country list, normalized to the same object
+    # shape (INV-GEO-01). Resolve it ONCE and use the SAME object for both the enabled test and
+    # the policy value — otherwise a geo declared only in TOML sets no enabled bit and is
+    # silently dropped (ships plaintext, no gate: the SILENT-WEDGE class, INV-CHAOS-07).
+    geo_obj = _normalize_geo(geo) if geo else _normalize_geo(e.get("geo", []))
+    exp = expires or e.get("expires", "")
+    mach = machine or e.get("machine", "")
+    usr = user or e.get("user", "")
+    embed = embed_secret or bool(e.get("embed_secret"))
     enc = {
         # INV-BUILD-02: an explicit --encrypt must enable encryption on its own. It was
         # previously dropped here, so `--encrypt --secret X` with no policy flag attached a
-        # PLAINTEXT payload and exited 0.
+        # PLAINTEXT payload and exited 0. Every policy field — from CLI OR haru_pack.toml —
+        # forces encryption, so a declared licence/gate can never silently ship unenforced;
+        # a missing secret then fails LOUDLY at the `enabled and secret is None` guard below.
         "enabled": bool(encrypt) or bool(e.get("enabled"))
-                   or any([expires, geo, machine, user, embed_secret]),
-        "expires": expires or e.get("expires", ""),
-        # `geo` arrives as the assembled gate object (build_geo_policy) or {}; fall back to a
-        # haru_pack.toml country list, normalized to the same object shape (INV-GEO-01).
-        "geo": _normalize_geo(geo) if geo else _normalize_geo(e.get("geo", [])),
-        "machine": machine or e.get("machine", ""),
-        "user": user or e.get("user", ""),
-        "embed_secret": embed_secret or bool(e.get("embed_secret")),
+                   or any([exp, geo_obj.get("allow"), mach, usr, embed]),
+        "expires": exp,
+        "geo": geo_obj,
+        "machine": mach,
+        "user": usr,
+        "embed_secret": embed,
     }
     validate_manifest(manifest)
     if enc["enabled"]:
@@ -944,7 +968,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
             payload = crypto.encrypt(payload, secret, expires=enc["expires"], geo=enc["geo"],
                                      machine=enc["machine"], user=enc["user"],
                                      embed_secret=enc["embed_secret"])
-            flags = 1
+            flags = FOOTER_FLAG_ENCRYPTED
         # INV-BUILD-01: never report a protection we did not apply. Checked against the
         # bytes about to be attached, not against the intent that produced them.
         if enc["enabled"] != payload.startswith(crypto.MAGIC):

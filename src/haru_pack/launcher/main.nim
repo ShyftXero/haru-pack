@@ -228,7 +228,7 @@ proc launch(): int =
       payload = readPayload(self, ft, footerAt)
     verifyPayloadDigest(payload, ft.payloadSha)   # INV-LAUNCH-01 / INV-REMOTE-01 — before decrypt
     let shahex = hexOf(ft.payloadSha)
-    if (ft.flags and 1'u16) != 0'u16 or isEncrypted(payload):
+    if (ft.flags and FooterFlagEncrypted) != 0'u16 or isEncrypted(payload):
       # SECRET knob (INV-CANARY-01): the decryption key's env NAME is sc.envForKnob(kSecret)
       # (default HARU_SECRET), replacing the retired hardcoded HARUPACK_SECRET.
       payload = openContainer(payload, sc.envForKnob(kSecret))   # dies on failure
