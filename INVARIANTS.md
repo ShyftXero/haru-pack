@@ -2319,6 +2319,54 @@ Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/uvfetch.nim, 
 
 ---
 
+## GATE — a pre-run condition is resolved, matched, and failed closed
+
+### INV-GATE-01
+Status: active
+Statement: Every rule-checked execution gate has ONE shape — resolve a current value, match it
+against an allow-policy, FAIL CLOSED — and all gates live inside the encrypted policy (checked
+post-decrypt, invisible to a reverse-engineer). The online geo/ip gate resolves the caller's
+IP+geo from a consensus of N resolver endpoints and returns normally ONLY when at least
+`consensus` endpoints resolve AND at least `consensus` of them agree the caller is allowed;
+anything less — too few reachable, too few agreeing, an unparseable body, `success != true` — is
+a refusal (`quit 3`), never a pass. `date` (expiry) is the same shape; `machine`/`user` are
+strictly stronger (cryptographically bound via the key). Designing one gate is designing them all.
+Actors: an operator on a down or lying network (a resolver that times out, 500s, or returns junk)
+who would benefit if "cannot check" silently became "allowed"; and the packager who must trust
+that a location restriction actually restricts.
+Assets: the fail-closed property — an execution gate that cannot resolve its input denies rather
+than admits, so a DoS'd or partitioned resolver stops the app instead of waving it through.
+Red-path: In `execgate.checkGeoGate` disable the two guards (`if resolved < gp.consensus: quit`
+and `if allowed < gp.consensus: quit`), rebuild, and run an encrypted binary whose resolver
+reports a denied location (and, separately, one whose resolver is unreachable): the app RUNS
+(returncode 0), and `test_geo_denied_location_fails_closed` /
+`test_geo_resolver_unreachable_fails_closed` go red. Walked 2026-09-12 on this Linux host.
+Source: docs/adr/0006-execution-gates.md. CONTEXT.md "execution gate" / "geo / ip". Issue #11.
+Territory: src/haru_pack/launcher/execgate.nim, src/haru_pack/launcher/cryptbox.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py
+
+### INV-GEO-01
+Status: active
+Statement: The geo/ip gate is decided ONLY by the online resolver consensus against the encrypted
+allow-policy — NO environment variable can satisfy or bypass it. The retired `HARUPACK_GEO` env
+bypass (a user-settable var that used to pass the geo check) is removed; `cryptbox.checkPolicy`
+reads no env for location, and a pre-Phase-4 array-form geo policy (which depended on that bypass)
+is refused rather than silently ignored. Allow-rules are `field=value` assertions against the
+resolver JSON — AND within a rule, OR across rules — so the same mechanism gates geo
+(`country_code=US`) and ip (`ip=1.2.3.4`).
+Actors: a licensed user outside the allowed region who sets `HARUPACK_GEO` (or any other env) to
+an allowed value to run anyway — exactly the bypass that made the old geo check theatre.
+Assets: the property that the location decision is not attacker-influenced local state; setting an
+env cannot turn a denied location into an allowed one.
+Red-path: Re-add `if getEnv("HARUPACK_GEO").len > 0: return` to `cryptbox.checkPolicy` before the
+gate, rebuild, and run an encrypted binary whose resolver denies (FR) with `HARUPACK_GEO=US` in
+the environment: the app RUNS and `test_env_cannot_bypass_the_geo_gate` goes red. Walked
+2026-09-12 on this Linux host (observed the app run under the reintroduced bypass).
+Source: docs/adr/0006-execution-gates.md §3. CONTEXT.md "geo / ip (execution gates)". Issue #11 —
+the security gap this phase was asked to close.
+Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/execgate.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py
+
+---
+
 ## TOOL — the kitchen sink is the default, and all of it is declinable
 
 ### INV-TOOL-01

@@ -3,6 +3,42 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-09-12
+
+### Security
+
+- **Launcher: the `HARUPACK_GEO` env bypass is gone (INV-GEO-01).** The old geo "check"
+  compared a licence's allowed list against the `HARUPACK_GEO` *environment variable* — so
+  anyone outside the region just set `HARUPACK_GEO=US` and ran. That's theatre, and it's
+  removed. Location is now decided by an online resolver the user does not control (below),
+  and `cryptbox.checkPolicy` reads no env for it at all. A binary built by an older haru-pack
+  that still carries the array-form geo policy is *refused*, not silently waved through — a
+  dropped location restriction is a breach, not a no-op.
+
+### Added
+
+- **Launcher Phase 4: online execution gates — geo/ip via consensus (INV-GATE-01 /
+  INV-GEO-01, ADR 0006).** Every rule-checked gate now has one shape: resolve a current value,
+  match an allow-policy, **fail closed**. Geo/ip resolves the caller's IP and location from a
+  consensus of online resolvers (default `https://ipwho.is/` — one bare TLS request returns
+  both). List N endpoints with `--geo-restrict-api-url` and require `--geo-restrict-consensus=K`
+  (default 1) to resolve *and* agree, so one endpoint being down or lying doesn't decide the
+  gate. Rules are `field=value` (`--geo-restrict "country_code=US,region=Texas"`, or the
+  `--geo US,CA` shorthand) — AND within a rule, OR across them, and because any resolver field
+  works, `ip=1.2.3.4` is an ip gate through the same code. It all lives inside the encrypted
+  policy (needs `--encrypt`), hidden from a reverse-engineer. **Honest limit:** this is an IP
+  check, not a presence check — a VPN whose exit is in an allowed country passes; and if the
+  network is down, the app doesn't run.
+- **Launcher Phase 3: remote-fetch delivery — `--source-url` (INV-REMOTE-01, ADR 0005).** The
+  payload can be fetched over HTTP at first run instead of appended to the binary. Same
+  pipeline either way — verify → decrypt → licence → stage — so the build-baked footer digest
+  is the one thing trusted, no matter where the bytes came from. Tamper with the fetched bytes
+  and it fails closed; point the (env-overridable) `SOURCE_URL` at a mirror and it still only
+  runs bytes matching the digest. The build writes a `.haru-payload` sidecar to host, and the
+  binary carries none of it. An appended build never flips to a network fetch because someone
+  set an env var. Proxy-aware through the OS HTTP stack (libcurl `*_proxy` on Linux; system
+  proxy on Windows/macOS).
+
 ## 2026-09-11
 
 ### Security

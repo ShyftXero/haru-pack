@@ -72,7 +72,8 @@ app = typer.Typer(add_completion=False, cls=_DefaultToBuild,
 
 def _run_build(*, project, out=None, target="host", tier="default", thin=False, thick=False,
                chonky=False, encrypt=False, secret=None, secret_env=None, secret_prompt=False,
-               embed_secret=False, expires="", machine="", user="", geo="", python="",
+               embed_secret=False, expires="", machine="", user="", geo="",
+               geo_restrict=None, geo_restrict_api_url=None, geo_restrict_consensus=1, python="",
                entry_point="", wine=False, obfuscate="none", obfuscate_args="",
                shake=False, shake_keep=(), env_canary="", env_canary_random=False,
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
@@ -104,7 +105,8 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
         except TargetError as e:
             print(f"{prog()}: {e}", style="error"); raise typer.Exit(2)
         out = Path(project.name or "app").with_suffix(suffix)
-    want_enc = encrypt or embed_secret or secret or secret_env or secret_prompt or expires or machine or user or geo
+    want_enc = (encrypt or embed_secret or secret or secret_env or secret_prompt or expires
+                or machine or user or geo or geo_restrict)
     sec = None
     if want_enc:
         if secret:            sec = secret.encode()
@@ -116,6 +118,9 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     try:
         info = build_exe(project, out, target=target, tier=tier, secret=sec,
                          expires=expires, geo=[g for g in geo.split(",") if g],
+                         geo_restrict=list(geo_restrict or []),
+                         geo_api_urls=list(geo_restrict_api_url or []),
+                         geo_consensus=geo_restrict_consensus,
                          machine=machine, user=user, embed_secret=embed_secret, python=python,
                          wine=wine, encrypt=bool(want_enc),   # INV-BUILD-02
                          obfuscate=obfuscate,
@@ -430,7 +435,19 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           expires: str = typer.Option("", "--expires", help="license expiry YYYY-MM-DD"),
           machine: str = typer.Option("", "--machine", help="bind to this machine-id (cryptographic)"),
           user: str = typer.Option("", "--user", help="bind to this OS username (cryptographic)"),
-          geo: str = typer.Option("", "--geo", help="allowed country codes, comma-separated"),
+          geo: str = typer.Option("", "--geo",
+              help="allowed country codes, comma-separated (sugar for --geo-restrict "
+                   "country_code=XX). Resolved online at runtime; fail-closed; needs --encrypt"),
+          geo_restrict: list[str] = typer.Option(None, "--geo-restrict", metavar="FIELD=VALUE,...",
+              help="one allow-rule against the resolver JSON, e.g. country_code=US,region=Texas "
+                   "(AND within a rule). Repeatable — rules are OR'd. Any field works, so "
+                   "ip=1.2.3.4 is an ip gate. Runs online, fail-closed; needs --encrypt"),
+          geo_restrict_api_url: list[str] = typer.Option(None, "--geo-restrict-api-url",
+              metavar="URL", help="resolver endpoint returning IP+geo JSON (default "
+                   "https://ipwho.is/). Repeatable for an N-endpoint consensus"),
+          geo_restrict_consensus: int = typer.Option(1, "--geo-restrict-consensus", metavar="K",
+              help="require K endpoints to resolve AND agree the caller is allowed (default 1). "
+                   "Fewer resolving/agreeing = fail-closed"),
           python: str = typer.Option("", "--python", help="Python version to stage (e.g. 3.13); default auto/3.13"),
           entry_point: str = typer.Option("", "--entry-point", "-e",
               help="what to run: a script (app.py), a console script (lotek), or "
@@ -492,7 +509,10 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
     _run_build(project=project, out=out, target=target, tier=tier, thin=thin, thick=thick,
                chonky=chonky, encrypt=encrypt, secret=secret, secret_env=secret_env,
                secret_prompt=secret_prompt, embed_secret=embed_secret, expires=expires,
-               machine=machine, user=user, geo=geo, python=python, entry_point=entry_point,
+               machine=machine, user=user, geo=geo, geo_restrict=geo_restrict,
+               geo_restrict_api_url=geo_restrict_api_url,
+               geo_restrict_consensus=geo_restrict_consensus, python=python,
+               entry_point=entry_point,
                wine=wine, obfuscate=obfuscate, obfuscate_args=obfuscate_args,
                shake=shake, shake_keep=shake_keep, env_canary=env_canary,
                env_canary_random=env_canary_random,

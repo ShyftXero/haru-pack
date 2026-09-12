@@ -192,6 +192,75 @@ def resolve_source_url(source_url: str) -> str:
     return source_url
 
 
+# ── Phase-4 execution gates: online geo/ip (docs/adr/0006, INV-GATE-01 / INV-GEO-01) ──
+DEFAULT_GEO_ENDPOINT = "https://ipwho.is/"
+
+
+def _normalize_geo(geo) -> dict:
+    """Coerce a geo spec into the Phase-4 gate OBJECT {endpoints?, consensus?, allow[]}.
+
+    {} / None -> {} (no gate); a dict -> as-is; a list of country codes (a haru_pack.toml
+    `[encryption] geo = [...]` or a legacy caller) -> allow-rules on country_code. This keeps a
+    declared-in-TOML country list working while the wire format is the uniform gate object."""
+    if not geo:
+        return {}
+    if isinstance(geo, dict):
+        return geo
+    return {"allow": [{"country_code": str(g)} for g in geo if g]}
+
+
+def build_geo_policy(countries, restrict, api_urls, consensus) -> dict:
+    """Assemble the encrypted geo/ip execution-gate policy from CLI inputs (INV-GATE-01 /
+    INV-GEO-01). Returns {} when no allow-rule is given (no gate). The gate is uniform: resolve
+    the caller's IP+geo from a consensus of online resolvers, match an allow-policy, fail closed.
+
+      * --geo US,CA            -> two rules {country_code: US} OR {country_code: CA}
+      * --geo-restrict "a=1,b=2" -> one rule {a:1, b:2} (AND within), OR'd across repeats
+      * --geo-restrict-api-url -> resolver endpoints (default ipwho.is)
+      * --geo-restrict-consensus -> K endpoints must resolve AND agree (default 1)
+
+    Any resolver field can be asserted (so ip=1.2.3.4 is an ip gate) — one mechanism, not a
+    bespoke rule per gate. Refuses a consensus that can never be reached, and endpoints/consensus
+    set with no rule (a gate that does nothing is the SILENT-WEDGE class, INV-CHAOS-07)."""
+    allow: list[dict] = [{"country_code": c} for c in (countries or []) if c]
+    for spec in (restrict or []):
+        rule: dict = {}
+        for pair in spec.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                raise BuildError(
+                    f"--geo-restrict rule {spec!r} has a term without '=': {pair!r}. Use "
+                    f"field=value[,field=value] (e.g. country_code=US,region=Texas).")
+            k, v = (p.strip() for p in pair.split("=", 1))
+            if not k or not v:
+                raise BuildError(f"--geo-restrict rule {spec!r} has an empty field or value.")
+            rule[k] = v
+        if rule:
+            allow.append(rule)
+    if not allow:
+        if api_urls or (consensus and consensus != 1):
+            raise BuildError(
+                "--geo-restrict-api-url / --geo-restrict-consensus configure a geo gate but no "
+                "allow-rule was given, so nothing would be enforced. Add --geo or --geo-restrict, "
+                "or drop the endpoint/consensus flags.")
+        return {}
+    endpoints = [u.strip() for u in (api_urls or []) if u.strip()] or [DEFAULT_GEO_ENDPOINT]
+    for u in endpoints:
+        if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
+            raise BuildError(f"--geo-restrict-api-url {u!r} must be an http:// or https:// URL.")
+    k = consensus or 1
+    if k < 1:
+        raise BuildError("--geo-restrict-consensus must be >= 1.")
+    if k > len(endpoints):
+        raise BuildError(
+            f"--geo-restrict-consensus={k} exceeds the {len(endpoints)} resolver endpoint(s) "
+            f"configured, so consensus can never be reached and the gate would fail closed "
+            f"forever. Add more --geo-restrict-api-url, or lower the consensus.")
+    return {"endpoints": endpoints, "consensus": k, "allow": allow}
+
+
 def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = False,
                       ram_only: bool = False, base_path: str = "",
                       source_url: str = "") -> bytes:
@@ -505,7 +574,9 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "enabled": bool(encrypt) or bool(e.get("enabled"))
                    or any([expires, geo, machine, user, embed_secret]),
         "expires": expires or e.get("expires", ""),
-        "geo": geo or e.get("geo", []),
+        # `geo` arrives as the assembled gate object (build_geo_policy) or {}; fall back to a
+        # haru_pack.toml country list, normalized to the same object shape (INV-GEO-01).
+        "geo": _normalize_geo(geo) if geo else _normalize_geo(e.get("geo", [])),
         "machine": machine or e.get("machine", ""),
         "user": user or e.get("user", ""),
         "embed_secret": embed_secret or bool(e.get("embed_secret")),
@@ -728,6 +799,7 @@ def target_is_host(tgt) -> bool:
 
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
+          geo_restrict=(), geo_api_urls=(), geo_consensus: int = 1,
           machine: str = "", user: str = "", embed_secret: bool = False,
           obfuscate: str = "none", obfuscate_args=(),
           python: str = "", wine: bool = False, encrypt: bool = False,
@@ -757,7 +829,11 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"needs no system packages.")
     else:
         tc = {"ok": True, "compiler": f"zig ({tgt.zig_triple()})", "advice": ""}
-    manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo,
+    # Phase 4: fold --geo / --geo-restrict / --geo-restrict-api-url / --geo-restrict-consensus
+    # into the uniform gate object BEFORE resolve, so enc["geo"] carries the online-gate policy
+    # (INV-GATE-01 / INV-GEO-01). {} = no geo gate.
+    geo_policy = build_geo_policy(geo, geo_restrict, geo_api_urls, geo_consensus)
+    manifest, enc, pyver, source, sources = _resolve(project, tier, python, expires, geo_policy,
                                                      machine, user, embed_secret, encrypt,
                                                      entry_point, log=log)
     # Record the requested engine on the manifest so assemble_payload can apply it. Validated
@@ -813,6 +889,15 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                          "nothing deletes the stage, so nothing shreds it. Add --reap, or drop "
                          "--overwrite.")
     say = log or (lambda _m: None)
+    if enc["geo"].get("allow"):
+        gp = enc["geo"]
+        say(f"--geo-restrict: online location gate — {len(gp['allow'])} allow-rule(s), "
+            f"{len(gp.get('endpoints', [DEFAULT_GEO_ENDPOINT]))} resolver endpoint(s), consensus "
+            f"{gp.get('consensus', 1)}. It resolves the caller's IP+geo at runtime and FAILS "
+            f"CLOSED if fewer than the consensus resolve or agree — no env var can set or bypass "
+            f"it (the old HARUPACK_GEO bypass is gone). HONEST LIMIT: this is an IP check, not a "
+            f"presence check — a VPN/proxy whose exit IP is in an allowed location passes. Lives "
+            f"inside the encrypted policy, so it needs --encrypt (and a secret).")
     if overwrite:
         say("--overwrite: shred-on-reap. The detached reaper overwrites each staged file with "
             "matching-length random data and fsyncs BEFORE unlinking, so a plaintext blob on disk "
