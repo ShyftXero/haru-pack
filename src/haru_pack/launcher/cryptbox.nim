@@ -112,12 +112,16 @@ proc checkPolicy(policy: seq[byte]) =
       quit("haru-pack: license expired (" & expires & ")", 3)
   let geo = j{"geo"}
   if not geo.isNil and geo.len > 0:
-    let cur = getEnv("HARUPACK_GEO")   # offline geo is weak; online lookup is future work
-    var ok = false
-    for g in geo:
-      if g.getStr == cur and cur.len > 0: ok = true
-    if not ok:
-      quit("haru-pack: not licensed for this location (allowed: " & $geo & ")", 3)
+    # A geo restriction is a SECURITY gate and MUST NOT be overridable by the end user. The old
+    # `getEnv("HARUPACK_GEO")` read was an honor-system bypass — set it to an allowed value and the
+    # gate passed — which is why CONTEXT.md records that env bypass as removed, and why every haru
+    # runtime INPUT now resolves only through the canary model (INV-CANARY-03). Verifying location
+    # without trusting the user needs the online-consensus execution gate (CONTEXT "geo / ip"),
+    # which is NOT implemented in this launcher yet, so an offline binary FAILS CLOSED on a geo
+    # policy rather than trusting an attacker-settable value. Implementing the online gate is
+    # separate work; until then a geo-restricted build does not run offline.
+    quit("haru-pack: this build carries a geo restriction that this launcher cannot verify " &
+         "without trusting the end user; refusing to run (fail-closed). Allowed: " & $geo, 3)
 
 proc openContainer*(raw: string, secretEnv: string): string =
   ## derive key, GCM-decrypt, THEN parse+check the (hidden) policy -> returns payload zip.

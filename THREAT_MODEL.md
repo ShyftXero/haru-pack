@@ -115,6 +115,24 @@ no CoW extent, no VSS snapshot. `--overwrite` is belt-and-suspenders for plainte
 unavoidably touches disk on Windows/macOS (where there is no unprivileged RAM disk). This is the
 doctrine; `--overwrite` is not a substitute for it.
 
+**But `--encrypt --ephemeral` is NOT an absolute "nothing plaintext reaches disk" (docs/adr/0005 §5).**
+Two paths put the decrypted tree on disk despite the intent, and an operator who assumes otherwise
+is wrong in exactly the way this document exists to prevent:
+
+- **Low-RAM fallback.** `--ephemeral` stages to RAM only when the payload provably fits free
+  memory (the fit check — `INV-EPHEMERAL-01`). On a small-RAM target — a 512 MB CI runner, a small
+  VPS, a memory-capped container — it **falls back to the persistent cache on disk**, and the
+  decrypted tree is then a plaintext blob on the block device. This is an *availability* fallback,
+  not an attacker-controlled one: the `EPHEMERAL` runtime knob is 2-state and can only *enable* RAM
+  (`=1`), never force disk, precisely so a target cannot downgrade an encrypted payload onto disk by
+  setting an env var (`INV-EPHEMERAL-03`).
+
+The fallback tree **is reaped**, but a plain unlink is recoverable; add **`--overwrite`** so the
+fallback is shredded on reap (still bounded — not a secure erase, per the section above). The build
+**warns** when `--encrypt` and `--ephemeral` are combined, naming the low-RAM fallback and
+recommending `--overwrite`. The only way to guarantee no plaintext ever reaches disk is a target you
+know has the RAM — which the packager cannot enforce from the build. **[R]**
+
 ## The AI-development threat
 
 lotek's process retrospective names the defect precisely: *"the agent's failure mode in

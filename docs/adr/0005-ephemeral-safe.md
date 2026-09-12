@@ -49,14 +49,26 @@ need = unpacked_bytes × 1.2
 fit  = /dev/shm free bytes ≥ need  AND  /proc/meminfo MemAvailable ≥ need
 ```
 
-- `unpacked_bytes` is the size of the staged tree, measured by the build from the assembled
-  payload directory and baked into the stub-config (emitted only alongside `ram_only`). It is a
-  close over-estimate of the tree the launcher extracts; the ×1.2 headroom absorbs the imprecision
-  (a `uv` binary is XZ-compressed in the payload and expands on stage) and leaves the app room to
-  run. Over-estimating is the safe direction — it biases toward the disk fallback.
+- `unpacked_bytes` is the size of the tree the launcher will actually STAGE, baked into the
+  stub-config (emitted only alongside `ram_only`). It is **not** `du` of the payload dir: `uv`
+  ships XZ-compressed (`uv.xz`, ~14 MB) and the launcher **expands** it on stage (~56 MB). The
+  build therefore sums **expanded** sizes — for every `.xz` member it reads the `.xz.size` sidecar
+  `bundle.compress_uv` writes (the raw byte count) instead of the compressed size, and drops the
+  `.xz`/`.size`/`.sha256` sidecars from the count (they are removed before the launcher records
+  the tree). Summing the *compressed* bytes would under-count by ~40 MB and could hand the gate a
+  "fits" verdict for a tree that then OOMs the box it protects (this was adversarial review C1).
+  The ×1.2 headroom sits on top of the real staged size, so the gate errs toward the disk
+  fallback, not toward RAM.
 - **Fail-safe.** An unknown size (`unpacked_bytes` absent / 0), an unmeasurable host (non-Linux,
-  unreadable `/proc/meminfo`, `statvfs` failure), or an arithmetic overflow all answer "does not
-  fit". The launcher never stages to RAM it cannot account for.
+  unreadable `/proc/meminfo`, `statvfs` failure), or an over-large size whose ×1.2 would overflow
+  `int64` all answer "does not fit". The overflow guard is a DIVISION test (`unpackedBytes >
+  (int64.high div 6) * 5`) computed BEFORE the multiply, because under `-d:release` forming the
+  overflowing sum raises an uncatchable `OverflowDefect` and would crash instead of failing safe
+  (adversarial review W2). The launcher never stages to RAM it cannot account for.
+- **cgroup-aware.** A container or CI runner caps memory in a cgroup while `/proc/meminfo` still
+  reports the HOST's RAM. The gate also reads the cgroup budget — v2 `memory.max` − `memory.current`,
+  v1 `memory.limit_in_bytes` − `memory.usage_in_bytes` — and requires `need` to clear it too; an
+  absent/`max`/unreadable limit falls through to `MemAvailable` (adversarial review W3).
 - On a non-Linux host there is no guaranteed RAM filesystem, so the auto path defers to the
   existing best-effort `ramBackedRoot()` (which itself notes the fallback to disk).
 
@@ -66,13 +78,17 @@ deep nesting — one early-returning helper per source of truth.
 ## 3. Runtime override: the `EPHEMERAL` knob (§override)
 
 The target reads the staging toggle from `<canary.ephemeral>_EPHEMERAL` (default
-`HARU_EPHEMERAL`), resolved by the one canary rule (`stubconfig.envForKnob`):
+`HARU_EPHEMERAL`), resolved by the one canary rule (`stubconfig.envForKnob`). It is **2-state**:
 
 | Value | Effect |
 |---|---|
-| `0` | force the disk cache (a baked `base_path` if present, else the per-user cache) |
-| `1` | force the RAM-backed root **and skip the fit-check** (the target asserts it fits) — works even on a binary NOT built `--ephemeral` |
-| unset / other | auto (fit-detection as in §2) |
+| `1` | force the RAM-backed root **and skip the fit-check** (the target asserts it fits) — works even on a binary NOT built `--ephemeral` (target-autonomy enable) |
+| unset / anything else (incl. `0`) | auto (fit-detection as in §2) |
+
+There is **deliberately no force-disk value.** An env toggle that pushed an `--encrypt --ephemeral`
+payload onto disk would be a confidentiality downgrade an attacker who can set an env var could
+trigger, so the knob can only ever *enable* RAM, never *force* disk (user decision, 2026-09-12). A
+target that genuinely needs disk simply does not set the knob (auto handles the low-RAM case).
 
 ### Precedence (§precedence)
 
@@ -80,13 +96,13 @@ Highest first, computed before staging in `main.resolveStagingRoot`:
 
 ```
 BASE_PATH env (explicit path)
-  > EPHEMERAL env  (0 → disk / 1 → RAM, skip fit)
+  > EPHEMERAL env =1 → RAM, skip fit          (no force-disk value)
   > stub-config base_path (build-time default)
   > ram_only ? (auto: RAM if it fits, else the cache) : the per-user cache
 ```
 
-An explicit `BASE_PATH` names a concrete directory, so it wins over the RAM/disk toggle; the
-`EPHEMERAL` toggle wins over the baked defaults, which is what "target autonomy" means.
+An explicit `BASE_PATH` names a concrete directory, so it wins over the RAM enable; the `=1` enable
+wins over the baked defaults, which is what "target autonomy" means.
 
 ## 4. Back-compat — why no version bump (§back-compat)
 
@@ -107,11 +123,19 @@ An explicit `BASE_PATH` names a concrete directory, so it wins over the RAM/disk
 The parser keeps the original four canary keys **mandatory** and treats only `ephemeral` as
 optional, so a genuinely truncated three-key stub is still rejected.
 
-## 5. What this does NOT do
+## 5. What this does NOT do (residual limits — stated so nothing over-claims)
 
 - It does not promise RAM on Windows/macOS — there is no unprivileged RAM filesystem there, so
   `--ephemeral` stays best-effort (ADR 0004 §4), and the fit check is Linux-only.
 - It does not control the packed application's OWN disk writes — only where the STUB stages.
-- The fit check is a best-effort **size** gate, not a memory reservation: another process can
-  still consume RAM between the check and the extract. It removes the common, predictable failure
-  (a payload that never had a chance of fitting), not every possible OOM.
+- **Not "never OOM" in the absolute.** The fit check is a **size** gate, not a memory reservation:
+  another process can consume RAM between the check and the extract, and a memory budget the
+  launcher cannot read (an exotic cgroup layout, a hypervisor balloon) is not gated. It removes the
+  PREDICTABLE failure — a tree that never had room in the knowable budget — not every conceivable
+  OOM. INV-EPHEMERAL-01 is worded to that bounded claim.
+- **`--encrypt` + `--ephemeral` is not an absolute "nothing plaintext reaches disk".** On a
+  low-RAM target the RAM stage FALLS BACK to the persistent cache (the fit check above), and the
+  decrypted tree then lands on disk. This is an availability fallback, not an attacker-controlled
+  one — there is no env value that forces disk (§3). The fallback IS reaped, but a plain unlink is
+  recoverable, so `--overwrite` shreds it (still not a secure erase; INV-SHRED-01, THREAT_MODEL.md).
+  The build says this out loud when `--encrypt` and `--ephemeral` are combined (W1).
