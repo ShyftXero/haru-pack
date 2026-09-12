@@ -5,6 +5,27 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-12
 
+### Features — `--emit-nim`: a reproduction kit for the launcher stub
+
+- **`haru-pack build … --emit-nim DIR`** writes a kit alongside the finished binary so you can
+  inspect, modify, and manually recompile the launcher stub. The packed binary is still
+  produced; `DIR` gets the launcher's Nim source (byte-identical to what haru-pack compiles),
+  this build's `payload.bin` and `stubconfig.bin`, a portable `zig-cc` shim, a stdlib-only
+  `assemble.py`, and a `compile.sh` that recompiles the stub and reassembles the exact binary.
+- **The stub is generic; the config is data.** Encryption, licence policy, reap/ephemeral,
+  remote-fetch and injects are not compiled into the Nim — they live in `payload.bin` (policy
+  inside it) and `stubconfig.bin`, which the always-present stub functions read at runtime. So
+  the kit is source + those two blobs + a reassembler. Edit `stub/*.nim`, run `sh compile.sh`,
+  and `assemble.py` recomputes the footer offsets (the payload offset is the stub's length, so
+  a modified stub is reassembled, not patched).
+- **Faithful, not plausible (INV-EMIT-01).** The kit reassembles the same binary the build
+  shipped — verified end-to-end through the real build path and against `overlay.attach`'s bytes
+  for both appended and remote-fetch builds. Emitting `payload.bin` exposes exactly what the
+  binary already exposes (encrypted stays encrypted); the build secret is never written.
+- **Assumes zig, references the managed toolchain.** `compile.sh` reproduces haru-pack's own
+  `nim c` invocation for the resolved target (host by default) and drives `${HARU_ZIG:-zig} cc`
+  through the shim; it names the managed Nim haru used, overridable with `HARU_NIM`/`HARU_ZIG`.
+
 ### Tooling — BusyBody run-control hardening (adopted from lotek)
 
 - **Single-instance run control (INV-CHAOS-13).** Two busybody sweeps each stage a real

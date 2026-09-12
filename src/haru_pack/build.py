@@ -4,6 +4,7 @@ import re as _re
 import os, secrets, shutil, string, subprocess, tempfile
 from pathlib import Path
 from . import tomlio, discovery, crypto, toolchain
+from . import emit as emit_mod
 from .paths import launcher_src_dir
 from .payload import build_payload_zip
 from .overlay import attach, FOOTER_FLAG_ENCRYPTED
@@ -833,7 +834,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
           base_path: str = "", source_url: str = "", env_append=None,
-          cc: str = "", log=None) -> dict:
+          cc: str = "", emit_nim: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -1024,4 +1025,14 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                          ("tracer", "dropped_files", "freed_bytes",
                           "payload_bytes_before", "payload_bytes_after")}
         info["shake"]["report"] = str(shake_mod.write_report(shake_report, out))
+    # --emit-nim: a reproduction kit alongside the finished binary. The stub is generic, so
+    # the kit is its Nim source plus the exact DATA this build attached (payload + stub-config)
+    # and a script that recompiles and reassembles them. `flags` and `source_url` are the same
+    # values attach() used above, so the reassembled binary matches this one byte-for-byte
+    # (INV-EMIT-01).
+    if emit_nim:
+        dest = emit_mod.emit_nim_kit(Path(emit_nim), tgt=tgt, nim=nim, provider=provider,
+                                     payload=payload, stub_config=sc_bytes, flags=flags,
+                                     remote=bool(source_url), out_name=out.name, log=say)
+        info["emit_nim"] = str(dest)
     return info

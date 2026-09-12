@@ -79,7 +79,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
                reap=False, ephemeral=False, ram_only=False, overwrite=False, base_path="",
-               source_url="", env_append=None, cc="") -> None:
+               source_url="", env_append=None, cc="", emit_nim="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -134,6 +134,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          stub_env_base_path_canary=stub_env_base_path_canary,
                          reap=reap, overwrite=overwrite, ram_only=ram_only, base_path=base_path,
                          source_url=source_url, env_append=list(env_append or []),
+                         emit_nim=emit_nim,
                          log=lambda m: print(
                              f"{prog()}: {m}",
                              style="warn" if "WARNING" in m else "info"))
@@ -159,6 +160,8 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                     f"{sh['tracer']} — receipt {sh['report']}", style="ok")
     print(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
                 f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", style="ok")
+    if info.get("emit_nim"):
+        print(f"emit-nim kit: {info['emit_nim']}  (edit stub/, then `sh compile.sh`)", style="ok")
 
 
 @app.command()
@@ -501,7 +504,12 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                    "A canary-named SOURCE_URL env var overrides it at runtime (mirror/failover)"),
           env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
               help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
-                   "Lives in the payload — use --encrypt to hide a secret value")):
+                   "Lives in the payload — use --encrypt to hide a secret value"),
+          emit_nim: str = typer.Option("", "--emit-nim", metavar="DIR",
+              help="also write a Nim reproduction kit to DIR (the launcher's Nim source, this "
+                   "build's payload + stub-config, a portable zig shim, and a compile.sh that "
+                   "recompiles and reassembles the exact binary). The packed binary is still "
+                   "produced. For inspecting, modifying, or manually compiling the stub")):
     """Build a single-file launcher from a project payload dir.
 
     Tiers: --thin (smallest, needs network) · default (uv bundled) · --thick/--chonky
@@ -521,7 +529,8 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_source_url_canary=stub_env_source_url_canary,
                stub_env_base_path_canary=stub_env_base_path_canary,
                reap=reap, ephemeral=ephemeral, ram_only=ram_only, overwrite=overwrite,
-               base_path=base_path, source_url=source_url, env_append=env_append)
+               base_path=base_path, source_url=source_url, env_append=env_append,
+               emit_nim=emit_nim)
 
 @app.command()
 def verify(exe: Path):

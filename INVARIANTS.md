@@ -2685,3 +2685,41 @@ Source: busybody `trojan` persona, cases `a_broken_symlink_stops_the_build`,
 print a rich-rendered `shutil.py` traceback with absolute build-host paths. The device-node
 case additionally reads `/dev/zero` into the payload until a resource limit stops it; only
 busybody imposed that limit, not haru-pack.
+
+---
+
+## EMIT — an emitted reproduction kit rebuilds the binary it came from, not a plausible lookalike
+
+`--emit-nim` (and `--emit-c`) exist so a packager can inspect, modify and manually recompile
+the launcher stub. That is only worth anything if what comes out is genuinely what haru-pack
+would have shipped. A kit that carries a hand-written compile command, a stale copy of the
+Nim source, or a reassembler that packs the footer differently is worse than no kit: it reads
+as authoritative and produces a binary the tool never would. This section is the honesty
+control for the emit path, in the same spirit as BUILD.
+
+### INV-EMIT-01
+Status: active
+Statement: A `--emit-nim` kit reassembles the exact binary the same build shipped. The stub
+source it contains is byte-identical to `launcher_src_dir()`, the `payload.bin` and
+`stubconfig.bin` are the exact bytes attached to the binary, and the emitted `assemble.py`
+reproduces `overlay.attach`'s footer, offsets and digests — for both an appended and a
+remote-fetch build.
+Actors: a packager who wants to audit or modify the stub and still ship the real thing; anyone
+who later trusts a binary compiled from an emitted kit.
+Assets: the meaning of the kit. If the emitted parts do not reconstitute the shipped binary,
+"here is exactly what I built" is a lie, and every modification made against the kit diverges
+from what runs on a customer's machine.
+Red-path: (a) make `emit.emit_nim_kit` copy a stale or partial Nim tree (e.g. skip `xz/`, or
+mutate a file) and `test_kit_source_is_byte_identical_to_what_haru_compiles` goes red; (b)
+change `assemble.py`'s footer packing (wrong struct order, drop the remote branch, or re-OR
+the flags) and `test_assemble_reproduces_overlay_attach` /
+`test_emit_nim_through_a_real_build_reassembles_the_shipped_binary` go red. Walked 2026-09-12.
+Source: 2026-09-12, from the `--emit-nim` / `--emit-c` design. The stub is a single generic
+binary whose per-build config is DATA (payload + stub-config), not compiled-in branches, so a
+faithful kit is source + those blobs + a reassembler; the risk the whole time was a kit that
+looks right and rebuilds something subtly different.
+Note: The kit exposes exactly what the shipped binary already exposes — an unencrypted
+`payload.bin` is the same recoverable source the binary carries, and an encrypted one stays
+encrypted. The build secret/key is never written to the kit (INV-SECRET-02).
+Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+tests/test_emit_nim.py
