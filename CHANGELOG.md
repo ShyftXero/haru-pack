@@ -13,7 +13,10 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
   `/tmp/harupack-busybody/` and **refuses to start (exit 3) while another is genuinely live**
   (pid alive + fresh heartbeat), reaping a dead/wedged run's stale marker rather than trusting
   it. `HARUPACK_BUSYBODY_FORCE=1` overrides. Ported from lotek's BusyBody #738; pids are checked
-  with `os.kill(pid, 0)`, so there's no ps-grep self-match trap.
+  with `os.kill(pid, 0)`, so there's no ps-grep self-match trap. **Fix (same day):** the registry
+  path was `tempfile.gettempdir()`-derived, so a sweep with its own `$TMPDIR` scratch registered
+  somewhere private and the guard couldn't see across sweeps — found live on a top-100 run. Now a
+  fixed `/tmp/harupack-busybody` (override `$HARUPACK_BUSYBODY_REGISTRY`).
 - **Fail-loud selection (INV-CHAOS-12).** An unknown `--persona`/`--case` name is now a setup
   failure (exit 2) that names the typo — `--persona forger,typo` no longer quietly runs only
   forger and prints a clean verdict. Ported from lotek's BusyBody #558 (an unmatched selection

@@ -149,6 +149,29 @@ def test_force_env_overrides_the_refusal(bb_registry, monkeypatch):
 
 
 @pytest.mark.invariant("INV-CHAOS-13")
+def test_registry_is_a_fixed_path_not_tmpdir_derived(monkeypatch, tmp_path):
+    """The registry must NOT follow $TMPDIR. A sweep isolates its scratch with its own
+    --work-root/$TMPDIR; a gettempdir-derived registry would move with that scratch dir, so two
+    sweeps with different scratch roots register in different places and never see each other —
+    which defeats the guard (found live on the top-100 sweep, 2026-09-12).
+
+    RED-PATH: set `BB_REGISTRY = Path(tempfile.gettempdir()) / "harupack-busybody"` and this goes
+    red — under a $TMPDIR pointing at a real writable dir the registry follows it there."""
+    import tempfile as _tf
+    scratch = tmp_path / "scratch"          # a REAL writable dir, so gettempdir() would honor it
+    scratch.mkdir()
+    monkeypatch.delenv("HARUPACK_BUSYBODY_REGISTRY", raising=False)
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setattr(_tf, "tempdir", None, raising=False)   # bust gettempdir()'s cache
+    spec = importlib.util.spec_from_file_location("busybody_fixedreg", BB)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.BB_REGISTRY == Path("/tmp/harupack-busybody"), (
+        f"the registry followed $TMPDIR to {mod.BB_REGISTRY} — it must be a fixed shared path"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-13")
 def test_the_registry_is_released_on_exit(bb_registry):
     """The marker is removed when the run ends, so the next sweep sees a clean slate. (main()'s
     finally unlinks it; here we assert the round-trip: register then unlink.)"""
