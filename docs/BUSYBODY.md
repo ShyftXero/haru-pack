@@ -10,6 +10,29 @@ python tools/busybody.py --keep               # leave the wreckage to inspect
 Output per run: `busybody/out/runs/<run-id>/` containing `report.txt` (written to be read on
 its own), `journal.jsonl`, `results.json`, and preserved artifacts for any finding.
 
+## Run control — one sweep at a time (INV-CHAOS-13)
+
+Each worker stages a real interpreter (tens of MB at the thick tier), so two sweeps on one box
+thrash disk and memory — a thick top-50 sweep was killed by the OOM guard every time a second
+sweep ran alongside it. So a sweep registers itself under `/tmp/harupack-busybody/` and **refuses
+to start while another is genuinely live** (its pid is alive and its heartbeat is fresh):
+
+```sh
+python tools/busybody.py --fixtures top25 --tier thick     # exits 3 if another sweep is live
+HARUPACK_BUSYBODY_FORCE=1 python tools/busybody.py ...      # run anyway (you accept the contention)
+```
+
+A registry left by a **dead or wedged** run (pid gone, or heartbeat older than 15 min) is reaped,
+not trusted, so a crashed run never wedges the harness. The registry is project-tagged — it never
+touches another project's BusyBody. Pids are checked with `os.kill(pid, 0)`, so the guard cannot
+match its own process.
+
+## Selection is fail-loud (INV-CHAOS-12)
+
+An unknown `--persona`/`--case` name is a setup failure (exit 2) that names the typo, rather than a
+silent drop: `--persona forger,typo` refuses instead of quietly running only forger and printing a
+clean verdict. A run that silently skipped what you asked for reads exactly like a healthy one.
+
 ```sh
 python tools/busybody.py --history     # every run; interrupted ones say so
 python tools/busybody.py --triage      # findings grouped by fingerprint, across all runs

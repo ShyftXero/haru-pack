@@ -5,6 +5,21 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-12
 
+### Tooling — BusyBody run-control hardening (adopted from lotek)
+
+- **Single-instance run control (INV-CHAOS-13).** Two busybody sweeps each stage a real
+  interpreter per worker and thrash the box into the OOM killer (seen while running a thick
+  top-50 sweep next to another). A sweep now registers itself under a project-tagged
+  `/tmp/harupack-busybody/` and **refuses to start (exit 3) while another is genuinely live**
+  (pid alive + fresh heartbeat), reaping a dead/wedged run's stale marker rather than trusting
+  it. `HARUPACK_BUSYBODY_FORCE=1` overrides. Ported from lotek's BusyBody #738; pids are checked
+  with `os.kill(pid, 0)`, so there's no ps-grep self-match trap.
+- **Fail-loud selection (INV-CHAOS-12).** An unknown `--persona`/`--case` name is now a setup
+  failure (exit 2) that names the typo — `--persona forger,typo` no longer quietly runs only
+  forger and prints a clean verdict. Ported from lotek's BusyBody #558 (an unmatched selection
+  is fatal, not dropped). *A run that silently skipped what you asked for reads exactly like a
+  healthy one* — the whole reason both guards exist.
+
 ### Security
 
 - **Launcher: the `HARUPACK_GEO` env bypass is gone (INV-GEO-01).** The old geo "check"
