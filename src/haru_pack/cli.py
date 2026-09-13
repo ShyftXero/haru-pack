@@ -510,9 +510,12 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
               help="best-effort RAM-backed (ephemeral) staging: Linux stages under /dev/shm when "
                    "available AND the payload fits free RAM (else falls back to the cache with a "
                    "note) - truly RAM-only ONLY on Linux. Windows/macOS have no unprivileged RAM "
-                   "disk, so it is best-effort there. Implies --reap (opt out with --no-reap). The "
-                   "target can override at runtime via <canary>_EPHEMERAL (0=disk, 1=RAM). Governs "
-                   "only where the STUB stages, not the app's own disk writes"),
+                   "disk, so it is best-effort there. Implies --reap (opt out with --no-reap). "
+                   "Runtime knob is 2-STATE, not 3: <canary>_EPHEMERAL=1 forces RAM (skips the "
+                   "fit-check; also enables RAM on a binary not built --ephemeral). Unset is auto "
+                   "(a --ephemeral binary runs the RAM-fit check, else stages to the persistent "
+                   "cache) - there is NO value that forces disk. Governs only where the STUB "
+                   "stages, not the app's own disk writes"),
           ram_only: bool = typer.Option(False, "--ram-only", hidden=True,
               help="deprecated alias for --ephemeral (kept working for one release)"),
           no_reap: bool = typer.Option(False, "--no-reap",

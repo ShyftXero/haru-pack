@@ -244,28 +244,44 @@ proc memAvailableBytes(): int64 =
     return -1
 
 proc cgroupAvailBytes(): int64 =
-  ## Memory still available under a cgroup memory limit, or -1 when there is no readable finite
-  ## limit. A container / CI runner caps memory here while /proc/meminfo still reports the HOST's
-  ## RAM, so a fit check blind to the cgroup would OOM exactly the small box the gate protects
+  ## Memory still available under a cgroup memory limit, or -1 when there is genuinely no
+  ## cgroup memory limit in effect (the limit file is ABSENT, or, for v2, explicitly "max"). A
+  ## container / CI runner caps memory here while /proc/meminfo still reports the HOST's RAM, so
+  ## a fit check blind to the cgroup would OOM exactly the small box the gate protects
   ## (adversarial review W3). cgroup v2: `memory.max` ("max" = unlimited) minus `memory.current`.
   ## v1: `memory.limit_in_bytes` (a near-int64 sentinel = unlimited) minus `memory.usage_in_bytes`.
+  ##
+  ## Fail-CLOSED on corruption, matching shmFreeBytes/memAvailableBytes: a limit (or usage) file
+  ## that EXISTS but does not parse returns 0 ("does not fit"), never -1 ("not gated"). -1 is
+  ## reserved for a limit that is genuinely absent or explicitly unlimited. The previous version
+  ## folded "absent" and "present but corrupt" into the same -1 (parseInt64OrNeg returns -1 for
+  ## both an empty read and an unparseable one), so a corrupted-but-present sysfs file was
+  ## silently treated as "no limit" and ALLOWED RAM staging (adversarial re-review finding).
+  ## `fileExists` (not the parsed value) is what decides "absent" vs "present", so the two cases
+  ## can no longer collide.
   when defined(linux):
-    let maxRaw = readValueFile(MemRoot & "/sys/fs/cgroup/memory.max")     # v2
-    if maxRaw.len > 0:
-      if maxRaw == "max": return -1
+    let maxPath = MemRoot & "/sys/fs/cgroup/memory.max"
+    if fileExists(maxPath):                                   # v2
+      let maxRaw = readValueFile(maxPath)
+      if maxRaw == "max": return -1                           # explicit unlimited
       let limit = parseInt64OrNeg(maxRaw)
-      let cur = parseInt64OrNeg(readValueFile(MemRoot & "/sys/fs/cgroup/memory.current"))
-      if limit < 0 or cur < 0: return -1
+      if limit < 0: return 0                                  # present but unparseable -> closed
+      let curPath = MemRoot & "/sys/fs/cgroup/memory.current"
+      if not fileExists(curPath): return 0                    # limit known, usage unknown -> closed
+      let cur = parseInt64OrNeg(readValueFile(curPath))
+      if cur < 0: return 0                                    # usage present but unparseable -> closed
       return (if limit > cur: limit - cur else: 0'i64)
-    let limRaw = readValueFile(MemRoot & "/sys/fs/cgroup/memory/memory.limit_in_bytes")  # v1
-    if limRaw.len > 0:
-      let limit = parseInt64OrNeg(limRaw)
-      if limit < 0 or limit > (int64.high div 2): return -1   # sentinel = "unlimited"
-      let usage = parseInt64OrNeg(
-        readValueFile(MemRoot & "/sys/fs/cgroup/memory/memory.usage_in_bytes"))
-      if usage < 0: return -1
+    let limPath = MemRoot & "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+    if fileExists(limPath):                                   # v1
+      let limit = parseInt64OrNeg(readValueFile(limPath))
+      if limit < 0: return 0                                  # present but unparseable -> closed
+      if limit > (int64.high div 2): return -1                # v1 sentinel = "unlimited"
+      let usagePath = MemRoot & "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+      if not fileExists(usagePath): return 0                  # limit known, usage unknown -> closed
+      let usage = parseInt64OrNeg(readValueFile(usagePath))
+      if usage < 0: return 0                                  # usage present but unparseable -> closed
       return (if limit > usage: limit - usage else: 0'i64)
-    return -1
+    return -1                                                 # neither v2 nor v1 file present
   else:
     return -1
 

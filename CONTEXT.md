@@ -38,8 +38,11 @@ write Nim or reason about it. Its job is to carry a payload to an end-user and r
 flexibly, securely, off-road.
 
 ## RAM-backed staging (ephemeral) — `--ephemeral`
-Staging the payload into memory-backed storage so nothing the payload contains is written to
-persistent disk. Baked at build with **`--ephemeral`** (the honest name; `--ram-only` is a
+Best-effort staging of the payload into memory-backed storage instead of persistent disk.
+"Best-effort" is load-bearing: on low RAM the auto path falls back to the persistent cache
+instead of gambling (see the RAM-fit check and Known limitation below) — this is **not** an
+absolute "nothing the payload contains ever touches disk". Baked at build with **`--ephemeral`**
+(the honest name; `--ram-only` is a
 deprecated alias kept for one release). Truly RAM-only ONLY on **Linux**, via `/dev/shm` (a
 tmpfs with real paths the interpreter can import from — `memfd` is unusable because it has no
 path). **Windows/macOS have no unprivileged RAM disk** (Windows has no tmpfs, and a RAM disk is

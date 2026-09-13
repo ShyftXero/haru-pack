@@ -351,8 +351,12 @@ def _staged_tree_bytes(payload_dir: Path) -> int:
                     continue
                 except ValueError:
                     pass
-            # No sidecar: the launcher would refuse to stage this member at all, so the build
-            # would never ship it. Count the compressed size as the best available fallback.
+            # Sidecar missing OR present-but-unparseable (the `except ValueError` above): either
+            # way the launcher's own expandCompressedMembers refuses to stage this member at all
+            # (StageError: "no .size sidecar" / "unreadable size sidecar"), so a build that ships
+            # this tree unchanged would never actually reach the RAM-fit check with it. Count the
+            # compressed size as the best available fallback for THIS estimate; it does not change
+            # what the launcher will do at runtime.
             total += p.stat().st_size
             continue
         total += p.stat().st_size

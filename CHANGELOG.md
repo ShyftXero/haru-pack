@@ -116,12 +116,14 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
     honest note instead of filling RAM and dying mid-extract on a 512 MB CI runner or small VPS.
     Fail-safe: an unknown or unmeasurable size stays on disk rather than gambling RAM.
   - **Runtime override via a fifth canary knob, `EPHEMERAL` (INV-EPHEMERAL-03).** The target reads
-    `<canary>_EPHEMERAL`: `0` forces disk, `1` forces RAM and skips the fit-check (and turns RAM on
-    even for a binary not built `--ephemeral` — target autonomy), unset is auto. The knob is
-    additive: its `[canary]` key is emitted only when non-default, so the v1 stub-config corpus is
-    byte-identical and neither the footer nor `stub_config_version` moves. This RAM-fit check also
-    covers a remotely-fetched payload (`--source-url`): the fetched bytes are staged through the
-    same `resolveStagingRoot`/fit-check pipeline as an appended payload, so remote-fetch and
+    `<canary>_EPHEMERAL`. It is 2-state, not 3: `1` forces RAM and skips the fit-check (and turns
+    RAM on even for a binary not built `--ephemeral` — target autonomy); unset, or any other value
+    including `0`, is auto. There is deliberately no value that forces disk — that would let an
+    env var downgrade an `--encrypt --ephemeral` payload onto disk. The knob is additive: its
+    `[canary]` key is emitted only when non-default, so the v1 stub-config corpus is byte-identical
+    and neither the footer nor `stub_config_version` moves. This RAM-fit check also covers a
+    remotely-fetched payload (`--source-url`): the fetched bytes are staged through the same
+    `resolveStagingRoot`/fit-check pipeline as an appended payload, so remote-fetch and
     `--ephemeral` compose safely together.
 
 ## 2026-09-11

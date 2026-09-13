@@ -152,7 +152,7 @@ proc autoEphemeralRoot(sc: StubConfig): string =
   ## Auto ephemeral (docs/adr/0005): stage to RAM only if the payload PROVABLY fits, else fall
   ## back to the persistent cache with an honest note. Never gambles RAM it cannot account for.
   when defined(linux):
-    if ramWouldFit(int64(sc.unpackedBytes)): return ramBackedRoot()
+    if ramWouldFit(sc.unpackedBytes): return ramBackedRoot()   # already int64 (stubconfig.nim)
     stderr.writeLine "haru-pack: --ephemeral: the staged payload does not fit the available " &
                      "RAM (/dev/shm + MemAvailable); staging to the persistent cache instead."
     return baseDir()
