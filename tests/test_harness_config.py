@@ -39,6 +39,7 @@ REBINDABLE = {
     "DEFAULT_TIMEOUT_S",  # --timeout
     "HERD_N",             # --herd-n
     "REPO", "OUT", "RUNS",  # redirected by tests
+    "BB_REGISTRY",        # the single-instance registry; redirected by tests
 }
 
 # The facade is allowed to name them, because it FORWARDS them via module __getattr__

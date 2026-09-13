@@ -70,7 +70,10 @@ def test_a_fully_valid_selection_is_accepted():
 def bb_registry(tmp_path, monkeypatch):
     bb = _load_busybody()
     reg = tmp_path / "harupack-busybody"
-    monkeypatch.setattr(bb, "BB_REGISTRY", reg)
+    # Patched on busybody_config, which is where busybody_guard reads it from. The facade
+    # forwards it for reading, but assigning there would only shadow the forward.
+    import busybody_config as cfg
+    monkeypatch.setattr(cfg, "BB_REGISTRY", reg)
     return bb, reg
 
 

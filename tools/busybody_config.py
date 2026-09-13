@@ -19,6 +19,7 @@ Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Values unchanged.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -190,3 +191,17 @@ STALL_QUIET_S = 40.0
 # `--calibrate` measures against. Shared, so the two cannot drift apart and
 # report that a fixture "fits" a limit no case actually applies.
 ADDRESS_SPACE_MB = 768
+
+# ── Single-instance run control (INV-CHAOS-13) ────────────────────────────────────────
+# The registry lives at a FIXED path, NOT `tempfile.gettempdir()` — because a sweep sets its
+# own `--work-root`/`$TMPDIR` to isolate scratch, and a gettempdir-derived registry would then
+# move WITH that scratch dir, so two sweeps with different scratch roots would register in
+# different places and never see each other, defeating the whole guard. (Found 2026-09-12: a
+# top-100 sweep under a custom TMPDIR registered under that TMPDIR, not the shared location.)
+# `$HARUPACK_BUSYBODY_REGISTRY` overrides for an unusual host.
+#
+# It lives HERE rather than in busybody_guard because the tests redirect it, which makes it a
+# rebindable setting, and this module is where those live (see this file's docstring).
+BB_REGISTRY = Path(os.environ.get("HARUPACK_BUSYBODY_REGISTRY") or "/tmp/harupack-busybody")
+BB_STALE_S = 900.0                       # heartbeat/birth older than this = wedged or dead -> reap
+BB_FORCE_ENV = "HARUPACK_BUSYBODY_FORCE"

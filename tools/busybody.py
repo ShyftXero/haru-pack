@@ -152,7 +152,8 @@ from busybody_sweep import compose_sweep, run_one, worker_pool  # noqa: E402,F40
 # thick tier, building real binaries — because `busybody_cli` had imported `CASES` by value.
 # PEP 562 module __getattr__ makes the stale copy impossible rather than merely discouraged.
 _FORWARDED = frozenset({"CASES", "REPO", "OUT", "RUNS", "WORK_ROOT", "SCRATCH_CAP_GB",
-                        "DEFAULT_TIMEOUT_S", "HERD_N", "STALL_QUIET_S"})
+                        "DEFAULT_TIMEOUT_S", "HERD_N", "STALL_QUIET_S",
+                        "BB_REGISTRY", "BB_STALE_S", "BB_FORCE_ENV"})
 
 
 def __getattr__(name):

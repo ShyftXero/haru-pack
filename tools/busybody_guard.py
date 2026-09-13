@@ -15,9 +15,8 @@ import os
 import time
 from pathlib import Path
 
-BB_REGISTRY = Path(os.environ.get("HARUPACK_BUSYBODY_REGISTRY") or "/tmp/harupack-busybody")
-BB_STALE_S = 900.0                       # heartbeat/birth older than this = wedged or dead -> reap
-BB_FORCE_ENV = "HARUPACK_BUSYBODY_FORCE"
+import busybody_config as cfg
+
 
 
 def _bb_live(entry: dict) -> bool:
@@ -44,16 +43,16 @@ def _bb_live(entry: dict) -> bool:
         beat = entry.get("born")         # run is not mistaken for a corpse
     if not isinstance(beat, (int, float)):
         return False
-    return (time.time() - beat) < BB_STALE_S
+    return (time.time() - beat) < cfg.BB_STALE_S
 
 
 def guard_single_instance(run_id: str, heartbeat: Path, log=print) -> Path:
     """Refuse to start while another sweep is LIVE (exit 3); reap a DEAD one's registry and carry
     on. Returns this run's registry-file path — remove it on exit. `HARUPACK_BUSYBODY_FORCE=1`
     overrides the refusal (a logged, deliberate override beats a guard someone deletes)."""
-    BB_REGISTRY.mkdir(parents=True, exist_ok=True)
-    forced = os.environ.get(BB_FORCE_ENV) == "1"
-    for f in sorted(BB_REGISTRY.glob("*.json")):
+    cfg.BB_REGISTRY.mkdir(parents=True, exist_ok=True)
+    forced = os.environ.get(cfg.BB_FORCE_ENV) == "1"
+    for f in sorted(cfg.BB_REGISTRY.glob("*.json")):
         try:
             entry = json.loads(f.read_text())
         except (OSError, ValueError):
@@ -64,17 +63,17 @@ def guard_single_instance(run_id: str, heartbeat: Path, log=print) -> Path:
         if _bb_live(entry):
             if forced:
                 log(f"another busybody sweep is live (pid {entry.get('pid')}, run "
-                    f"{entry.get('run_id')}); {BB_FORCE_ENV}=1 set — starting anyway")
+                    f"{entry.get('run_id')}); {cfg.BB_FORCE_ENV}=1 set — starting anyway")
                 continue
             print(f"busybody: another sweep is already running (pid {entry.get('pid')}, run "
                   f"{entry.get('run_id')}).\nTwo sweeps each stage a real interpreter and thrash "
                   f"this box into the OOM killer.\nWait for it to finish, or set "
-                  f"{BB_FORCE_ENV}=1 to run anyway.", file=sys.stderr)
+                  f"{cfg.BB_FORCE_ENV}=1 to run anyway.", file=sys.stderr)
             raise SystemExit(3)
         log(f"reaping a stale busybody registry: {f.name} (pid {entry.get('pid')} dead or "
-            f"idle > {int(BB_STALE_S)}s)")
+            f"idle > {int(cfg.BB_STALE_S)}s)")
         f.unlink(missing_ok=True)
-    mine = BB_REGISTRY / f"{run_id}.json"
+    mine = cfg.BB_REGISTRY / f"{run_id}.json"
     mine.write_text(json.dumps({"pid": os.getpid(), "run_id": run_id,
                                 "heartbeat": str(heartbeat), "born": time.time()}))
     return mine
