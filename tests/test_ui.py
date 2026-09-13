@@ -16,6 +16,7 @@ exact moment it is trying to be helpful (`docs/PRINCIPLES.md`, user 2).
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -73,11 +74,41 @@ def test_markup_is_opt_in_not_opt_out():
 
 
 @pytest.mark.invariant("INV-UI-01")
-def test_the_cli_does_not_import_richs_print_directly():
-    """The wrapper is worthless if a call site bypasses it."""
-    src = inspect.getsource(cli)
-    assert "from rich import print" not in src
-    assert "from .ui import print" in src, "cli.py no longer routes output through ui.py"
+@pytest.mark.parametrize("mod", sorted(
+    p.name for p in (Path(inspect.getfile(cli)).parent).glob("*.py")))
+def test_the_cli_does_not_import_richs_print_directly(mod):
+    """The wrapper is worthless if a single call site bypasses it.
+
+    Checked per MODULE since `cli` became a package (2026-09-13, INV-MODULARITY-01).
+    `inspect.getsource(cli)` on a package returns only __init__.py, so the one-shot version
+    of this check would have watched a facade that prints nothing while any command module
+    quietly imported rich's `print` and ate every `[bracketed]` string it was handed.
+    """
+    import ast
+
+    src = (Path(inspect.getfile(cli)).parent / mod).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    # Parsed rather than grepped: `from ..ui import fields, print` and `from ..ui import
+    # print` are the same import and a substring check only sees one of them. The first
+    # version of this check missed inspectcmd.py for exactly that reason.
+    where_print_comes_from = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "print" and alias.asname is None:
+                    where_print_comes_from = node.module or ""
+    assert where_print_comes_from != "rich", (
+        f"cli/{mod} imports rich's print directly; rich reads `[project.scripts]` as a "
+        f"style tag and silently prints nothing"
+    )
+    calls_print = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                      and n.func.id == "print" for n in ast.walk(tree))
+    if calls_print:
+        assert where_print_comes_from == "ui", (
+            f"cli/{mod} calls print() but does not import it from haru_pack.ui "
+            f"(got {where_print_comes_from!r}); the builtin does not apply the theme and "
+            f"rich's eats markup"
+        )
 
 
 @pytest.mark.invariant("INV-UI-01")
