@@ -16,7 +16,7 @@ from busybody_analyze import analyze_exit_code, analyze_run, format_analysis
 from busybody_args import _parser
 from busybody_compose import describe_traits
 from busybody_config import CASES, JOBS_MAX
-from busybody_report import print_history, print_triage
+from busybody_history import print_history, print_triage
 from busybody_run import _sweep
 
 

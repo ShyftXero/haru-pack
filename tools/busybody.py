@@ -131,8 +131,9 @@ from busybody_fixtures import build_fixture, build_top25_fixtures, calibrate  # 
 from busybody_guard import guard_single_instance  # noqa: E402,F401
 from busybody_herd import (herd_collect, herd_deadline, herd_start,  # noqa: E402,F401
                            herd_verdict, stage_key)
-from busybody_report import (OUTCOME_MEANING, preserve, print_history,  # noqa: E402,F401
-                             print_triage, severity_for, write_report)
+from busybody_history import print_history, print_triage  # noqa: E402,F401
+from busybody_report import (OUTCOME_MEANING, preserve, severity_for,  # noqa: E402,F401
+                             write_report)
 from busybody_runner import (Ctx, InfraFailure, blame, classify, clean_env,  # noqa: E402,F401
                              dir_bytes, infra_failure_reason, run_exe, stage_root, warm,
                              work_root_report)
