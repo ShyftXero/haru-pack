@@ -1,10 +1,19 @@
 """Everything the whole harness shares: where things live, and the knobs --flags set.
 
-Read the four tuning values through the MODULE (`cfg.HERD_N`, not `from busybody_config
-import HERD_N`). `main()` rewrites them from the command line after every module has been
-imported, so a module that copied the value at import time would keep the default and the
-flag would look plumbed while doing nothing — which is the exact defect the note on
-DEFAULT_TIMEOUT_S below records happening once already.
+**One rule for this module: read everything in it as `cfg.NAME`.** Never
+`from busybody_config import HERD_N`.
+
+`main()` rewrites `WORK_ROOT`, `SCRATCH_CAP_GB`, `DEFAULT_TIMEOUT_S` and `HERD_N` from the
+command line AFTER every other module has been imported, so a module that copied a value at
+import time would keep the default and the flag would look plumbed while doing nothing —
+which is exactly what the note on `DEFAULT_TIMEOUT_S` below records happening once already.
+`REPO`, `OUT` and `RUNS` follow the same rule for the same reason from the other direction:
+the tests redirect them, and `monkeypatch.setattr(cfg, "RUNS", tmp)` only reaches the code
+that reads them if nothing has taken a private copy.
+
+The rest — `MARKER`, `FATAL`, `CASES`, `case`, the JOBS bounds, `STALL_QUIET_S`,
+`ADDRESS_SPACE_MB` — is genuinely constant and safe to import by name, but reading
+everything the same way costs nothing and removes the question.
 
 Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Values unchanged.
 """
