@@ -5,30 +5,40 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-12
 
-### Feature — `--emit-c`: a C reproduction kit for the launcher stub (INV-EMIT-02)
+### Features — `--emit-nim` and `--emit-c`: reproduction kits for the launcher stub
 
-- **`haru build … --emit-c DIR`** writes, beside the binary, a kit for inspecting, modifying,
-  or manually compiling the launcher stub: the stub as C (the Nim C backend's output for your
-  `--target`), `nimbase.h` + the xz headers vendored so it needs **no Nim toolchain**, a
-  relocatable `zig-cc` shim, this build's `payload.bin` + `stubconfig.bin`, and `assemble.py`.
-  `sh compile.sh` recompiles every `.c` with **zig** and reassembles the exact binary (payload
-  + stub-config + footer), remote-fetch builds included. The kit needs a `zig` on `PATH` (or
-  point `HARU_ZIG` at one); no build-host absolute paths are baked in.
-- The recipe is Nim's own: `compile.sh` is derived from Nim's build manifest, so it carries the
-  per-file flags nimcrypto's SHA-2 fast paths need and drives the same zig compiler haru uses —
-  not a hand-written approximation. `assemble.py` reproduces `overlay.attach`'s bytes exactly.
-  The stub is generic — every capability (decrypt, license gates, remote-fetch, reap/shred) is
-  always-present C; what varies per build is the two data blobs the functions read.
-- **`payload.bin` exposes nothing the shipped binary does not** — it is byte-identical to what
-  the binary carries. So an unencrypted payload is as readable here as in the binary, and under
-  `--embed-secret` the obfuscated key rides inside it exactly as it rides in the binary; the kit
-  directory deserves the same care as the artifact (INV-SECRET-02).
-- Safe by default: the `--emit-c` directory is refused up front if it is a symlink or a
-  non-empty directory (INV-BASE-01 posture), and a kit-emit failure is a warning that never
-  reports an already-written binary as failed.
-- Honest limit stated in the emitted README: the *overlay* is byte-identical to what haru
-  writes, but the recompiled *stub* is not guaranteed byte-identical (a C compile embeds build
-  paths); it is a working launcher, and you sign the reassembled binary yourself.
+- **`haru-pack build … --emit-nim DIR`** writes a kit alongside the finished binary so you can
+  inspect, modify, and manually recompile the launcher stub. The packed binary is still
+  produced; `DIR` gets the launcher's Nim source (byte-identical to what haru-pack compiles),
+  this build's `payload.bin` and `stubconfig.bin`, a portable `zig-cc` shim, a stdlib-only
+  `assemble.py`, and a `compile.sh` that recompiles the stub and reassembles the binary.
+- **`haru-pack build … --emit-c DIR`** writes the same kind of kit built instead from the Nim C
+  backend's own output for your `--target`: the stub as plain `.c`/`.h` files, `nimbase.h` +
+  the xz headers vendored so it needs **no Nim toolchain** — only a `zig` (on `PATH`, or via
+  `HARU_ZIG`). `compile.sh` is derived from Nim's own build manifest (per-file flags and all),
+  never a hand-written approximation, so nimcrypto's SHA-2 fast paths (`-mssse3`/`-mavx2`)
+  survive the translation to zig.
+- **The stub is generic; the config is data**, for both kits. Encryption, licence policy,
+  reap/ephemeral, remote-fetch and injects are not compiled into the Nim/C — they live in
+  `payload.bin` (policy inside it) and `stubconfig.bin`, which the always-present stub
+  functions read at runtime. So each kit is source + those two blobs + a reassembler.
+  `--emit-nim` and `--emit-c` share the SAME reassembler (`assemble.py` + `kit.json`) — one
+  implementation, so the two flags cannot drift on what "reassemble" means.
+- **Faithful, and honest about the limit (INV-EMIT-01 / INV-EMIT-02).** A real recompile of the
+  emitted stub/C yields a WORKING binary — its overlay verifies and its payload + stub-config
+  are this build's exact bytes — proven by actually running the emitted `compile.sh` with
+  nim(+zig) in the tests. Byte-for-byte identity of the launcher is **not** claimed (a Nim/C
+  recompile is not reproducible in general). The `nim c` flag set is defined once
+  (`emit.nim_target_flags`) and shared with the real build, so `--emit-nim`'s recipe cannot
+  silently drift; `--emit-c`'s recipe comes from Nim's own build manifest for the same reason.
+  Emitting `payload.bin` exposes exactly what the binary already exposes (encrypted stays
+  encrypted, and a remote build's kit gets the same `<out>.haru-payload` sidecar the real build
+  ships); the build secret is never written to any kit file (INV-SECRET-02).
+- **Assumes zig, no build-host paths baked in.** Both kits' `compile.sh` drive
+  `${HARU_ZIG:-zig} cc` through a relocatable shim (`toolchain.zig_cc_shim`); `--emit-nim`
+  additionally resolves Nim via `${HARU_NIM:-nim}`. No absolute home/username paths, so a kit
+  is shareable. An unsafe emit target (symlink, or a non-empty/foreign directory) is refused up
+  front (INV-BASE-01 posture), and a kit failure is a warning, never a build failure.
 
 ### Tooling — BusyBody run-control hardening (adopted from lotek)
 
@@ -38,7 +48,10 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
   `/tmp/harupack-busybody/` and **refuses to start (exit 3) while another is genuinely live**
   (pid alive + fresh heartbeat), reaping a dead/wedged run's stale marker rather than trusting
   it. `HARUPACK_BUSYBODY_FORCE=1` overrides. Ported from lotek's BusyBody #738; pids are checked
-  with `os.kill(pid, 0)`, so there's no ps-grep self-match trap.
+  with `os.kill(pid, 0)`, so there's no ps-grep self-match trap. **Fix (same day):** the registry
+  path was `tempfile.gettempdir()`-derived, so a sweep with its own `$TMPDIR` scratch registered
+  somewhere private and the guard couldn't see across sweeps — found live on a top-100 run. Now a
+  fixed `/tmp/harupack-busybody` (override `$HARUPACK_BUSYBODY_REGISTRY`).
 - **Fail-loud selection (INV-CHAOS-12).** An unknown `--persona`/`--case` name is now a setup
   failure (exit 2) that names the typo — `--persona forger,typo` no longer quietly runs only
   forger and prints a clean verdict. Ported from lotek's BusyBody #558 (an unmatched selection

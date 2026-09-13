@@ -620,7 +620,10 @@ its first beat, its birth time) is fresh (< `BB_STALE_S`). A registry left by a 
 (pid gone, or heartbeat older than `BB_STALE_S`) is REAPED, never trusted, so one crashed run
 cannot wedge the harness forever. `HARUPACK_BUSYBODY_FORCE=1` overrides the refusal (a logged,
 deliberate override), and the marker is released on exit. The registry is project-tagged and never
-reads or writes another project's.
+reads or writes another project's. The registry path is FIXED (`/tmp/harupack-busybody`, override
+`$HARUPACK_BUSYBODY_REGISTRY`) and NOT `tempfile.gettempdir()` — a sweep isolates its scratch with
+its own `$TMPDIR`, so a gettempdir-derived registry would move with the scratch dir and two sweeps
+would never see each other.
 Actors: an operator (or a second agent session) who launches a sweep while one is already running.
 Two sweeps each stage a real interpreter per worker and thrash the box into the OOM killer — the
 failure observed 2026-09-12, when a concurrent thick top-50 sweep was killed at every concurrency.
@@ -630,8 +633,10 @@ that a dead run's leftover marker degrades to reapable, not to a permanent block
 Red-path: In `guard_single_instance` replace `raise SystemExit(3)` on the live branch with `pass`,
 and `test_a_live_sweep_blocks_a_second_one` goes red (DID NOT RAISE — a second sweep starts beside
 a live one). Separately, make `_bb_live` ignore the heartbeat/birth freshness (return True on a
-live pid alone) and `test_a_stale_heartbeat_makes_even_a_live_pid_reapable` goes red. Walked
-2026-09-12 on this Linux host (observed the refusal removed and the second sweep proceeding).
+live pid alone) and `test_a_stale_heartbeat_makes_even_a_live_pid_reapable` goes red. Separately,
+set `BB_REGISTRY = Path(tempfile.gettempdir()) / "harupack-busybody"` and, under a `$TMPDIR`
+pointing at a real writable dir, `test_registry_is_a_fixed_path_not_tmpdir_derived` goes red (the
+registry follows the scratch dir). Walked 2026-09-12 on this Linux host (all three observed).
 Source: adopted from lotek BusyBody #738 (single-instance reaper, graceful stop, project-tagged
 registry — lotek explicitly reserves its own tag so haru-pack gets its own). docs/BUSYBODY.md "Run control".
 Checks pids directly with `os.kill(pid, 0)`, so there is no ps-grep self-match trap (CLAUDE.md).
@@ -1643,8 +1648,13 @@ owner — which is INV-SECRET-02's whole point.
 Note: A secret that must never be recovered must never be shipped to the client. The correct
 architecture for a must-not-leak key is a server the client authenticates to, not a key in an
 artifact the client holds. haru-pack's job is to be honest that packing is not that.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, tools/busybody.py,
-tests/test_reverse_engineer.py
+Note: `--emit-nim` widens what sits on the packager's OWN disk, not what the customer gets: the
+kit's `payload.bin` is the exact bytes the binary already carries (ciphertext under `--encrypt`,
+plaintext otherwise), so it exposes nothing new. The build SECRET/key is derived-from, not
+stored, and is never written to any kit file —
+`test_emit_kit_never_contains_the_build_secret` greps every emitted file to prove it.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, src/haru_pack/emit.py,
+tools/busybody.py, tests/test_reverse_engineer.py, tests/test_emit_nim.py
 
 ---
 
@@ -2690,19 +2700,68 @@ busybody imposed that limit, not haru-pack.
 
 ## EMIT — the reproduction kit rebuilds what haru shipped, or it is a lie
 
-`--emit-nim` / `--emit-c` hand the operator the stub source plus this build's payload and
-config so they can inspect, modify, and recompile it themselves. A kit is only worth
-shipping if it actually reproduces the binary: a plausible-looking `compile.sh` that does not
-rebuild the stub, or an assembler that emits different bytes, is the same over-claim
-`INV-BUILD-01` forbids — one layer out.
+`--emit-nim` / `--emit-c` hand the operator the stub source (as Nim, or as the Nim C backend's
+own C output) plus this build's payload and config, so they can inspect, modify, and recompile
+it themselves — the packed binary is still produced either way. A kit is only worth shipping
+if it actually reproduces the binary: a plausible-looking `compile.sh` that does not rebuild
+the stub, or an assembler that emits different bytes, is the same over-claim `INV-BUILD-01`
+forbids — one layer out. Both kits share ONE `assemble.py` / `kit.json` pair
+(`emit._write_kit_common`, `emit._ASSEMBLE_PY`) — the reassembly logic lives in exactly one
+place, so the two flags cannot silently diverge on what "reassemble" means.
+
+### INV-EMIT-01
+Status: active
+Statement: A `--emit-nim` kit faithfully reproduces the build it came from, to the extent a
+recompile allows. The stub source in the kit is byte-identical to `launcher_src_dir()`; the
+emitted `assemble.py` reproduces `overlay.attach`'s footer, offsets and digests for the same
+stub (appended and remote-fetch); the `nim c` flag set the kit's `compile.sh` uses is the same
+`build.compile_launcher` uses (`emit.nim_target_flags`, one source), so the recipe cannot
+drift; and a real recompile of the emitted stub with the emitted `compile.sh` yields a WORKING
+binary — its overlay verifies and its payload and stub-config bytes are the exact bytes this
+build shipped. Byte-for-byte identity of the launcher is NOT claimed: a Nim/C recompile is not
+reproducible in general.
+Actors: a packager who wants to audit or modify the stub and still ship a genuine equivalent;
+anyone who later trusts a binary compiled from an emitted kit.
+Assets: the meaning of the kit. If the emitted parts do not reconstitute a working equivalent
+of the shipped binary, "here is what I built" is a lie, and every modification made against the
+kit diverges from what runs on a customer's machine.
+Red-path: (a) make `emit.emit_nim_kit` copy a stale or partial Nim tree (skip `xz/`, mutate a
+file) and `test_kit_source_is_byte_identical_to_what_haru_compiles` goes red; (b) change
+`assemble.py`'s footer packing (wrong struct order, drop the remote branch, re-OR the flags)
+and `test_assemble_reproduces_overlay_attach` goes red; (c) add a `nim c` flag directly in
+`build.compile_launcher` instead of `emit.nim_target_flags` and
+`test_nim_target_flags_are_the_same_object_compile_launcher_uses` goes red; (d) break the
+emitted `compile.sh` (wrong flag, bad path) and `test_a_real_recompile_yields_a_working_
+equivalent` goes red. All walked 2026-09-12; (c) demonstrated by injecting `--opt:size` into
+`compile_launcher` and observing the lockstep test fail.
+Source: 2026-09-12, from the `--emit-nim` design (and adversarial review the same day, which
+BLOCKED an earlier version whose only "recompile" test re-appended bytes it had just carved
+back out of the shipped binary). The stub is a single generic binary whose per-build config is
+DATA (payload + stub-config), not compiled-in branches, so a faithful kit is source + those
+blobs + a reassembler; the risk the whole time was a kit that looks right and rebuilds
+something subtly different.
+Note: The kit exposes exactly what the shipped binary already exposes — an unencrypted
+`payload.bin` is the same recoverable source the binary carries, and an encrypted one stays
+encrypted. For a remote-fetch build the appended binary carries no payload, so the exposure is
+the binary plus its hosted payload sidecar, which is what a remote build already ships (the
+shared `assemble.py` writes that same `<out>.haru-payload` sidecar for a remote kit — see
+INV-EMIT-02, which pins it). The build secret/key is never written to the kit (INV-SECRET-02).
+Note: The kit is refused rather than written when the destination is unsafe — a symlinked
+target dir or `stub/`, or a non-empty `stub/` that is not a prior haru kit — matching the
+INV-BASE-01 posture. A kit failure is a warning, never a build failure: the binary is already
+written before the kit is attempted.
+Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+tests/test_emit_nim.py
 
 ### INV-EMIT-02
 Status: active
 Statement: The `--emit-c` kit is faithful. Its `compile.sh` invokes the zig compiler
 haru-pack itself uses (the emitted `./zig-cc` shim), never a fabricated or hand-written
-command, and preserves Nim's per-file compile flags; its `assemble.py` reproduces
-`overlay.attach`'s bytes exactly, appended and remote-fetch alike. So the emitted C compiles
-with zig alone — no Nim — and reassembles a binary whose payload and stub-config verify.
+command, and preserves Nim's per-file compile flags; its `assemble.py` — the SAME static,
+stdlib-only reassembler `--emit-nim` ships (INV-EMIT-01) — reproduces `overlay.attach`'s bytes
+exactly, appended and remote-fetch alike, and writes the `<out>.haru-payload` sidecar for a
+remote build. So the emitted C compiles with zig alone — no Nim — and reassembles a binary
+whose payload and stub-config verify.
 Actors: not an attacker — an operator who wants to read the stub, patch it, and recompile,
 or an auditor reproducing a shipped artifact from its parts.
 Assets: the meaning of the feature. A kit that does not rebuild the stub, or rebuilds it and
@@ -2715,20 +2774,28 @@ goes red. (2) Vendoring/self-containment — drop the `nimbase.h` (or an xz-head
 `emit_c_sources`, or let an absolute `-I` survive; `test_emit_c_sources_vendors_headers_without_toolchain`
 goes red (it runs against a fixture launcher.json, no Nim/zig needed). (3) Overlay fidelity —
 corrupt `assemble.py`'s footer packing (wrong offset/flags/layout); the
-`test_assemble_reproduces_overlay_*` tests go red. (4) Injection safety — interpolate `out`
-as `"{out}"` instead of `{out!r}`; `test_assemble_py_is_not_injectable_via_out_name` goes red
-as the injected `os.system` runs. The nim+zig-gated `test_emitted_c_compiles_with_zig_and_reassembles`
-adds the end-to-end proof where the toolchain is present.
-Source: Added 2026-09-12 with `--emit-c`, hardened after an adversarial review. Verified during
-development: the Nim C backend assigns per-file flags (`-mssse3`/`-mavx2` for nimcrypto's SHA-2
-paths) that a blanket `zig cc *.c` drops — proving the recipe must come from Nim's own build
-manifest, not a hand-written command — and the mangled `@…`-prefixed C filenames are read as
-response files unless `./`-prefixed. The review also caught a command-injection sink: a hostile
-`--out` name interpolated raw into the emitted `assemble.py`, now `repr`-escaped and pinned by a
-test. All are exactly the kind of silent divergence this invariant pins.
+`test_assemble_reproduces_overlay_*` tests go red. (4) Injection safety — every per-build value
+`assemble.py` needs, including a hostile `--out` name, is DATA in `kit.json` (`json.dumps` in,
+`json.loads` out), never spliced into `assemble.py`'s own source text — there is no format
+placeholder for a hostile string to reach into. `test_assemble_py_is_not_injectable_via_out_name`
+and `test_finish_kit_survives_braces_in_out_name` pin this. The nim+zig-gated
+`test_emitted_c_compiles_with_zig_and_reassembles` adds the end-to-end proof where the
+toolchain is present.
+Source: Added 2026-09-12 with `--emit-c`, hardened after an adversarial review, then unified
+with `--emit-nim`'s reassembler when #16 and #17 merged: both had independently built a
+payload/stub-config/footer reassembler, so `emit._write_kit_common` / `emit._ASSEMBLE_PY` is
+now the one implementation both kits call, replacing `--emit-c`'s original per-build
+`str.format()`-templated `assemble.py`. Verified during development: the Nim C backend assigns
+per-file flags (`-mssse3`/`-mavx2` for nimcrypto's SHA-2 paths) that a blanket `zig cc *.c`
+drops — proving the recipe must come from Nim's own build manifest, not a hand-written command
+— and the mangled `@…`-prefixed C filenames are read as response files unless `./`-prefixed.
+The original adversarial review also caught a command-injection sink (a hostile `--out` name
+interpolated raw into a per-build `assemble.py`); moving the value into `kit.json` removes the
+injection surface entirely rather than merely escaping it.
 Note: The emitted kit is NOT fully self-contained — it needs a `zig` on `PATH` (or `HARU_ZIG`).
-The shim is relocatable (`${HARU_ZIG:-zig}`), so no build-host absolute path is baked in. The
-`--emit-c` directory is refused up front if it is a symlink or a non-empty directory, and a kit
-failure is a WARNING that never reports an already-written binary as failed.
+The shim is relocatable (`${HARU_ZIG:-zig}`, written by `toolchain.zig_cc_shim` — the same
+helper `--emit-nim`'s kit uses), so no build-host absolute path is baked in. The `--emit-c`
+directory is refused up front if it is a symlink or a non-empty directory, and a kit failure is
+a WARNING that never reports an already-written binary as failed.
 Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
 tests/test_emit_c.py
