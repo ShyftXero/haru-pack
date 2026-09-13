@@ -54,9 +54,14 @@ CWD_POLICIES = ("launch", "exe")
 
 # ── Stub-config + per-knob canary (docs/adr/0003-stub-config-and-canary.md §2/§3/§5) ──
 # The closed knob catalogue, in the fixed order the cleartext stub-config section writes them.
-# Matches launcher/stubconfig.nim `Knob{kSecret,kUvVer,kSourceUrl,kBasePath}` and its lowercase
-# `[canary]` keys — adding a knob is a format change on BOTH halves, on purpose (INV-CANARY-02).
-CANARY_KNOBS = ("secret", "uv_ver", "source_url", "base_path")
+# Matches launcher/stubconfig.nim `Knob{kSecret,kUvVer,kSourceUrl,kBasePath,kEphemeral}` and its
+# lowercase `[canary]` keys — adding a knob is a format change on BOTH halves, on purpose
+# (INV-CANARY-02). `ephemeral` (docs/adr/0007) is the fifth knob: the runtime RAM/disk staging
+# toggle. It is ADDITIVE — its `[canary]` key is emitted ONLY when non-default (see
+# stub_config_bytes), so a build that does not customise it stays byte-identical to the v1
+# corpus, and a v1 launcher (which never sees a co-emitted new stub) is unaffected.
+_MANDATORY_CANARY_KNOBS = ("secret", "uv_ver", "source_url", "base_path")
+CANARY_KNOBS = (*_MANDATORY_CANARY_KNOBS, "ephemeral")
 DEFAULT_CANARY = "HARU"
 # ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced here at build time,
 # re-validated by the launcher's parseStubConfig, so neither half trusts the other blindly.
@@ -278,14 +283,16 @@ def build_geo_policy(countries, restrict, api_urls, consensus) -> dict:
 
 def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = False,
                       ram_only: bool = False, base_path: str = "",
-                      source_url: str = "") -> bytes:
-    """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2), UTF-8,
-    in fixed order. Canary tokens are validated env-name prefixes, so no escaping is needed.
+                      source_url: str = "", unpacked_bytes: int = 0) -> bytes:
+    """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2 +
+    docs/adr/0007), UTF-8, in fixed order. Canary tokens are validated env-name prefixes, so no
+    escaping is needed.
 
-    The optional keys `reap`/`overwrite`/`ram_only`/`base_path`/`source_url` are emitted ONLY
-    when non-default, so a build that uses none of them is byte-identical to the Phase-1
-    stub-config (the v1 corpus and its exact-bytes test are unchanged). Their absence is today's
-    behaviour, so no stub_config_version bump is needed (docs/adr/0004 §2, docs/adr/0005 §2).
+    The optional keys `reap`/`overwrite`/`ram_only`/`base_path`/`source_url`, the
+    `unpacked_bytes` sizing hint, and the `ephemeral` canary are all emitted ONLY when
+    non-default, so a build that uses none of them is byte-identical to the Phase-1 stub-config
+    (the v1 corpus and its exact-bytes test are unchanged). Their absence is today's behaviour,
+    so no stub_config_version bump is needed (docs/adr/0004 §2, docs/adr/0007 §back-compat).
     `source_url` (Phase 3, INV-REMOTE-01) names WHERE to fetch the payload; it is not a trust
     anchor (the footer digest is), so it needs no escaping beyond TOML basic-string quoting.
     Read before decryption by launcher/stubconfig.parseStubConfig; sha-checked first
@@ -302,9 +309,58 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = Fal
         lines.append(f"base_path = {_toml_basic_str(base_path)}")
     if source_url:
         lines.append(f"source_url = {_toml_basic_str(source_url)}")
+    # unpacked_bytes sizes the launcher's RAM-fit check (docs/adr/0007, INV-EPHEMERAL-01). It is
+    # only consulted when staging MAY go to RAM, so it is emitted only alongside ram_only — a
+    # non-ephemeral binary's stub-config never carries it and stays byte-identical to v1.
+    if ram_only and unpacked_bytes > 0:
+        lines.append(f"unpacked_bytes = {int(unpacked_bytes)}")
     lines += ["", "[canary]"]
-    lines += [f'{knob} = "{canary[knob]}"' for knob in CANARY_KNOBS]
+    lines += [f'{knob} = "{canary[knob]}"' for knob in _MANDATORY_CANARY_KNOBS]
+    # The EPHEMERAL knob rides the closed catalogue but is additive: its `[canary]` key is written
+    # only when its token differs from the default, so the v1 default corpus is unchanged
+    # (docs/adr/0007 §back-compat). The launcher defaults a missing key to HARU.
+    if canary.get("ephemeral", DEFAULT_CANARY) != DEFAULT_CANARY:
+        lines.append(f'ephemeral = "{canary["ephemeral"]}"')
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _staged_tree_bytes(payload_dir: Path) -> int:
+    """Size of the tree the launcher will STAGE, for the RAM-fit check (docs/adr/0007,
+    INV-EPHEMERAL-01).
+
+    Not `du` of the payload dir: `uv` ships XZ-compressed (`uv.xz`, ~14 MB) and the launcher
+    EXPANDS it on stage (~56 MB) via `expandCompressedMembers`. Summing the compressed bytes
+    would under-count by ~40 MB and could hand the RAM gate a "fits" verdict for a tree that
+    then OOMs the small box the gate exists to protect (adversarial review C1). So for every
+    `.xz` member the build wrote a `.xz.size` sidecar for (see `bundle.compress_uv`), count the
+    EXPANDED size, and drop the `.xz` and its metadata sidecars from the count entirely — they
+    are removed before the launcher records the tree. The result is the staged tree's real size;
+    the launcher applies the ×1.2 headroom on top (INV-EPHEMERAL-01)."""
+    total = 0
+    for p in payload_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        name = p.name
+        if name.endswith((".xz.size", ".xz.sha256")):
+            continue                        # metadata sidecars, not part of the staged tree
+        if name.endswith(".xz"):
+            sidecar = p.with_name(name + ".size")
+            if sidecar.exists():
+                try:
+                    total += int(sidecar.read_text().strip())   # EXPANDED size
+                    continue
+                except ValueError:
+                    pass
+            # Sidecar missing OR present-but-unparseable (the `except ValueError` above): either
+            # way the launcher's own expandCompressedMembers refuses to stage this member at all
+            # (StageError: "no .size sidecar" / "unreadable size sidecar"), so a build that ships
+            # this tree unchanged would never actually reach the RAM-fit check with it. Count the
+            # compressed size as the best available fallback for THIS estimate; it does not change
+            # what the launcher will do at runtime.
+            total += p.stat().st_size
+            continue
+        total += p.stat().st_size
+    return total
 
 
 def _looks_secret_shaped(key: str, value: str) -> bool:
@@ -836,8 +892,9 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           env_canary: str = "", env_canary_random: bool = False,
           stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
+          stub_env_ephemeral_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
-          base_path: str = "", source_url: str = "", env_append=None,
+          no_reap: bool = False, base_path: str = "", source_url: str = "", env_append=None,
           cc: str = "", emit_c: str = "", emit_nim: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     # --emit-c: a C reproduction kit written beside the binary. Resolve the directory now
@@ -907,12 +964,13 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # Canary map + injects are resolved BEFORE any compilation, so a bad token or a reserved
     # inject fails fast (like --shake's preconditions) rather than after producing a payload.
     # The secret-shaped inject WARNING depends on whether the payload will be encrypted, which
-    # is known here (INV-INJECT-01). One resolution rule for all four knobs (INV-CANARY-02).
+    # is known here (INV-INJECT-01). One resolution rule for all five knobs (INV-CANARY-02).
     canary = resolve_canary(env_canary, env_canary_random,
                             per_knob={"secret": stub_env_secret_canary,
                                       "uv_ver": stub_env_uv_ver_canary,
                                       "source_url": stub_env_source_url_canary,
-                                      "base_path": stub_env_base_path_canary}, log=log)
+                                      "base_path": stub_env_base_path_canary,
+                                      "ephemeral": stub_env_ephemeral_canary}, log=log)
     injects = resolve_injects(env_append, encrypted=enc["enabled"], log=log)
     # Phase-2 staging knobs (docs/adr/0004). base_path is refused at build time if it is a
     # root; reap/ram-only are baked into the cleartext stub-config below (INV-BASE-01 /
@@ -921,14 +979,26 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # disk writes, and on Windows/macOS there is no guaranteed RAM filesystem.
     base_path = resolve_base_path(base_path)
     source_url = resolve_source_url(source_url)   # Phase 3 (INV-REMOTE-01); "" = appended delivery
+    say = log or (lambda _m: None)
+    # --ephemeral implies --reap (docs/adr/0007, INV-EPHEMERAL-02): "ephemeral" means "not
+    # permanent", so a RAM/ephemeral stage cleans itself up by default. --no-reap opts out for a
+    # restart-heavy service that wants to reuse the staged tree across runs. The coupling happens
+    # BEFORE the overwrite check so --ephemeral --overwrite works without a separate --reap.
+    if ram_only and not no_reap and not reap:
+        reap = True
+        say("--ephemeral implies --reap: the staged tree is deleted after the app exits. "
+            "Pass --no-reap to keep it (e.g. to reuse a RAM stage across restarts).")
+    if no_reap and reap:
+        # An explicit --reap and --no-reap together is a contradiction; refuse rather than guess.
+        raise BuildError("--reap and --no-reap conflict: pass one. --no-reap only opts out of the "
+                         "reap that --ephemeral would otherwise imply.")
     # --overwrite is shred-ON-reap: the reaper is what runs the shred, so overwrite without reap
     # would silently do nothing. Refuse it at build rather than ship a binary that ignores a
     # security flag the packager asked for (INV-SHRED-01).
     if overwrite and not reap:
         raise BuildError("--overwrite is shred-on-reap and needs --reap to run: without --reap "
-                         "nothing deletes the stage, so nothing shreds it. Add --reap, or drop "
-                         "--overwrite.")
-    say = log or (lambda _m: None)
+                         "nothing deletes the stage, so nothing shreds it. Add --reap (or drop "
+                         "--no-reap if you passed it with --ephemeral), or drop --overwrite.")
     if enc["geo"].get("allow"):
         gp = enc["geo"]
         say(f"--geo-restrict: online location gate — {len(gp['allow'])} allow-rule(s), "
@@ -952,6 +1022,23 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
             "tmpfs; a RAM disk needs a signed kernel driver + admin), so it is best-effort there. "
             "It governs only where the STUB stages the payload tree - not the packed app's own "
             "disk writes.")
+    # --encrypt + --ephemeral is often reached for as "nothing plaintext ever hits disk". It is
+    # NOT absolute, and saying so at build time is the same honesty INV-SECRET-02 / INV-BUILD-01
+    # require (adversarial review W1). On a low-RAM target the RAM stage FALLS BACK to the
+    # persistent cache and the decrypted tree lands on disk. (There is no env value that forces
+    # disk — the EPHEMERAL knob only enables RAM — so this is an availability fallback, not an
+    # attacker-controlled downgrade.) That fallback is still reaped, but a plain unlink is
+    # recoverable; --overwrite shreds it (INV-SHRED-01).
+    if ram_only and enc["enabled"]:
+        if overwrite:
+            say("--encrypt + --ephemeral: on a low-RAM target the decrypted tree can fall back to "
+                "disk; --overwrite is set, so that fallback is shredded on reap. Still not a secure "
+                "erase (THREAT_MODEL.md).")
+        else:
+            say("WARNING: --encrypt + --ephemeral is NOT an absolute 'nothing reaches disk'. On a "
+                "low-RAM target the decrypted tree FALLS BACK to the persistent cache; that fallback "
+                "is reaped but a plain unlink is recoverable. Add --overwrite to shred the fallback, "
+                "or accept the residual (THREAT_MODEL.md, docs/adr/0007 §5).")
     if reap:
         say("--reap: after the app exits the stub spawns a detached, fire-and-forget deletion "
             "of the staged subtree it created this run, then exits without waiting. Only that "
@@ -978,6 +1065,11 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
             # binary that is nothing like the one they asked for, and they find out from
             # its size or not at all.
             raise BuildError(f"--shake refused to ship: {e}") from e
+        # The staged-tree size baked into the stub-config so the launcher can size its RAM-fit
+        # check BEFORE staging (docs/adr/0007, INV-EPHEMERAL-01). This is the EXPANDED tree the
+        # launcher stages (uv is un-XZ'd on stage), not the compressed payload dir — see
+        # _staged_tree_bytes. Only needed when staging may go to RAM.
+        unpacked_bytes = _staged_tree_bytes(payload_dir) if ram_only else 0
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:
@@ -995,7 +1087,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         launcher = compile_launcher(nim, tgt, tdp, cc=cc, log=log)
         sc_bytes = stub_config_bytes(canary, reap=reap, overwrite=overwrite,
                                      ram_only=ram_only, base_path=base_path,
-                                     source_url=source_url)
+                                     source_url=source_url, unpacked_bytes=unpacked_bytes)
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
         if source_url:
@@ -1052,11 +1144,14 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 # auditing (INV-CANARY-02). The secret VALUE still lands in no artifact
                 # (INV-SECRET-02).
                 canary=canary,
-                # Phase-2 staging knobs (docs/adr/0004): not secret, and recording them lets an
-                # auditor see whether a binary reaps / stages to RAM / relocates its cache.
+                # Phase-2/3 staging knobs (docs/adr/0004 + 0007): not secret, and recording them
+                # lets an auditor see whether a binary reaps / stages to RAM / relocates its cache.
+                # `reap` here is the EFFECTIVE value after the --ephemeral coupling, so the receipt
+                # never claims a cleanup the binary will not do (INV-EPHEMERAL-02, INV-BUILD-01).
                 staging={"reap": bool(reap), "overwrite": bool(overwrite),
                          "ram_only": bool(ram_only), "base_path": base_path,
-                         "source_url": source_url},
+                         "source_url": source_url,
+                         "unpacked_bytes": int(unpacked_bytes)},
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
     if shake_report:

@@ -18,7 +18,11 @@ that knob's. So after `--stub-env-uv-ver-canary=MARK`: `MARK_UV_VER` is read for
 ## knob
 A single stub-input setting, read at runtime as `<canary>_<KNOB>`. The catalogue is closed:
 `SECRET` (decryption key), `UV_VER` (uv version to fetch), `SOURCE_URL` (remote-fetch payload
-URL), `BASE_PATH` (where the stub stages uv/python and the payload tree). The **license
+URL), `BASE_PATH` (where the stub stages uv/python and the payload tree), and `EPHEMERAL` (the
+RAM staging ENABLE: `1` forces RAM, unset/anything else is auto — 2-state, no force-disk value,
+docs/adr/0007). Adding a knob is a
+deliberate format change on both halves (INV-CANARY-02); `EPHEMERAL` is **additive** (its
+`[canary]` key is emitted only when non-default, so the v1 corpus is unchanged). The **license
 policy is NOT a knob** — expiry/machine/user/geo can never be set or overridden by the end
 user, by design.
 
@@ -34,8 +38,11 @@ write Nim or reason about it. Its job is to carry a payload to an end-user and r
 flexibly, securely, off-road.
 
 ## RAM-backed staging (ephemeral) — `--ephemeral`
-Staging the payload into memory-backed storage so nothing the payload contains is written to
-persistent disk. Baked at build with **`--ephemeral`** (the honest name; `--ram-only` is a
+Best-effort staging of the payload into memory-backed storage instead of persistent disk.
+"Best-effort" is load-bearing: on low RAM the auto path falls back to the persistent cache
+instead of gambling (see the RAM-fit check and Known limitation below) — this is **not** an
+absolute "nothing the payload contains ever touches disk". Baked at build with **`--ephemeral`**
+(the honest name; `--ram-only` is a
 deprecated alias kept for one release). Truly RAM-only ONLY on **Linux**, via `/dev/shm` (a
 tmpfs with real paths the interpreter can import from — `memfd` is unusable because it has no
 path). **Windows/macOS have no unprivileged RAM disk** (Windows has no tmpfs, and a RAM disk is
@@ -44,6 +51,21 @@ so there `--ephemeral` is best-effort and falls back to the persistent cache wit
 (docs/adr/0004 §4). The **stub-config wire key stays `ram_only`** — the surface renamed, the key
 did not (ADR 0004 §2.2 pins the v1 byte-corpus). For packagers concerned about disk-based
 artifacts. Distinct from the normal **cache**, which is persistent and reused.
+
+**Phase 3 (docs/adr/0007) makes it safe and controllable.** `--ephemeral` now **implies
+`--reap`** (opt out with `--no-reap`) — not permanent means it cleans up. On the auto path the
+stub runs a **RAM-fit check** before committing to `/dev/shm`: it stages to RAM only when the
+baked `unpacked_bytes × 1.2` fits BOTH the tmpfs free space and `MemAvailable`, else it falls back
+to the cache with a note — so a 512 MB CI runner or small VPS never fills RAM and dies mid-extract
+(fail-safe: an unknown/unmeasurable size stays on disk). The target gets the final say through the
+`EPHEMERAL` **knob**, which is 2-state: `<canary>_EPHEMERAL=1` forces RAM and skips the fit-check
+(and turns RAM on even for a binary NOT built `--ephemeral` — target autonomy); anything else,
+including `0`, is auto. There is **no force-disk value** — an env toggle that pushed an encrypted
+ephemeral payload onto disk would be weak protection an attacker could set, so the knob can only
+enable RAM. **Known limitation:** with `--encrypt --ephemeral`, the low-RAM AUTO fallback still
+lands the decrypted tree on disk (availability, not attacker-controlled) — so ephemeral is not an
+absolute "nothing plaintext hits disk". That fallback is reaped; `--overwrite` shreds it (still not
+a secure erase — THREAT_MODEL.md, docs/adr/0007 §5).
 
 ## detached reap
 The stub's fire-and-forget final act when `--reap` is baked in: after the app exits it spawns

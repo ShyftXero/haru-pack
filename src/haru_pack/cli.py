@@ -78,8 +78,10 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                shake=False, shake_keep=(), env_canary="", env_canary_random=False,
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
-               reap=False, ephemeral=False, ram_only=False, overwrite=False, base_path="",
-               source_url="", env_append=None, cc="", emit_c="", emit_nim="") -> None:
+               stub_env_ephemeral_canary="",
+               reap=False, ephemeral=False, ram_only=False, no_reap=False, overwrite=False,
+               base_path="", source_url="", env_append=None, cc="", emit_c="",
+               emit_nim="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -90,11 +92,21 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     """
     if thin: tier = "thin"
     if thick or chonky: tier = "thick"
-    # --ram-only is the deprecated surface name of --ephemeral (docs/adr/0004). The WIRE key
-    # stays `ram_only`, so the internal kwarg does too; only the flag the user types moved.
+    # NAMING (N1): three names, one concept split across build-time and runtime.
+    #   --ephemeral   the flag a packager types (build-time)
+    #   ram_only      the WIRE key it maps to in the stub-config / build() kwarg (unchanged since
+    #                 ADR 0004 §2.2 pins the v1 corpus) — so `ram_only == ephemeral` here
+    #   EPHEMERAL     the RUNTIME canary knob (<canary>_EPHEMERAL) the TARGET sets (docs/adr/0007)
+    # --ram-only is the deprecated surface name of --ephemeral (docs/adr/0004).
     if ram_only and not ephemeral:
         print(f"{prog()}: --ram-only is deprecated; use --ephemeral (same behavior)", style="warn")
     ram_only = ephemeral or ram_only
+    # N2: --no-reap only opts out of the reap that --ephemeral IMPLIES; with neither --ephemeral
+    # nor --reap there is no reap to opt out of, so it is a no-op. Say so rather than let it look
+    # like it did something.
+    if no_reap and not (ram_only or reap):
+        print(f"{prog()}: --no-reap has no effect without --ephemeral (or --reap) — nothing "
+              f"implies a reap to opt out of", style="warn")
     if tier not in TIERS:
         print(f"unknown tier '{tier}' ({'|'.join(TIERS)})", style="error"); raise typer.Exit(2)
     if chonky:
@@ -132,8 +144,10 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                          stub_env_source_url_canary=stub_env_source_url_canary,
                          stub_env_base_path_canary=stub_env_base_path_canary,
-                         reap=reap, overwrite=overwrite, ram_only=ram_only, base_path=base_path,
-                         source_url=source_url, env_append=list(env_append or []),
+                         stub_env_ephemeral_canary=stub_env_ephemeral_canary,
+                         reap=reap, overwrite=overwrite, ram_only=ram_only, no_reap=no_reap,
+                         base_path=base_path, source_url=source_url,
+                         env_append=list(env_append or []),
                          emit_nim=emit_nim,
                          log=lambda m: print(
                              f"{prog()}: {m}",
@@ -486,16 +500,27 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
               metavar="TOKEN", help="override the SOURCE_URL knob's canary only"),
           stub_env_base_path_canary: str = typer.Option("", "--stub-env-base-path-canary",
               metavar="TOKEN", help="override the BASE_PATH knob's canary only"),
+          stub_env_ephemeral_canary: str = typer.Option("", "--stub-env-ephemeral-canary",
+              metavar="TOKEN", help="override the EPHEMERAL knob's canary only"),
           reap: bool = typer.Option(False, "--reap",
               help="after the app exits, spawn a DETACHED process that deletes the staged "
-                   "subtree, then exit without waiting (fire-and-forget cleanup)"),
+                   "subtree, then exit without waiting (fire-and-forget cleanup). Implied by "
+                   "--ephemeral"),
           ephemeral: bool = typer.Option(False, "--ephemeral",
               help="best-effort RAM-backed (ephemeral) staging: Linux stages under /dev/shm when "
-                   "available (else falls back to the cache with a note) - truly RAM-only ONLY on "
-                   "Linux. Windows/macOS have no unprivileged RAM disk, so it is best-effort there. "
-                   "Governs only where the STUB stages, not the app's own disk writes"),
+                   "available AND the payload fits free RAM (else falls back to the cache with a "
+                   "note) - truly RAM-only ONLY on Linux. Windows/macOS have no unprivileged RAM "
+                   "disk, so it is best-effort there. Implies --reap (opt out with --no-reap). "
+                   "Runtime knob is 2-STATE, not 3: <canary>_EPHEMERAL=1 forces RAM (skips the "
+                   "fit-check; also enables RAM on a binary not built --ephemeral). Unset is auto "
+                   "(a --ephemeral binary runs the RAM-fit check, else stages to the persistent "
+                   "cache) - there is NO value that forces disk. Governs only where the STUB "
+                   "stages, not the app's own disk writes"),
           ram_only: bool = typer.Option(False, "--ram-only", hidden=True,
               help="deprecated alias for --ephemeral (kept working for one release)"),
+          no_reap: bool = typer.Option(False, "--no-reap",
+              help="opt out of the --reap that --ephemeral implies (keep the staged tree after "
+                   "exit, e.g. to reuse a RAM stage across restarts)"),
           overwrite: bool = typer.Option(False, "--overwrite",
               help="shred-on-reap: the detached reaper overwrites each staged file with "
                    "matching-length random data and fsyncs before unlinking, so a plaintext blob "
@@ -542,9 +567,10 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_uv_ver_canary=stub_env_uv_ver_canary,
                stub_env_source_url_canary=stub_env_source_url_canary,
                stub_env_base_path_canary=stub_env_base_path_canary,
-               reap=reap, ephemeral=ephemeral, ram_only=ram_only, overwrite=overwrite,
-               base_path=base_path, source_url=source_url, env_append=env_append,
-               emit_c=emit_c, emit_nim=emit_nim)
+               stub_env_ephemeral_canary=stub_env_ephemeral_canary,
+               reap=reap, ephemeral=ephemeral, ram_only=ram_only, no_reap=no_reap,
+               overwrite=overwrite, base_path=base_path, source_url=source_url,
+               env_append=env_append, emit_c=emit_c, emit_nim=emit_nim)
 
 @app.command()
 def verify(exe: Path):

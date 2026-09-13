@@ -75,11 +75,14 @@ def make_payload(root: Path, *, uv_body: str = UV_ECHO_STAGE) -> Path:
 
 
 def stub_toml2(*, secret: str = "HARU", uv_ver: str = "HARU", source_url: str = "HARU",
-               base_path_canary: str = "HARU", reap: bool = False, overwrite: bool = False,
-               ram_only: bool = False, base_path: str = "") -> bytes:
-    """A v2 stub-config carrying the Phase-2 staging keys (ADR 0004). Optional keys are emitted
-    only when set, exactly as build.stub_config_bytes does - so the bytes a test feeds the
-    launcher are the same shape a real build produces."""
+               base_path_canary: str = "HARU", ephemeral_canary: str = "HARU",
+               reap: bool = False, overwrite: bool = False,
+               ram_only: bool = False, base_path: str = "", unpacked_bytes: int = 0) -> bytes:
+    """A v2 stub-config carrying the Phase-2/3 staging keys (ADR 0004 + 0005). Optional keys are
+    emitted only when set, exactly as build.stub_config_bytes does - so the bytes a test feeds the
+    launcher are the same shape a real build produces. `ephemeral_canary` and `unpacked_bytes`
+    are the ADR-0005 additions; the ephemeral canary line is written only when non-default, so the
+    four-key v1 corpus is preserved."""
     lines = ["stub_config_version = 1"]
     if reap:
         lines.append("reap = true")
@@ -89,9 +92,13 @@ def stub_toml2(*, secret: str = "HARU", uv_ver: str = "HARU", source_url: str = 
         lines.append("ram_only = true")
     if base_path:
         lines.append(f'base_path = "{base_path}"')
+    if unpacked_bytes:
+        lines.append(f"unpacked_bytes = {int(unpacked_bytes)}")
     lines += ["", "[canary]",
               f'secret = "{secret}"', f'uv_ver = "{uv_ver}"',
               f'source_url = "{source_url}"', f'base_path = "{base_path_canary}"']
+    if ephemeral_canary != "HARU":
+        lines.append(f'ephemeral = "{ephemeral_canary}"')
     return ("\n".join(lines) + "\n").encode()
 
 

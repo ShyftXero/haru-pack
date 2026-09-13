@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -28,7 +29,8 @@ CANARY_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 @pytest.mark.invariant("INV-CANARY-02")
 def test_default_canary_is_haru_for_every_knob():
     assert resolve_canary() == {"secret": "HARU", "uv_ver": "HARU",
-                                "source_url": "HARU", "base_path": "HARU"}
+                                "source_url": "HARU", "base_path": "HARU",
+                                "ephemeral": "HARU"}
 
 
 @pytest.mark.invariant("INV-CANARY-02")
@@ -40,7 +42,7 @@ def test_env_canary_sets_all_knobs():
 def test_per_knob_override_touches_only_that_knob():
     c = resolve_canary(per_knob={"uv_ver": "MARK"})
     assert c == {"secret": "HARU", "uv_ver": "MARK",
-                 "source_url": "HARU", "base_path": "HARU"}
+                 "source_url": "HARU", "base_path": "HARU", "ephemeral": "HARU"}
 
 
 @pytest.mark.invariant("INV-CANARY-02")
@@ -48,7 +50,7 @@ def test_per_knob_beats_all_knobs_default():
     """Precedence: --stub-env-<knob>-canary > --env-canary > built-in HARU."""
     c = resolve_canary(env_canary="BASE", per_knob={"secret": "MARK"})
     assert c["secret"] == "MARK"
-    assert c["uv_ver"] == c["source_url"] == c["base_path"] == "BASE"
+    assert c["uv_ver"] == c["source_url"] == c["base_path"] == c["ephemeral"] == "BASE"
 
 
 @pytest.mark.invariant("INV-CANARY-02")
@@ -61,7 +63,7 @@ def test_random_canary_is_valid_and_recorded():
     assert len(set(c.values())) == 1
     # ...and the packager is told exactly what env name to set at runtime.
     logged = "\n".join(log)
-    for knob in ("SECRET", "UV_VER", "SOURCE_URL", "BASE_PATH"):
+    for knob in ("SECRET", "UV_VER", "SOURCE_URL", "BASE_PATH", "EPHEMERAL"):
         assert f"{c['secret']}_{knob}" in logged
 
 
@@ -94,6 +96,194 @@ def test_stub_config_bytes_shape_matches_the_launcher_reader():
     assert b == (b'stub_config_version = 1\n\n[canary]\n'
                  b'secret = "HARU"\nuv_ver = "MARK"\n'
                  b'source_url = "HARU"\nbase_path = "HARU"\n')
+
+
+## ── INV-CANARY-03 scanner ────────────────────────────────────────────────────────────────
+##
+## Hardened 2026-09-12 against an adversarial re-review of the first version (which scanned
+## LINE BY LINE with a fixed `getEnv\(\s*"(HARU...)"` regex): that version missed a getEnv
+## call whose string argument was pushed to the next line, any spelling of the proc name
+## other than the exact case `getEnv`, and a "HARU..." literal assembled from more than one
+## quoted token (`"HAR" & "U_PACK_GEO"`). This version scans the WHOLE FILE as one string
+## (so a multi-line call is still one match), matches the call name by Nim's own
+## style-insensitivity rule (first char case-sensitive, the rest case-insensitive with
+## underscores ignored — `getEnv`/`getenv`/`get_env`/`getENV` are all the SAME identifier to
+## the compiler), and joins every quoted token inside the call's first (key) argument before
+## checking for the HARU substring, so a literal split across a `&` concatenation is still
+## caught. Recurses subdirectories (`rglob`), not just the launcher's top level.
+
+GETENV_ISH_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+STRING_LIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+CANARY_SCAN_ALLOWED = {"HARUPACK_DEV_STAGE"}    # dev-only, guarded by -d:haruDev (INV-LAUNCH-02)
+
+
+def _is_getenv_ident(name: str) -> bool:
+    """True for every spelling Nim itself resolves to the SAME identifier as `getEnv`: the
+    first character compares case-sensitively (Nim identifier-equality rule), every other
+    character compares case-insensitively with underscores ignored. `GetEnv` (capital G) is
+    a genuinely DIFFERENT identifier to Nim and would not compile as a call to `getEnv`, so
+    it is deliberately NOT matched here."""
+    return len(name) >= 2 and name[0] == "g" and name[1:].replace("_", "").lower() == "etenv"
+
+
+def _matching_paren(s: str, open_at: int) -> int:
+    """Index of the ')' matching the '(' at s[open_at], honouring nested parens and string
+    literals (a stray '(' or ')' inside a quoted string must not desync the depth count)."""
+    depth, in_str, i = 0, False, open_at
+    while i < len(s):
+        c = s[i]
+        if in_str:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(s)          # unterminated call — never valid Nim, but must not raise
+
+
+def _split_top_level_args(s: str) -> list[str]:
+    """Split `s` on commas that are not nested inside (), [] or a "..." string — i.e. the
+    call's own argument boundaries, so a `getEnv(key, "HARU-shaped default")` only inspects
+    `key` (argument 0) and does not false-positive on a HARU-shaped DEFAULT value."""
+    parts: list[str] = []
+    depth, in_str, start, i = 0, False, 0, 0
+    while i < len(s):
+        c = s[i]
+        if in_str:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+        i += 1
+    parts.append(s[start:])
+    return parts
+
+
+def _strip_line_comments(text: str) -> str:
+    """Drop everything from a `#` to end of line, on EVERY original line independently (a
+    described read is not a read), then rejoin with spaces into one blob so a call spanning
+    multiple lines becomes one contiguous match."""
+    return " ".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def haru_getenv_offenders(nim_root) -> dict[str, list[str]]:
+    """Scan every `*.nim` file under `nim_root` (recursively) for a getEnv-family call whose
+    first argument contains a HARU-prefixed literal — the honor-system bypass class (e.g. the
+    removed HARUPACK_GEO geo bypass) — outside the `CANARY_SCAN_ALLOWED` dev whitelist.
+    Returns {filename: [offending literal, ...]}, empty when clean."""
+    offenders: dict[str, list[str]] = {}
+    for nim in sorted(Path(nim_root).rglob("*.nim")):
+        code = _strip_line_comments(nim.read_text(encoding="utf-8"))
+        for m in GETENV_ISH_RE.finditer(code):
+            if not _is_getenv_ident(m.group(1)):
+                continue
+            open_at = m.end() - 1                          # index of the call's own '('
+            close_at = _matching_paren(code, open_at)
+            call_args = code[open_at + 1: close_at]
+            if not call_args.strip():
+                continue
+            key_arg = _split_top_level_args(call_args)[0]
+            literal = "".join(STRING_LIT_RE.findall(key_arg))
+            if "HARU" not in literal or literal in CANARY_SCAN_ALLOWED:
+                continue
+            offenders.setdefault(nim.name, []).append(literal)
+    return offenders
+
+
+@pytest.mark.invariant("INV-CANARY-03")
+def test_no_plain_haru_named_input_env_read():
+    """Every haru-named runtime INPUT must resolve through the canary model (envForKnob's dynamic
+    `<canary>_<KNOB>` name), so the launcher source carries no `getEnv("HARU…")` string LITERAL —
+    the honor-system bypass class (e.g. the removed HARUPACK_GEO geo bypass). The one exception is
+    the dev-only HARUPACK_DEV_STAGE (guarded by -d:haruDev, never in a release binary). Child-facing
+    vars are set with putEnv (outputs), so they never match this getEnv scan.
+
+    Red-path: add `getEnv("HARUPACK_FOO")` to any launcher .nim, or restore the HARUPACK_GEO read,
+    and this goes red naming the offending var."""
+    launcher = Path(__file__).resolve().parent.parent / "src/haru_pack/launcher"
+    offenders = haru_getenv_offenders(launcher)
+    assert not offenders, (
+        f"launcher reads haru-named env INPUT outside the canary model: {offenders}. "
+        f"Route it through stubconfig.envForKnob, or (for a security gate) do not read env at all.")
+
+
+@pytest.mark.invariant("INV-CANARY-03")
+def test_canary_scan_catches_multiline_getenv(tmp_path):
+    """Red-path for the FIRST bypass in the adversarial re-review: a getEnv call whose string
+    argument sits on the next line defeated the old per-line regex entirely. Confirmed red before
+    this fix (the pre-fix per-line scanner found nothing here)."""
+    (tmp_path / "evil.nim").write_text(
+        'let g = getEnv(\n    "HARUPACK_GEO"\n  )\n', encoding="utf-8")
+    offenders = haru_getenv_offenders(tmp_path)
+    assert offenders == {"evil.nim": ["HARUPACK_GEO"]}
+
+
+@pytest.mark.invariant("INV-CANARY-03")
+@pytest.mark.parametrize("spelling", ["getenv", "get_env", "getENV", "g_e_t_E_n_v"])
+def test_canary_scan_catches_getenv_casing(tmp_path, spelling):
+    """Red-path for the SECOND bypass: any spelling Nim itself resolves to the same identifier
+    as `getEnv` (case-insensitive after the first char, underscores ignored) defeated the old
+    scanner's exact-string `getEnv(` match."""
+    (tmp_path / "evil.nim").write_text(f'let g = {spelling}("HARUPACK_GEO")\n', encoding="utf-8")
+    offenders = haru_getenv_offenders(tmp_path)
+    assert offenders == {"evil.nim": ["HARUPACK_GEO"]}
+
+
+@pytest.mark.invariant("INV-CANARY-03")
+@pytest.mark.parametrize("expr", ['"HAR" & "U_PACK_GEO"', '"HARU" & x', '"HARU"&x'])
+def test_canary_scan_catches_concat_split_literal(tmp_path, expr):
+    """Red-path for the THIRD bypass: a HARU-prefixed literal assembled from more than one
+    quoted token via string concatenation defeated the old scanner's single-literal regex."""
+    (tmp_path / "evil.nim").write_text(f"let g = getEnv({expr})\n", encoding="utf-8")
+    offenders = haru_getenv_offenders(tmp_path)
+    assert offenders, f"concat-split literal {expr!r} was not caught"
+
+
+@pytest.mark.invariant("INV-CANARY-03")
+def test_canary_scan_recurses_subdirectories(tmp_path):
+    """Red-path for the FOURTH bypass: a violation in a subdirectory of the launcher tree (the
+    old scanner used a non-recursive `glob('*.nim')`)."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "evil.nim").write_text('let g = getEnv("HARUPACK_GEO")\n', encoding="utf-8")
+    offenders = haru_getenv_offenders(tmp_path)
+    assert offenders == {"evil.nim": ["HARUPACK_GEO"]}
+
+
+@pytest.mark.invariant("INV-CANARY-03")
+def test_canary_scan_dev_stage_whitelist_still_allowed(tmp_path):
+    """The one intentional exception (HARUPACK_DEV_STAGE, dev-only) must still pass clean —
+    including when the scan is hardened to whole-file / concat-aware matching."""
+    (tmp_path / "ok.nim").write_text(
+        'when defined(haruDev):\n  let dev = getEnv(\n    "HARUPACK_DEV_STAGE")\n',
+        encoding="utf-8")
+    assert haru_getenv_offenders(tmp_path) == {}
+
+
+@pytest.mark.invariant("INV-CANARY-03")
+def test_canary_scan_ignores_haru_shaped_default_value(tmp_path):
+    """A HARU-shaped literal in a getEnv DEFAULT-VALUE argument (not the key) is not a bypass —
+    only the first (key) argument is inspected."""
+    (tmp_path / "ok.nim").write_text(
+        'let g = getEnv("SOME_UNRELATED_VAR", "HARU_shaped_default")\n', encoding="utf-8")
+    assert haru_getenv_offenders(tmp_path) == {}
 
 
 # ── inject / env-append (INV-INJECT-01) ───────────────────────────────────────────────────
@@ -163,7 +353,8 @@ def test_build_emits_a_v2_binary_carrying_the_canary_map(stub_toolchain, script_
     assert 'secret = "MARK"' in v["stub_config"]
     assert 'uv_ver = "HARU"' in v["stub_config"]
     assert info["canary"] == {"secret": "MARK", "uv_ver": "HARU",
-                              "source_url": "HARU", "base_path": "HARU"}
+                              "source_url": "HARU", "base_path": "HARU",
+                              "ephemeral": "HARU"}
 
 
 @pytest.mark.invariant("INV-INJECT-01")

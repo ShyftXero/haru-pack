@@ -2209,6 +2209,29 @@ Source: docs/adr/0003-stub-config-and-canary.md §2.1/§5. The build half of the
 rule INV-CANARY-01 defends at runtime; every new binary is v2 (carries the section).
 Territory: src/haru_pack/build.py, src/haru_pack/cli.py, src/haru_pack/overlay.py
 
+### INV-CANARY-03
+Status: active
+Statement: Every haru-named runtime INPUT the launcher reads from the environment resolves ONLY
+through the canary model (`stubconfig.envForKnob`, a dynamic `<canary>_<KNOB>` name) — the launcher
+source contains no `getEnv("HARU…")` / `getEnv("HARUPACK…")` string LITERAL used as input, except
+the dev-only `HARUPACK_DEV_STAGE` (guarded by `-d:haruDev`, never in a release binary). Env vars the
+launcher SETS for the child (`UV_*`, `PYTHONPATH`, the `HARUPACK_*` injects/reserved) are outputs
+via `putEnv`, not inputs, and are out of scope. This closes the honor-system bypass class — e.g. the
+removed `getEnv("HARUPACK_GEO")` geo bypass, which an end user could set to an allowed value to pass
+a security gate (CONTEXT.md "geo / ip"; the geo gate now fails closed offline).
+Actors: an end user on the target trying to influence the stub with a guessed/known plain env name;
+the property is that there is no such name — every input hides behind the per-build canary.
+Assets: the integrity of the canary model itself. One plain `getEnv("HARUPACK_X")` input reintroduces
+the bypass class the canary exists to remove, and nothing but a scanner would catch it drifting back.
+Red-path: A machine-checked scan (`tests/test_canary.py::test_no_plain_haru_named_input_env_read`)
+reads every `src/haru_pack/launcher/*.nim` and fails on any `getEnv("HARU…")` literal not in the
+whitelist. Add `getEnv("HARUPACK_FOO")` to any launcher source and the scan goes red; restore the
+`getEnv("HARUPACK_GEO")` read and it goes red naming that var. Walked 2026-09-12.
+Source: adversarial review 2026-09-12 (Phantom_Phreak) — found `cryptbox.nim` still reading
+`HARUPACK_GEO` though CONTEXT.md said the bypass was removed. All runtime inputs routed through the
+canary model; the geo gate made env-non-overridable (fail-closed offline).
+Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/stubconfig.nim, tests/test_canary.py
+
 ---
 
 ## INJECT — env-append lives in the payload, and the build is honest about it
@@ -2307,6 +2330,11 @@ whose stub-config sets `ram_only = true`: staging then lands in the per-user cac
 `test_ram_only_stages_under_dev_shm` (which asserts `HARUPACK_STAGE` is under `/dev/shm`) goes
 red. Walked on this Linux host, where `/dev/shm` exists.
 Source: docs/adr/0004-reap-ram-staging.md §4. CONTEXT.md "RAM-backed staging (ephemeral)".
+Note: Phase 3 (INV-EPHEMERAL-01, docs/adr/0007) adds a second "otherwise falls back" condition
+to the auto path: even when `/dev/shm` is available, the launcher stages to RAM only when the
+baked `unpacked_bytes` provably fits free memory. A real `ram_only` build always bakes that size,
+so this narrows nothing an operator sees; a hand-crafted stub with `ram_only` and no
+`unpacked_bytes` now fails safe to disk rather than gambling RAM.
 Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py
 
 ### INV-REAP-01
@@ -2452,6 +2480,101 @@ client-side geo — it is not shipping to them. Documented in docs/adr/0006 §"H
 Source: docs/adr/0006-execution-gates.md §3. CONTEXT.md "geo / ip (execution gates)". Issue #11 —
 the security gap this phase was asked to close.
 Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/execgate.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py
+
+---
+
+## STAGING-3 — ephemeral is safe on a small machine and controllable at runtime
+
+Phase 3 of the staging rework (docs/adr/0007-ephemeral-safe.md) makes `--ephemeral` safe to
+default and honest on the target. A 512 MB CI runner or a small VPS cannot hold a staged
+interpreter + payload in a tmpfs, so the launcher now SIZES the RAM-backed choice before it
+commits to it and falls back to the persistent cache rather than filling RAM and dying
+mid-extract. `--ephemeral` also implies `--reap` ("not permanent" cleans up), and the target
+gets the last word through a fifth canary knob, `EPHEMERAL`. The knob is ADDITIVE: its
+`[canary]` key is emitted only when non-default, so the pinned v1 stub-config corpus is
+byte-identical and neither the footer version nor `stub_config_version` moves — the launcher and
+its stub-config are always emitted by the same build, so a version-skew read never happens.
+
+### INV-EPHEMERAL-01
+Status: active
+Statement: When ephemeral staging is in effect and the target does not force it
+(`<canary>_EPHEMERAL` unset), the launcher stages to the RAM-backed root ONLY when the payload
+provably fits — `stage.ramWouldFit` requires the `/dev/shm` tmpfs free bytes, `/proc/meminfo`
+MemAvailable, AND (when a finite cgroup memory limit exists) the cgroup budget to each be at least
+`unpacked_bytes × 1.2` — and otherwise falls back to the persistent cache with an honest stderr
+note. `unpacked_bytes` is the EXPANDED staged-tree size: the build sums expanded sizes (reading each
+`.xz` member's `.xz.size` sidecar, not its compressed size), bakes it into the cleartext stub-config
+only alongside `ram_only`, and records it in the receipt. An unknown size (`unpacked_bytes`
+absent/0), an unmeasurable host, or an over-large size whose ×1.2 would overflow int64 (guarded by
+a pre-multiply DIVISION test, so `-d:release` cannot turn it into a crash) all resolve to "does not
+fit". This removes the PREDICTABLE OOM — a tree with no room in the knowable memory budget — it is a
+size check, not a reservation, and does not promise "never OOM" against a race or a budget the
+launcher cannot read (docs/adr/0007 §5).
+Actors: not an attacker — a packager who ships `--ephemeral` and a target (a 512 MB CI runner, a
+small VPS) that cannot fit the staged tree in RAM. The failure this prevents is an out-of-memory
+or ENOSPC death on the target after the build reported success.
+Assets: the property that `--ephemeral` degrades to disk instead of failing when RAM is short;
+and the honesty of the sizing (fail-safe on anything it cannot measure, never an optimistic
+gamble).
+Red-path: (1) In `stage.ramWouldFit` add `return true` before the checks (or make
+`main.autoEphemeralRoot` return `ramBackedRoot()` unconditionally), rebuild, run a binary whose
+stub sets `ram_only = true` and `unpacked_bytes` far larger than the host's RAM:
+`test_ephemeral_oversized_payload_falls_back_to_disk` (asserts staging is NOT under `/dev/shm`)
+goes red. (2) C1: make `build._staged_tree_bytes` sum `p.stat().st_size` for every file (the
+compressed size) instead of the `.xz.size` expanded value; `test_staged_tree_bytes_counts_uv_expansion`
+(baked size must reflect the expansion, not the ~14 MB compressed uv) goes red. (3) W2: replace the
+division overflow guard with the `need = x + x div 5; if need < x` form and rebuild;
+`test_overflow_unpacked_bytes_fails_safe` (an int64-range `unpacked_bytes` must fall back to disk,
+not crash) goes red. All walked 2026-09-12 on this Linux host.
+Source: docs/adr/0007-ephemeral-safe.md §detection. Asked for by Eli: "a machine with only 512mb
+ram might not be able to extract and run the program it packs … need a way to detect the
+environment prior to launch." C1/W2/W3 from the Phantom_Phreak adversarial review 2026-09-12.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build.py, src/haru_pack/bundle.py, tests/test_ephemeral_safe.py
+
+### INV-EPHEMERAL-02
+Status: active
+Statement: `--ephemeral` bakes BOTH `ram_only = true` and `reap = true`; `--no-reap` opts out of
+only the implied reap; `--reap` together with `--no-reap` is refused; and the build receipt's
+`staging.reap` reports the EFFECTIVE value, so the receipt never claims a cleanup the binary will
+not perform (INV-BUILD-01). Because the coupling runs before the `overwrite requires reap` check,
+`--ephemeral --overwrite` is accepted without a separate `--reap`.
+Actors: not an attacker — a packager who reasons "ephemeral means not permanent" and expects the
+staged tree gone after the app exits, and one running a restart-heavy service who needs `--no-reap`
+to reuse the RAM stage across restarts.
+Assets: agreement between the flag's meaning, the baked behaviour, and the receipt; and the
+escape hatch that keeps the reuse case possible.
+Red-path: In `build.build` remove `if ram_only and not no_reap and not reap: reap = True`;
+`test_ephemeral_implies_reap` (build `ram_only` → receipt `staging.reap` True) goes red. Remove
+`if no_reap and reap: raise` and `test_reap_and_no_reap_conflict` goes red. Walked 2026-09-12.
+Source: docs/adr/0007-ephemeral-safe.md §coupling. Asked for by Eli: "ephemeral should imply
+reap. maybe fold in reap to ephemeral."
+Territory: src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_ephemeral_safe.py
+
+### INV-EPHEMERAL-03
+Status: active
+Statement: The launcher reads the runtime staging toggle from `<canary.ephemeral>_EPHEMERAL`
+(default `HARU_EPHEMERAL`) and nothing else, at a precedence above the baked choice but below an
+explicit `BASE_PATH` path. It is 2-STATE: `1` forces the RAM-backed root AND skips the fit-check
+(target-autonomy enable — RAM even on a binary NOT built `--ephemeral`); any other value, INCLUDING
+`0`, is treated as unset/auto. There is deliberately NO force-DISK value — a target must not be able
+to downgrade an `--encrypt --ephemeral` payload onto disk via an env var. The `EPHEMERAL` knob is the
+fifth of the closed canary catalogue and is ADDITIVE: its `[canary]` key defaults to `HARU` when
+absent and is emitted only when non-default, so a four-key v1 stub-config parses and runs unchanged.
+Actors: not an attacker — an operator on a big box enabling RAM on a binary the packager did not
+build ephemeral; and the SECURITY property that no env value (a stale one, a wrong-canary one, or a
+literal `0`) can push an encrypted ephemeral payload onto disk.
+Assets: correct, canary-guarded resolution of the runtime enable; the no-downgrade property; and
+back-compatible parsing of every stub-config the previous format could produce.
+Red-path: In `main.forceRamRequested` `return false` unconditionally (ignore the env), rebuild, run
+a NON-ephemeral binary with `HARU_EPHEMERAL=1`: staging stays on disk and
+`test_env_1_forces_ram_on_nonephemeral_binary` goes red. Separately, make `forceRamRequested` also
+accept `"0"` (return the value == "0" or "1") and `test_env_0_is_ignored_not_a_downgrade` (a fitting
+ephemeral binary must stay in RAM under `EPHEMERAL=0`, never be forced to disk) goes red. Separately,
+in `stubconfig.parseStubConfig` drop the `if k == kEphemeral: continue` and a four-key v1 stub-config
+fails to parse — `test_v1_four_key_stub_still_parses` goes red. Walked 2026-09-12.
+Source: docs/adr/0007-ephemeral-safe.md §override. Asked for by Eli: "allow overriding with an
+env var at the haru stub layer", chosen as a new canary knob.
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build.py, tests/test_ephemeral_safe.py
 
 ---
 

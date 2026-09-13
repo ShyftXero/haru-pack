@@ -192,6 +192,121 @@ proc ramBackedRoot*(): string =
                      "(no RAM-backed filesystem); staging to the persistent cache instead."
     return baseDir()
 
+# --------------------------------------------------- RAM-fit detection (docs/adr/0007)
+#
+# A machine with little free memory (a 512 MB CI runner, a small VPS) cannot hold a staged
+# interpreter + payload in a tmpfs. Before auto-staging to /dev/shm the stub asks whether the
+# tree PROVABLY fits; if it cannot prove it, it falls back to the persistent cache rather than
+# filling RAM and dying mid-extract. Flat by design (early returns, one small proc per source),
+# and fail-safe: anything unmeasurable answers "does not fit", never a gamble.
+
+# `haruMemRoot` is a COMPILE-TIME path prefix for the memory-budget files, empty in every
+# shipped build (so real paths are read). It exists only so a test can compile a launcher that
+# reads fake `/proc/meminfo` and `/sys/fs/cgroup/*` files and prove the cgroup gate — it is not
+# a runtime env surface, and statvfs("/dev/shm") is never redirected.
+const MemRoot {.strdefine: "haruMemRoot".} = ""
+
+proc readValueFile(path: string): string =
+  ## First line of a small sysfs/procfs file, stripped, or "" when it cannot be read.
+  try:
+    return readFile(path).strip()
+  except CatchableError:
+    return ""
+
+proc parseInt64OrNeg(s: string): int64 =
+  if s.len == 0: return -1
+  try: return int64(parseBiggestInt(s))
+  except ValueError: return -1
+
+proc shmFreeBytes(): int64 =
+  ## Free bytes on the /dev/shm tmpfs, or -1 when it cannot be measured.
+  when defined(linux):
+    var st: Statvfs
+    if statvfs("/dev/shm", st) != 0: return -1
+    return int64(st.f_bavail) * int64(st.f_frsize)
+  else:
+    return -1
+
+proc memAvailableBytes(): int64 =
+  ## `/proc/meminfo` MemAvailable in bytes, or -1 when it cannot be read/parsed.
+  when defined(linux):
+    let text = readValueFile(MemRoot & "/proc/meminfo")
+    if text.len == 0: return -1
+    for line in text.splitLines():
+      if not line.startsWith("MemAvailable:"): continue
+      let parts = line.splitWhitespace()          # ["MemAvailable:", "12345", "kB"]
+      if parts.len < 2: return -1
+      let kb = parseInt64OrNeg(parts[1])
+      if kb < 0: return -1
+      return kb * 1024
+    return -1
+  else:
+    return -1
+
+proc cgroupAvailBytes(): int64 =
+  ## Memory still available under a cgroup memory limit, or -1 when there is genuinely no
+  ## cgroup memory limit in effect (the limit file is ABSENT, or, for v2, explicitly "max"). A
+  ## container / CI runner caps memory here while /proc/meminfo still reports the HOST's RAM, so
+  ## a fit check blind to the cgroup would OOM exactly the small box the gate protects
+  ## (adversarial review W3). cgroup v2: `memory.max` ("max" = unlimited) minus `memory.current`.
+  ## v1: `memory.limit_in_bytes` (a near-int64 sentinel = unlimited) minus `memory.usage_in_bytes`.
+  ##
+  ## Fail-CLOSED on corruption, matching shmFreeBytes/memAvailableBytes: a limit (or usage) file
+  ## that EXISTS but does not parse returns 0 ("does not fit"), never -1 ("not gated"). -1 is
+  ## reserved for a limit that is genuinely absent or explicitly unlimited. The previous version
+  ## folded "absent" and "present but corrupt" into the same -1 (parseInt64OrNeg returns -1 for
+  ## both an empty read and an unparseable one), so a corrupted-but-present sysfs file was
+  ## silently treated as "no limit" and ALLOWED RAM staging (adversarial re-review finding).
+  ## `fileExists` (not the parsed value) is what decides "absent" vs "present", so the two cases
+  ## can no longer collide.
+  when defined(linux):
+    let maxPath = MemRoot & "/sys/fs/cgroup/memory.max"
+    if fileExists(maxPath):                                   # v2
+      let maxRaw = readValueFile(maxPath)
+      if maxRaw == "max": return -1                           # explicit unlimited
+      let limit = parseInt64OrNeg(maxRaw)
+      if limit < 0: return 0                                  # present but unparseable -> closed
+      let curPath = MemRoot & "/sys/fs/cgroup/memory.current"
+      if not fileExists(curPath): return 0                    # limit known, usage unknown -> closed
+      let cur = parseInt64OrNeg(readValueFile(curPath))
+      if cur < 0: return 0                                    # usage present but unparseable -> closed
+      return (if limit > cur: limit - cur else: 0'i64)
+    let limPath = MemRoot & "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+    if fileExists(limPath):                                   # v1
+      let limit = parseInt64OrNeg(readValueFile(limPath))
+      if limit < 0: return 0                                  # present but unparseable -> closed
+      if limit > (int64.high div 2): return -1                # v1 sentinel = "unlimited"
+      let usagePath = MemRoot & "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+      if not fileExists(usagePath): return 0                  # limit known, usage unknown -> closed
+      let usage = parseInt64OrNeg(readValueFile(usagePath))
+      if usage < 0: return 0                                  # usage present but unparseable -> closed
+      return (if limit > usage: limit - usage else: 0'i64)
+    return -1                                                 # neither v2 nor v1 file present
+  else:
+    return -1
+
+proc ramWouldFit*(unpackedBytes: int64): bool =
+  ## Fail-safe RAM-fit check (docs/adr/0007): the staged tree plus 20% headroom must fit the
+  ## /dev/shm tmpfs, MemAvailable, AND the cgroup budget when a finite one exists. An unknown
+  ## size (0), a non-Linux host, or any unreadable measurement answers false — the stub never
+  ## stages to RAM it cannot prove. This removes the PREDICTABLE OOM (a tree that never had room
+  ## in the knowable budget); it is a size check, not a reservation, so it cannot promise "never
+  ## OOM" against a race with another process (docs/adr/0007 §5).
+  if unpackedBytes <= 0: return false
+  # Overflow-safe headroom: never FORM `unpackedBytes + unpackedBytes div 5` if it could exceed
+  # int64 — under -d:release that add raises an uncatchable OverflowDefect and crashes instead of
+  # failing safe (adversarial review W2). The largest value whose ×1.2 still fits is
+  # (int64.high div 6) * 5; above it, refuse. The test is a DIVISION, which cannot overflow.
+  if unpackedBytes > (int64.high div 6) * 5: return false
+  let need = unpackedBytes + unpackedBytes div 5      # x1.2, cannot overflow now
+  let shm = shmFreeBytes()
+  if shm < 0 or shm < need: return false
+  let mem = memAvailableBytes()
+  if mem < 0 or mem < need: return false
+  let cg = cgroupAvailBytes()                          # -1 when no finite limit -> not gated
+  if cg >= 0 and cg < need: return false
+  return true
+
 # --------------------------------------------------- shred-on-reap: matching-length overwrite
 #
 # --overwrite (docs/adr/0004 §5b, INV-SHRED-01). Before the reaper unlinks a staged file it
