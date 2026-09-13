@@ -119,14 +119,14 @@ import busybody_herd             # noqa: E402,F401
 import busybody_traits           # noqa: E402,F401  (the composable trait catalogue)
 
 # ── re-exported so `import busybody as bb` still reaches what it always did ────────────
+import busybody_config as cfg  # noqa: E402
 from busybody_cases_exam import EXAMS, _exam_script, _sit_exam  # noqa: E402,F401
 from busybody_cases_reveng import _reveng_build  # noqa: E402,F401
 from busybody_cli import main  # noqa: E402
 from busybody_compose_run import (_build_composed, _elf_machine, _payload_members,  # noqa: E402,F401
                                   _static_verdict, run_stack)
-from busybody_config import (ADDRESS_SPACE_MB, CASES, DEFAULT_TIMEOUT_S, FATAL,  # noqa: E402,F401
-                             JOBS_DEFAULT, JOBS_MAX, MARKER, OUT, RUNS, SCRATCH_CAP_GB,
-                             case)
+from busybody_config import (ADDRESS_SPACE_MB, FATAL, JOBS_DEFAULT, JOBS_MAX,  # noqa: E402,F401
+                             MARKER, case)
 from busybody_fixtures import build_fixture, build_top25_fixtures, calibrate  # noqa: E402,F401
 from busybody_guard import guard_single_instance  # noqa: E402,F401
 from busybody_herd import (herd_collect, herd_deadline, herd_start,  # noqa: E402,F401
@@ -139,6 +139,27 @@ from busybody_runner import (Ctx, InfraFailure, blame, classify, clean_env,  # n
                              work_root_report)
 from busybody_stall import StallWatch  # noqa: E402,F401
 from busybody_sweep import compose_sweep, run_one, worker_pool  # noqa: E402,F401
+
+# ── the rebindable names are FORWARDED, not copied ────────────────────────────────────
+# `CASES` is a registry the @case decorators append to and a test may swap wholesale;
+# `WORK_ROOT`/`SCRATCH_CAP_GB`/`DEFAULT_TIMEOUT_S`/`HERD_N` are rewritten by main() from the
+# command line; `REPO`/`OUT`/`RUNS` are redirected by tests. A plain `from busybody_config
+# import CASES` here would freeze whichever object existed at import time, and `bb.CASES`
+# would then disagree with what the harness actually reads.
+#
+# That is not hypothetical. It is the bug this module shipped with for one afternoon: a test
+# that swapped in an empty catalogue to run ONE synthetic case got a sweep of all 80, at the
+# thick tier, building real binaries — because `busybody_cli` had imported `CASES` by value.
+# PEP 562 module __getattr__ makes the stale copy impossible rather than merely discouraged.
+_FORWARDED = frozenset({"CASES", "REPO", "OUT", "RUNS", "WORK_ROOT", "SCRATCH_CAP_GB",
+                        "DEFAULT_TIMEOUT_S", "HERD_N", "STALL_QUIET_S"})
+
+
+def __getattr__(name):
+    if name in _FORWARDED:
+        return getattr(cfg, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 if __name__ == "__main__":
     raise SystemExit(main(__doc__))

@@ -15,7 +15,7 @@ import busybody_config as cfg
 from busybody_analyze import analyze_exit_code, analyze_run, format_analysis
 from busybody_args import _parser
 from busybody_compose import describe_traits
-from busybody_config import CASES, JOBS_MAX
+from busybody_config import JOBS_MAX
 from busybody_history import print_history, print_triage
 from busybody_run import _sweep
 
@@ -100,10 +100,10 @@ def _select(a) -> list | int:
     skipped what you asked for reads exactly like a healthy one. (Adopted from lotek's
     BusyBody #558 — an unmatched selection is fatal, not dropped.)
     """
-    picked = CASES
+    picked = cfg.CASES
     if a.persona:
         want = {s.strip() for s in a.persona.split(",") if s.strip()}
-        known = {c["persona"] for c in CASES}
+        known = {c["persona"] for c in cfg.CASES}
         if unknown := (want - known):
             print(f"unknown persona(s): {', '.join(sorted(unknown))}\n"
                   f"known personas: {', '.join(sorted(known))}", file=sys.stderr)
@@ -111,7 +111,7 @@ def _select(a) -> list | int:
         picked = [c for c in picked if c["persona"] in want]
     if a.case:
         want = {s.strip() for s in a.case.split(",") if s.strip()}
-        known = {c["name"] for c in CASES}
+        known = {c["name"] for c in cfg.CASES}
         if unknown := (want - known):
             print(f"unknown case(s): {', '.join(sorted(unknown))}\n"
                   f"known cases: {', '.join(sorted(known))}", file=sys.stderr)

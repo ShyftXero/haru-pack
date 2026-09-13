@@ -8,7 +8,6 @@ Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Unchanged otherwise.
 """
 from __future__ import annotations
 
-from busybody_config import CASES  # noqa: E402
 from busybody_ledger import ledger_append, prune_runs  # noqa: E402
 from busybody_report import write_report  # noqa: E402
 
@@ -54,7 +53,7 @@ def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
     same way rather than through module state, for the same reason: under --jobs the case
     runs in a worker that never saw the parent's globals.
     """
-    c = next(x for x in CASES if x["name"] == case_name)
+    c = next(x for x in cfg.CASES if x["name"] == case_name)
     exe, run_dir = Path(exe_str), Path(run_dir_str)
     work = Path(tempfile.mkdtemp(prefix=f"bb-{case_name}-",
                                  dir=work_root_str or None))
