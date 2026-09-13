@@ -290,8 +290,9 @@ user data — the code lives in the stage dir.
   `pytest -m invariant` checks that every `active` one is claimed by a test.
 - [THREAT_MODEL.md](THREAT_MODEL.md) — assets, actors, trust boundaries, and what the
   licensing feature does and does not actually enforce
-- [docs/PRINCIPLES.md](docs/PRINCIPLES.md) — the one guiding principle, and who the three
-  "users" are when they conflict
+- [docs/PRINCIPLES.md](docs/PRINCIPLES.md) — the one guiding principle, who the three
+  "users" are when they conflict, and the no-god-modules rule that falls out of the first
+  of them
 - [docs/CONFIG.md](docs/CONFIG.md) — haru_pack.toml reference + discovery
 - [docs/TIERS.md](docs/TIERS.md) — bundling tiers + the Playwright example
 - [docs/SHAKE.md](docs/SHAKE.md) — `--shake`: pruning a thick payload on traced evidence,
