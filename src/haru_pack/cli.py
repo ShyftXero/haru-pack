@@ -18,7 +18,7 @@ from .bootstrap import (find_nim, nim_version, ensure_nim_deps, nim_dep_specs,
 from . import toolchain
 from .toolchain import ToolchainError
 from .build import build as build_exe, BuildError
-from .discovery import AmbiguousProject
+from .discovery import AmbiguousProject, EmptyProject
 from .entrypoints import EntryPointError
 from .overlay import verify as verify_exe
 from .targets import KNOWN_TARGETS, Target, TargetError
@@ -152,6 +152,10 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          log=lambda m: print(
                              f"{prog()}: {m}",
                              style="warn" if "WARNING" in m else "info"))
+    except EmptyProject as e:
+        # Nothing to pack (pyc-only / empty dir). Refuse cleanly — --entry-point can't
+        # rescue a source that isn't there — never a raw ValueError traceback (INV-BUILD-01).
+        print(f"{prog()}: {e}", style="error"); raise typer.Exit(2)
     except AmbiguousProject as e:
         _report_ambiguity(project, e)
         raise typer.Exit(2)

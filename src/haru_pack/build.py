@@ -897,6 +897,15 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           no_reap: bool = False, base_path: str = "", source_url: str = "", env_append=None,
           cc: str = "", emit_c: str = "", emit_nim: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
+    # The operator's -o may name a directory that does not exist yet. Create it now rather
+    # than let the final `out.write_bytes` die with a raw FileNotFoundError — busybody's
+    # `greenhorn_output_into_missing_dir` turned that into a CRASHED (not a clean refusal).
+    # A parent that cannot be created is refused intelligibly, never a bare traceback
+    # (INV-BUILD-01).
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise BuildError(f"cannot create the output directory {out.parent}: {e}")
     # --emit-c: a C reproduction kit written beside the binary. Resolve the directory now
     # (before any tempdir/chdir) so a relative path lands where the user expects, and validate
     # it up front so an unsafe/occupied target fails FAST — before the whole build runs, never
