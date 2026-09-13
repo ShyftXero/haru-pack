@@ -192,7 +192,7 @@ proc ramBackedRoot*(): string =
                      "(no RAM-backed filesystem); staging to the persistent cache instead."
     return baseDir()
 
-# --------------------------------------------------- RAM-fit detection (docs/adr/0005)
+# --------------------------------------------------- RAM-fit detection (docs/adr/0007)
 #
 # A machine with little free memory (a 512 MB CI runner, a small VPS) cannot hold a staged
 # interpreter + payload in a tmpfs. Before auto-staging to /dev/shm the stub asks whether the
@@ -286,12 +286,12 @@ proc cgroupAvailBytes(): int64 =
     return -1
 
 proc ramWouldFit*(unpackedBytes: int64): bool =
-  ## Fail-safe RAM-fit check (docs/adr/0005): the staged tree plus 20% headroom must fit the
+  ## Fail-safe RAM-fit check (docs/adr/0007): the staged tree plus 20% headroom must fit the
   ## /dev/shm tmpfs, MemAvailable, AND the cgroup budget when a finite one exists. An unknown
   ## size (0), a non-Linux host, or any unreadable measurement answers false — the stub never
   ## stages to RAM it cannot prove. This removes the PREDICTABLE OOM (a tree that never had room
   ## in the knowable budget); it is a size check, not a reservation, so it cannot promise "never
-  ## OOM" against a race with another process (docs/adr/0005 §5).
+  ## OOM" against a race with another process (docs/adr/0007 §5).
   if unpackedBytes <= 0: return false
   # Overflow-safe headroom: never FORM `unpackedBytes + unpackedBytes div 5` if it could exceed
   # int64 — under -d:release that add raises an uncatchable OverflowDefect and crashes instead of

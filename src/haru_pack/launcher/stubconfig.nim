@@ -12,7 +12,7 @@ import parsetoml
 
 type
   ## The closed knob catalogue. Adding a knob is a format change, on purpose (INV-CANARY-02).
-  ## `kEphemeral` (docs/adr/0005) is the fifth knob: the runtime RAM/disk staging toggle read
+  ## `kEphemeral` (docs/adr/0007) is the fifth knob: the runtime RAM/disk staging toggle read
   ## from `<canary>_EPHEMERAL`. It is ADDITIVE — its `[canary]` key is optional and defaults to
   ## HARU when absent, so a four-key v1 stub-config still parses byte-for-byte unchanged.
   Knob* = enum
@@ -40,7 +40,7 @@ type
                          ## (the trust anchor), so repointing the URL can change WHERE bytes
                          ## come from but never WHICH bytes are accepted. "" = appended
                          ## delivery (today's behaviour).
-    unpackedBytes*: int64  ## build-time size of the staged tree (docs/adr/0005): lets the stub
+    unpackedBytes*: int64  ## build-time size of the staged tree (docs/adr/0007): lets the stub
                            ## size its RAM-fit check BEFORE staging, whether the payload came
                            ## from the appended overlay OR a remote fetch (source_url) — the
                            ## fit-check runs on the unpacked size either way. 0 = unknown
@@ -128,7 +128,7 @@ proc parseStubConfig*(raw: string): StubConfig =
   for key in tbl.keys:
     if key notin ["secret", "uv_ver", "source_url", "base_path", "ephemeral"]:
       raise newException(ValueError, "stub-config: unknown key in [canary]: '" & key & "'")
-  # `ephemeral` is the ADDITIVE knob (docs/adr/0005): default it to HARU so a four-key v1
+  # `ephemeral` is the ADDITIVE knob (docs/adr/0007): default it to HARU so a four-key v1
   # stub-config parses unchanged; the other four remain mandatory.
   result.canary[kEphemeral] = DefaultCanary
   for k in Knob:

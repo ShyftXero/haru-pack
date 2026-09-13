@@ -1,4 +1,4 @@
-# ADR 0005 — ephemeral is safe on a small machine and controllable at runtime (launcher, Phase 3)
+# ADR 0007 — ephemeral is safe on a small machine and controllable at runtime (launcher, Phase 3)
 
 - Status: accepted (contract)
 - Date: 2026-09-12

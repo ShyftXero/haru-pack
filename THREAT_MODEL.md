@@ -125,7 +125,7 @@ no CoW extent, no VSS snapshot. `--overwrite` is belt-and-suspenders for plainte
 unavoidably touches disk on Windows/macOS (where there is no unprivileged RAM disk). This is the
 doctrine; `--overwrite` is not a substitute for it.
 
-**But `--encrypt --ephemeral` is NOT an absolute "nothing plaintext reaches disk" (docs/adr/0005 §5).**
+**But `--encrypt --ephemeral` is NOT an absolute "nothing plaintext reaches disk" (docs/adr/0007 §5).**
 Two paths put the decrypted tree on disk despite the intent, and an operator who assumes otherwise
 is wrong in exactly the way this document exists to prevent:
 

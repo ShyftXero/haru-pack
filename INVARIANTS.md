@@ -2330,7 +2330,7 @@ whose stub-config sets `ram_only = true`: staging then lands in the per-user cac
 `test_ram_only_stages_under_dev_shm` (which asserts `HARUPACK_STAGE` is under `/dev/shm`) goes
 red. Walked on this Linux host, where `/dev/shm` exists.
 Source: docs/adr/0004-reap-ram-staging.md §4. CONTEXT.md "RAM-backed staging (ephemeral)".
-Note: Phase 3 (INV-EPHEMERAL-01, docs/adr/0005) adds a second "otherwise falls back" condition
+Note: Phase 3 (INV-EPHEMERAL-01, docs/adr/0007) adds a second "otherwise falls back" condition
 to the auto path: even when `/dev/shm` is available, the launcher stages to RAM only when the
 baked `unpacked_bytes` provably fits free memory. A real `ram_only` build always bakes that size,
 so this narrows nothing an operator sees; a hand-crafted stub with `ram_only` and no
@@ -2485,7 +2485,7 @@ Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/execgate.
 
 ## STAGING-3 — ephemeral is safe on a small machine and controllable at runtime
 
-Phase 3 of the staging rework (docs/adr/0005-ephemeral-safe.md) makes `--ephemeral` safe to
+Phase 3 of the staging rework (docs/adr/0007-ephemeral-safe.md) makes `--ephemeral` safe to
 default and honest on the target. A 512 MB CI runner or a small VPS cannot hold a staged
 interpreter + payload in a tmpfs, so the launcher now SIZES the RAM-backed choice before it
 commits to it and falls back to the persistent cache rather than filling RAM and dying
@@ -2509,7 +2509,7 @@ absent/0), an unmeasurable host, or an over-large size whose ×1.2 would overflo
 a pre-multiply DIVISION test, so `-d:release` cannot turn it into a crash) all resolve to "does not
 fit". This removes the PREDICTABLE OOM — a tree with no room in the knowable memory budget — it is a
 size check, not a reservation, and does not promise "never OOM" against a race or a budget the
-launcher cannot read (docs/adr/0005 §5).
+launcher cannot read (docs/adr/0007 §5).
 Actors: not an attacker — a packager who ships `--ephemeral` and a target (a 512 MB CI runner, a
 small VPS) that cannot fit the staged tree in RAM. The failure this prevents is an out-of-memory
 or ENOSPC death on the target after the build reported success.
@@ -2526,7 +2526,7 @@ compressed size) instead of the `.xz.size` expanded value; `test_staged_tree_byt
 division overflow guard with the `need = x + x div 5; if need < x` form and rebuild;
 `test_overflow_unpacked_bytes_fails_safe` (an int64-range `unpacked_bytes` must fall back to disk,
 not crash) goes red. All walked 2026-09-12 on this Linux host.
-Source: docs/adr/0005-ephemeral-safe.md §detection. Asked for by Eli: "a machine with only 512mb
+Source: docs/adr/0007-ephemeral-safe.md §detection. Asked for by Eli: "a machine with only 512mb
 ram might not be able to extract and run the program it packs … need a way to detect the
 environment prior to launch." C1/W2/W3 from the Phantom_Phreak adversarial review 2026-09-12.
 Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build.py, src/haru_pack/bundle.py, tests/test_ephemeral_safe.py
@@ -2546,7 +2546,7 @@ escape hatch that keeps the reuse case possible.
 Red-path: In `build.build` remove `if ram_only and not no_reap and not reap: reap = True`;
 `test_ephemeral_implies_reap` (build `ram_only` → receipt `staging.reap` True) goes red. Remove
 `if no_reap and reap: raise` and `test_reap_and_no_reap_conflict` goes red. Walked 2026-09-12.
-Source: docs/adr/0005-ephemeral-safe.md §coupling. Asked for by Eli: "ephemeral should imply
+Source: docs/adr/0007-ephemeral-safe.md §coupling. Asked for by Eli: "ephemeral should imply
 reap. maybe fold in reap to ephemeral."
 Territory: src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_ephemeral_safe.py
 
@@ -2572,7 +2572,7 @@ accept `"0"` (return the value == "0" or "1") and `test_env_0_is_ignored_not_a_d
 ephemeral binary must stay in RAM under `EPHEMERAL=0`, never be forced to disk) goes red. Separately,
 in `stubconfig.parseStubConfig` drop the `if k == kEphemeral: continue` and a four-key v1 stub-config
 fails to parse — `test_v1_four_key_stub_still_parses` goes red. Walked 2026-09-12.
-Source: docs/adr/0005-ephemeral-safe.md §override. Asked for by Eli: "allow overriding with an
+Source: docs/adr/0007-ephemeral-safe.md §override. Asked for by Eli: "allow overriding with an
 env var at the haru stub layer", chosen as a new canary knob.
 Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build.py, tests/test_ephemeral_safe.py
 

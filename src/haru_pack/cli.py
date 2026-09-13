@@ -96,7 +96,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
     #   --ephemeral   the flag a packager types (build-time)
     #   ram_only      the WIRE key it maps to in the stub-config / build() kwarg (unchanged since
     #                 ADR 0004 §2.2 pins the v1 corpus) — so `ram_only == ephemeral` here
-    #   EPHEMERAL     the RUNTIME canary knob (<canary>_EPHEMERAL) the TARGET sets (docs/adr/0005)
+    #   EPHEMERAL     the RUNTIME canary knob (<canary>_EPHEMERAL) the TARGET sets (docs/adr/0007)
     # --ram-only is the deprecated surface name of --ephemeral (docs/adr/0004).
     if ram_only and not ephemeral:
         print(f"{prog()}: --ram-only is deprecated; use --ephemeral (same behavior)", style="warn")

@@ -141,7 +141,7 @@ proc runInstallSteps(uv, appDir: string, m: Manifest, steps: seq[InstallStep],
   if ran or steps.len > 0: writeFile(sentinel, "1")
 
 proc forceRamRequested(sc: StubConfig): bool =
-  ## The runtime EPHEMERAL knob (docs/adr/0005) is 2-STATE: `<canary>_EPHEMERAL=1` forces the
+  ## The runtime EPHEMERAL knob (docs/adr/0007) is 2-STATE: `<canary>_EPHEMERAL=1` forces the
   ## RAM-backed root and SKIPS the fit-check (target-autonomy enable, even on a binary not built
   ## `--ephemeral`). There is deliberately NO force-DISK value — an env toggle that pushed an
   ## `--encrypt --ephemeral` payload onto disk would be a confidentiality downgrade an attacker
@@ -149,7 +149,7 @@ proc forceRamRequested(sc: StubConfig): bool =
   getEnv(sc.envForKnob(kEphemeral)).strip() == "1"
 
 proc autoEphemeralRoot(sc: StubConfig): string =
-  ## Auto ephemeral (docs/adr/0005): stage to RAM only if the payload PROVABLY fits, else fall
+  ## Auto ephemeral (docs/adr/0007): stage to RAM only if the payload PROVABLY fits, else fall
   ## back to the persistent cache with an honest note. Never gambles RAM it cannot account for.
   when defined(linux):
     if ramWouldFit(sc.unpackedBytes): return ramBackedRoot()   # already int64 (stubconfig.nim)
@@ -160,7 +160,7 @@ proc autoEphemeralRoot(sc: StubConfig): string =
     return ramBackedRoot()          # no guaranteed RAM fs; ramBackedRoot() notes the fallback
 
 proc resolveStagingRoot(sc: StubConfig): string =
-  ## Staging-root precedence, computed BEFORE staging (docs/adr/0004 §3 + docs/adr/0005,
+  ## Staging-root precedence, computed BEFORE staging (docs/adr/0004 §3 + docs/adr/0007,
   ## INV-BASE-01 / INV-EPHEMERAL-01):
   ##
   ##   BASE_PATH env (explicit path)                                        [highest]

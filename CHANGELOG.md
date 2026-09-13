@@ -103,7 +103,7 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
   binary carries none of it. An appended build never flips to a network fetch because someone
   set an env var. Proxy-aware through the OS HTTP stack (libcurl `*_proxy` on Linux; system
   proxy on Windows/macOS).
-- **`--ephemeral` is now safe on small machines and controllable at runtime (docs/adr/0005).**
+- **`--ephemeral` is now safe on small machines and controllable at runtime (docs/adr/0007).**
   Three changes, one theme — RAM-backed staging shouldn't hurt you on a box that can't afford it,
   and the target gets the final say:
   - **`--ephemeral` implies `--reap`** (opt out with `--no-reap`). "Ephemeral" means "not

@@ -20,7 +20,7 @@ A single stub-input setting, read at runtime as `<canary>_<KNOB>`. The catalogue
 `SECRET` (decryption key), `UV_VER` (uv version to fetch), `SOURCE_URL` (remote-fetch payload
 URL), `BASE_PATH` (where the stub stages uv/python and the payload tree), and `EPHEMERAL` (the
 RAM staging ENABLE: `1` forces RAM, unset/anything else is auto — 2-state, no force-disk value,
-docs/adr/0005). Adding a knob is a
+docs/adr/0007). Adding a knob is a
 deliberate format change on both halves (INV-CANARY-02); `EPHEMERAL` is **additive** (its
 `[canary]` key is emitted only when non-default, so the v1 corpus is unchanged). The **license
 policy is NOT a knob** — expiry/machine/user/geo can never be set or overridden by the end
@@ -52,7 +52,7 @@ so there `--ephemeral` is best-effort and falls back to the persistent cache wit
 did not (ADR 0004 §2.2 pins the v1 byte-corpus). For packagers concerned about disk-based
 artifacts. Distinct from the normal **cache**, which is persistent and reused.
 
-**Phase 3 (docs/adr/0005) makes it safe and controllable.** `--ephemeral` now **implies
+**Phase 3 (docs/adr/0007) makes it safe and controllable.** `--ephemeral` now **implies
 `--reap`** (opt out with `--no-reap`) — not permanent means it cleans up. On the auto path the
 stub runs a **RAM-fit check** before committing to `/dev/shm`: it stages to RAM only when the
 baked `unpacked_bytes × 1.2` fits BOTH the tmpfs free space and `MemAvailable`, else it falls back
@@ -65,7 +65,7 @@ ephemeral payload onto disk would be weak protection an attacker could set, so t
 enable RAM. **Known limitation:** with `--encrypt --ephemeral`, the low-RAM AUTO fallback still
 lands the decrypted tree on disk (availability, not attacker-controlled) — so ephemeral is not an
 absolute "nothing plaintext hits disk". That fallback is reaped; `--overwrite` shreds it (still not
-a secure erase — THREAT_MODEL.md, docs/adr/0005 §5).
+a secure erase — THREAT_MODEL.md, docs/adr/0007 §5).
 
 ## detached reap
 The stub's fire-and-forget final act when `--reap` is baked in: after the app exits it spawns
