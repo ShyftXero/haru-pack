@@ -78,17 +78,19 @@ def test_script_dependencies_reach_the_manifest(script):
 
 @pytest.mark.invariant("INV-TIER-01")
 def test_the_thick_path_stages_script_dependencies():
-    """Red-path: replace the `warm_cache_for_script(...)` call in assemble_payload with
-    `pass`, rebuild a thick script binary, and run it with a pristine cache and
-    UV_OFFLINE=1. Walked 2026-09-09: it failed with uv's "Packages were unavailable
-    because the network was disabled"."""
-    src = inspect.getsource(build_mod.assemble_payload)
+    """Red-path: replace the `warm_cache_for_script(...)` call in
+    `build.thick._stage_script_dependencies` with `pass`, rebuild a thick script binary, and
+    run it with a pristine cache and UV_OFFLINE=1. Walked 2026-09-09: it failed with uv's
+    "Packages were unavailable because the network was disabled"."""
+    from haru_pack.build import thick as thick_mod
+
+    src = inspect.getsource(thick_mod._stage_script_dependencies)
     assert "warm_cache_for_script(" in src, (
         "the thick path no longer stages a script's dependencies, so `--thick` ships a "
         "binary that still needs the network on first run"
     )
     # and it must be reached for scripts specifically, not only projects
-    assert 'kind") == "script"' in src or "kind'] == 'script'" in src, (
+    assert 'get("kind")' in src and '"script"' in src, (
         "the staging call is not guarded on the script kind; projects already had their "
         "cache warmed, scripts were the gap"
     )
@@ -121,7 +123,9 @@ def test_staging_is_announced(script):
     """Loud, per the design: staging dependencies into a payload changes what ships and how
     big it is, so it says so. Red-path: drop the log call and a thick build silently gains
     or loses megabytes."""
-    src = inspect.getsource(build_mod.assemble_payload)
+    from haru_pack.build import thick as thick_mod
+
+    src = inspect.getsource(thick_mod._stage_script_dependencies)
     assert "staging" in src.lower() and "log" in src, (
         "dependency staging happens silently; the operator cannot tell what went in"
     )

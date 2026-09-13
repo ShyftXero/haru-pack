@@ -365,10 +365,10 @@ def test_a_console_script_nothing_provides_is_refused_at_thick(tmp_path):
 
 @pytest.mark.invariant("INV-BUILD-08")
 def test_the_thick_check_is_wired_into_the_build():
-    """Red-path: delete the verify_console_script call from assemble_payload."""
+    """Red-path: delete the verify_console_script call from `build.thick._warm_on_host`."""
     import inspect
-    from haru_pack import build as build_mod
-    src = inspect.getsource(build_mod.assemble_payload)
+    from haru_pack.build import thick as thick_mod
+    src = inspect.getsource(thick_mod._warm_on_host)
     assert "verify_console_script(" in src
     assert "env_dir=tmp_env" in src, (
         "the thick check must look in the env uv just built, or it cannot be certain"

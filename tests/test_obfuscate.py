@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from _source import build_source
 from haru_pack.obfuscate import (NoneEngine, ObfuscationError, PyArmorEngine,
                                  engine_names, get_engine)
 
@@ -65,7 +66,7 @@ def test_a_requested_engine_that_cannot_run_fails_the_build(tmp_path, monkeypatc
     eng = get_engine("pyarmor")
     assert eng.available(), "test setup: pyarmor should look unavailable here"
     # build() wraps this into a BuildError; assert the source does so
-    src = (REPO / "src" / "haru_pack" / "build.py").read_text()
+    src = build_source()
     assert "if reason := eng.available():" in src and "raise BuildError(reason)" in src, (
         "build() must refuse when a requested engine reports it cannot run"
     )
@@ -77,7 +78,7 @@ def test_a_requested_engine_that_cannot_run_fails_the_build(tmp_path, monkeypatc
 def test_obfuscation_and_encryption_are_wired_independently():
     """Neither implies the other. A change that made --obfuscate force --encrypt (or the
     reverse) would be a silent scope change in a security feature."""
-    src = (REPO / "src" / "haru_pack" / "build.py").read_text()
+    src = build_source()
     # the obfuscation block must not reference the encryption state, and vice versa
     assert "obfuscation is a source transform" in src.lower() or \
            "INDEPENDENT of encryption" in src, (
@@ -92,22 +93,42 @@ def test_obfuscation_and_encryption_are_wired_independently():
 def test_the_build_records_what_was_actually_done():
     """The artifact should state its own provenance. A manifest that omits the engine leaves
     the reader to trust the builder."""
-    src = (REPO / "src" / "haru_pack" / "build.py").read_text()
+    src = build_source()
     assert 'obfuscation=manifest.get("obfuscation"' in src, (
         "build()'s receipt must carry the obfuscation result"
     )
 
 
 @pytest.mark.invariant("INV-OBF-01")
-def test_non_thick_obfuscation_warns_about_the_python_binding():
+@pytest.mark.parametrize("tier", ["thin", "default"])
+def test_non_thick_obfuscation_warns_about_the_python_binding(tier):
     """Obfuscation binds the payload to an exact Python minor version; only thick guarantees
     the staged interpreter matches. A non-thick obfuscated build must warn, because haru-pack
-    CAN see the risk (unlike INV-TIER-02, where it cannot)."""
-    src = (REPO / "src" / "haru_pack" / "build.py").read_text()
-    assert 'obfuscate != "none" and tier != "thick"' in src
-    assert "undefined symbol" in src, (
+    CAN see the risk (unlike INV-TIER-02, where it cannot).
+
+    Red-path: make `announce_staging`'s sibling return without saying anything, or drop the
+    `tier != "thick"` condition, and this goes red."""
+    from haru_pack.build.advisories import announce_obfuscation_tier
+
+    said: list[str] = []
+    announce_obfuscation_tier(obfuscate="pyarmor", tier=tier, python="3.13", say=said.append)
+    joined = "\n".join(said)
+    assert joined, f"tier={tier} with --obfuscate must warn"
+    assert "undefined symbol" in joined, (
         "the warning must name the actual failure mode so it is recognisable when it happens"
     )
+    assert "3.13" in joined, "the warning must name the Python the payload is bound to"
+
+
+@pytest.mark.invariant("INV-OBF-01")
+def test_thick_obfuscation_does_not_warn():
+    """The other half of the same claim: thick DOES guarantee the interpreter, so warning
+    there would be noise, and noise is how a real warning gets ignored."""
+    from haru_pack.build.advisories import announce_obfuscation_tier
+
+    said: list[str] = []
+    announce_obfuscation_tier(obfuscate="pyarmor", tier="thick", python="3.13", say=said.append)
+    assert said == [], f"thick must not warn about the Python binding; said {said}"
 
 
 # ---------------------------------------------------------------- real pyarmor (gated)

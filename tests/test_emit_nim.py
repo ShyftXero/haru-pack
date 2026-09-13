@@ -98,6 +98,7 @@ def test_nim_target_flags_are_the_same_object_compile_launcher_uses(tmp_path, mo
     build.compile_launcher passes to `nim c`. A flag added to the real compile that bypasses
     emit.nim_target_flags would break this — the kit can no longer silently drift."""
     from haru_pack import build as build_mod
+    from haru_pack.build import compiler as compiler_mod
 
     captured = {}
 
@@ -108,10 +109,10 @@ def test_nim_target_flags_are_the_same_object_compile_launcher_uses(tmp_path, mo
                 Path(tok[len("--out:"):]).write_bytes(b"\x7fELF")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(build_mod.toolchain, "find_managed_zig", lambda: Path("/fake/zig"))
-    monkeypatch.setattr(build_mod.toolchain, "zig_cc_shim",
+    monkeypatch.setattr(compiler_mod.toolchain, "find_managed_zig", lambda: Path("/fake/zig"))
+    monkeypatch.setattr(compiler_mod.toolchain, "zig_cc_shim",
                         lambda zig, triple, dest: Path("/fake/zig-cc"))
-    monkeypatch.setattr(build_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(compiler_mod.subprocess, "run", fake_run)
 
     tgt = Target.parse("host")
     build_mod.compile_launcher("/fake/nim", tgt, tmp_path, cc="zig")

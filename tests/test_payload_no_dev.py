@@ -15,7 +15,7 @@ import inspect
 
 import pytest
 
-from haru_pack import bundle, build as build_mod
+from haru_pack import bundle
 
 
 def _argv_of(calls):
@@ -128,7 +128,9 @@ def test_dev_tools_are_installed_outside_the_payload(monkeypatch, tmp_path):
 def test_the_build_env_still_gets_its_tools_when_they_are_needed():
     """A bundle step or a --shake observation runs those tools. Removing them from the
     payload must not remove them from the env that executes build steps."""
-    src = inspect.getsource(build_mod.assemble_payload)
+    from haru_pack.build import thick as thick_mod
+
+    src = inspect.getsource(thick_mod._warm_on_host)
     assert "install_dev_tools(" in src, (
         "nothing restores the dev tooling to the build env, so a [[bundle]] step that used "
         "a dev-group tool now fails"

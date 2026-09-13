@@ -238,9 +238,11 @@ def test_export_preserves_hash_continuation_lines():
 @pytest.mark.invariant("INV-SUPPLY-10")
 def test_sources_are_recorded_on_the_build_receipt():
     """An operator auditing a signed artifact should not have to guess whether a mirror
-    was in play. Red-path: drop `sources=sources.describe()` from build()'s info.update."""
-    from haru_pack import build as build_mod
-    src = _code_of(build_mod.build)
+    was in play. Red-path: drop `sources=sources.describe()` from `receipt.finish`, which is
+    where build() assembles the receipt since the package split."""
+    from haru_pack.build import receipt
+
+    src = _code_of(receipt.finish)
     assert "sources=sources.describe()" in src
     assert Sources().describe() == "upstream defaults (github.com)"
     assert "mirror.example" in Sources(python_base=MIRROR).describe()

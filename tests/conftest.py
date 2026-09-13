@@ -20,17 +20,22 @@ def stub_toolchain(monkeypatch, tmp_path):
     guard that runs on every push and one that runs when someone remembers.
     """
     from haru_pack import build as build_mod
+    from haru_pack.build import assemble as assemble_mod
+    from haru_pack.build import orchestrate as orchestrate_mod
 
     def fake_compile(nim, target, workdir, **kw):
         out = Path(workdir) / "launcher"
         out.write_bytes(b"\x7fELF" + b"\x00" * 512)     # plausible stub, not a real ELF
         return out
 
-    monkeypatch.setattr(build_mod, "find_nim", lambda: "/nonexistent/nim")
-    monkeypatch.setattr(build_mod, "detect_c_toolchain",
+    # Patched in the module that CALLS them, not on the `build` facade. The facade
+    # re-exports these names, but rebinding a re-export leaves the caller's own reference
+    # untouched — the stub would be installed somewhere nothing looks.
+    monkeypatch.setattr(orchestrate_mod, "find_nim", lambda: "/nonexistent/nim")
+    monkeypatch.setattr(orchestrate_mod, "detect_c_toolchain",
                         lambda target: {"ok": True, "compiler": "stub-cc", "advice": ""})
-    monkeypatch.setattr(build_mod, "compile_launcher", fake_compile)
-    monkeypatch.setattr(build_mod, "bundle_uv", lambda target, vendor: vendor.mkdir(
+    monkeypatch.setattr(orchestrate_mod, "compile_launcher", fake_compile)
+    monkeypatch.setattr(assemble_mod, "bundle_uv", lambda target, vendor: vendor.mkdir(
         parents=True, exist_ok=True))
     return build_mod
 

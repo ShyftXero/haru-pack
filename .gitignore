@@ -2,8 +2,18 @@
 nimcache/
 *.exe
 !examples/**/*.exe
-build/
-dist/
+# Anchored to the repo root on purpose: these are what `python -m build` leaves there.
+# The unanchored `build/` also matched `src/haru_pack/build/` — the build-command package —
+# and silently kept every file in it untracked (caught 2026-09-13, when that package was
+# split out of build.py). A packaging-artifact pattern must never be able to eat source.
+/build/
+/dist/
+# ...and re-included explicitly, because a pattern this repo does not control can eat it
+# too: a global core.excludesFile with a bare `build/` (a very common one) matches
+# src/haru_pack/build/ as well, and `git add` says nothing at all when it does. A repo
+# .gitignore outranks the global one, so this line is what makes the package committable on
+# a machine that has one.
+!src/haru_pack/build/
 # staged payloads (large binaries not committed)
 payload/
 vendor/uv*
@@ -15,7 +25,7 @@ vendor/python*
 Thumbs.db
 
 # python packaging
-dist/
+/dist/
 *.egg-info/
 __pycache__/
 .venv/
