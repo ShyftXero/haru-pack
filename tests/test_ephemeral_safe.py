@@ -24,11 +24,13 @@ from __future__ import annotations
 import hashlib
 import lzma
 import os
+import re
 import shutil
 
 import pytest
 from _stage_helpers import (
     DEV_SHM,
+    LAUNCHER_SRC,
     build_payload_zip,
     compile_launcher,
     make_payload,
@@ -353,6 +355,44 @@ def test_overflow_unpacked_bytes_fails_safe(nim_launcher, tmp_path):
     assert not stage.startswith(str(DEV_SHM)), f"overflow-range size gambled RAM: {stage}"
 
 
+# ────────────────── verify: unpackedBytes is int64 (BiggestInt), not native `int` (32-bit on armv7)
+
+@pytest.mark.invariant("INV-EPHEMERAL-01")
+def test_over_int32_unpacked_bytes_round_trips_and_gates_to_disk(tmp_path):
+    """`unpacked_bytes` above the int32 range (2^31-1) must round-trip through the stub-config and
+    the RAM-fit gate without truncation or a crash. `StubConfig.unpackedBytes` is `int64`
+    (`BiggestInt`), read with `getBiggestInt` — NOT the native Nim `int`, which is only 32 bits on
+    the supported armv7 target, so a legitimate multi-GB payload read via a narrowing `getInt()`
+    could wrap to a small/negative value there (silently, under -d:release) BEFORE this fit check
+    or W2's overflow guard ever runs.
+
+    A fake `/proc/meminfo` (compile-time `haruMemRoot`, never a runtime surface) pins
+    `MemAvailable` far below the payload size, so the assertion is deterministic on ANY host —
+    real /dev/shm capacity varies (this dev box alone has tens of GB free), so a host-dependent
+    "does it fit" check here would be flaky; a truncated/garbage size could easily still answer
+    "does not fit" for the WRONG reason and hide a regression.
+
+    Red-path (adversarial verify): revert `unpackedBytes*: int64` to `int` and `n.getBiggestInt()`
+    to `n.getInt()`. On this x86_64 host `int` is already 64 bits, so nothing here goes red — which
+    is exactly why the type change closes the class regardless of what this host can observe (a
+    cross-compiled linux-armv7 build was confirmed to still compile clean with the int64 field;
+    execution on real/emulated 32-bit ARM was not available in this environment)."""
+    if shutil.which("nim") is None:
+        pytest.skip("nim not installed")
+    over_int32 = 2**31 + 5_000_000_000     # ~7.1 GB: past int32 range
+    memroot = tmp_path / "memroot"
+    (memroot / "proc").mkdir(parents=True)
+    (memroot / "proc" / "meminfo").write_text(
+        "MemTotal:       1024 kB\nMemAvailable:   1024 kB\n")   # far below any real ×1.2 need
+    launcher = compile_launcher(tmp_path / "launcher-int32", "haruMemRoot:" + str(memroot))
+    src = make_payload(tmp_path / "p")
+    exe = tmp_path / "app.exe"
+    pack(launcher, build_payload_zip(src), exe,
+         stub_config=stub_toml2(ram_only=True, unpacked_bytes=over_int32))
+    stage = _run_ok(exe, tmp_path)          # asserts rc == 0 (no crash / no uncaught Defect)
+    assert not stage.startswith(str(DEV_SHM)), f"over-int32 size mis-gated into RAM: {stage}"
+
+
 # ─────────────────────────────── W3: cgroup memory limit is respected
 
 @requires_shm
@@ -379,6 +419,69 @@ def test_cgroup_limit_forces_disk(tmp_path):
     assert not stage.startswith(str(DEV_SHM)), f"cgroup cap ignored, staged in RAM: {stage}"
 
 
+@requires_shm
+@pytest.mark.invariant("INV-EPHEMERAL-01")
+def test_cgroup_v1_limit_forces_disk(tmp_path):
+    """cgroup v1 (`memory.limit_in_bytes` / `memory.usage_in_bytes`) is gated the same as v2 — the
+    v1 branch of `cgroupAvailBytes` had NO fake-sysfs test at all before this (adversarial
+    re-review). Only the v1 files are present here (no `memory.max`), so this also exercises the
+    v2-absent -> v1-checked fallthrough. Red-path: drop the v1 branch, or its `limit - usage` gate,
+    and staging goes to /dev/shm despite the 1 KB cap."""
+    if shutil.which("nim") is None:
+        pytest.skip("nim not installed")
+    memroot = tmp_path / "memroot"
+    (memroot / "proc").mkdir(parents=True)
+    (memroot / "proc" / "meminfo").write_text(
+        "MemTotal:       99999999 kB\nMemAvailable:   99999999 kB\n")
+    cg = memroot / "sys" / "fs" / "cgroup" / "memory"; cg.mkdir(parents=True)
+    (cg / "memory.limit_in_bytes").write_text("1024\n")     # 1 KB cap -> nothing real fits
+    (cg / "memory.usage_in_bytes").write_text("0\n")
+    launcher = compile_launcher(tmp_path / "launcher-cg-v1", "haruMemRoot:" + str(memroot))
+    src = make_payload(tmp_path / "p")
+    exe = tmp_path / "app.exe"
+    pack(launcher, build_payload_zip(src), exe,
+         stub_config=stub_toml2(ram_only=True, unpacked_bytes=4096))
+    stage = _run_ok(exe, tmp_path)
+    assert not stage.startswith(str(DEV_SHM)), f"cgroup v1 cap ignored, staged in RAM: {stage}"
+
+
+@requires_shm
+@pytest.mark.invariant("INV-EPHEMERAL-01")
+@pytest.mark.parametrize("layout", ["v2", "v1"])
+def test_cgroup_corrupt_limit_fails_closed(tmp_path, layout):
+    """A present-but-UNPARSEABLE cgroup limit file must fail CLOSED (does not fit), not be treated
+    as 'no limit'. Before this fix, `cgroupAvailBytes` returned -1 ("not gated") for a limit file
+    that existed but did not parse — indistinguishable from a genuinely absent file — so a
+    corrupted sysfs entry silently ALLOWED RAM staging even though host RAM (per the fake
+    /proc/meminfo below) is plentiful and only the cgroup layer could have refused it.
+
+    Red-path: revert the present-but-unparseable branch(es) of `cgroupAvailBytes` to `return -1`
+    and this goes red (stages to RAM instead of disk)."""
+    if shutil.which("nim") is None:
+        pytest.skip("nim not installed")
+    memroot = tmp_path / "memroot"
+    (memroot / "proc").mkdir(parents=True)
+    (memroot / "proc" / "meminfo").write_text(
+        "MemTotal:       99999999 kB\nMemAvailable:   99999999 kB\n")
+    if layout == "v2":
+        cg = memroot / "sys" / "fs" / "cgroup"; cg.mkdir(parents=True)
+        (cg / "memory.max").write_text("not-a-number\n")     # present but corrupt
+        (cg / "memory.current").write_text("0\n")
+    else:
+        cg = memroot / "sys" / "fs" / "cgroup" / "memory"; cg.mkdir(parents=True)
+        (cg / "memory.limit_in_bytes").write_text("not-a-number\n")   # present but corrupt
+        (cg / "memory.usage_in_bytes").write_text("0\n")
+    launcher = compile_launcher(tmp_path / f"launcher-cg-corrupt-{layout}",
+                                "haruMemRoot:" + str(memroot))
+    src = make_payload(tmp_path / "p")
+    exe = tmp_path / "app.exe"
+    pack(launcher, build_payload_zip(src), exe,
+         stub_config=stub_toml2(ram_only=True, unpacked_bytes=4096))
+    stage = _run_ok(exe, tmp_path)
+    assert not stage.startswith(str(DEV_SHM)), (
+        f"corrupt cgroup limit file ({layout}) was treated as no-limit, staged in RAM: {stage}")
+
+
 # ─────────────────────────────── W1: --encrypt + --ephemeral honesty
 
 @pytest.mark.invariant("INV-EPHEMERAL-01")
@@ -397,8 +500,17 @@ def test_encrypt_ephemeral_warns_about_disk_fallback(stub_toolchain, script_proj
 @requires_shm
 @pytest.mark.invariant("INV-EPHEMERAL-01")
 def test_ephemeral_disk_fallback_is_reaped(nim_launcher, tmp_path):
-    """The auto disk fallback (payload can't fit RAM) is still reaped when --reap is set — so
-    --encrypt --ephemeral --overwrite shreds the fallback rather than leaving it on disk."""
+    """The auto disk fallback (payload can't fit RAM) is still REAPED when --reap is set — the
+    staged subtree is gone after the app exits.
+
+    This asserts REAPED only, not shredded: a plain `rm -rf` satisfies "the directory disappears"
+    just as well as the shred-on-reap path does, so this test alone cannot distinguish the two —
+    both end with `wait_gone` returning true. That the --overwrite flag survives onto the DISK
+    fallback specifically (rather than being silently dropped because staging landed on disk
+    instead of RAM) is asserted separately, at the source level, by
+    `test_disk_fallback_overwrite_flag_is_unconditional_on_staging_root` below; the byte-level
+    proof that --overwrite actually shreds (not just unlinks) lives in tests/test_shred.py, which
+    runs the real overwrite/shred code on real bytes on disk."""
     from pathlib import Path as _P
     from _stage_helpers import wait_gone
     src = make_payload(tmp_path / "p")
@@ -408,3 +520,41 @@ def test_ephemeral_disk_fallback_is_reaped(nim_launcher, tmp_path):
     stage = _run_ok(exe, tmp_path)
     assert not stage.startswith(str(DEV_SHM)), f"expected disk fallback, got RAM: {stage}"
     assert wait_gone(_P(stage)), f"disk fallback was not reaped: {stage}"
+
+
+@pytest.mark.invariant("INV-SHRED-01")
+def test_disk_fallback_overwrite_flag_is_unconditional_on_staging_root():
+    """The auto-disk-fallback path must still THREAD `--overwrite` through to the reaper: main.nim
+    bakes `reapWanted`/`reapTarget`/`reapOverwrite` from `sc.reap`/`stageRoot`/`sc.overwrite`
+    unconditionally, right after `stageZip` runs — BEFORE anything downstream cares whether `root`
+    (from `resolveStagingRoot`) resolved to /dev/shm or the persistent-cache disk fallback. There
+    is no code path that could special-case "landed on disk because of the RAM-fit gate" and drop
+    the shred.
+
+    This is the strongest test available from Python: whether the reaper actually shreds (vs. a
+    plain unlink) can only be observed by inspecting a file BEFORE it is deleted (see
+    tests/test_shred.py's harness), and the disk-fallback run above deletes its own evidence. So
+    this test instead proves, at the source level, that NOTHING conditions the overwrite bake on
+    which root was chosen — the one thing that WOULD make test_ephemeral_disk_fallback_is_reaped's
+    "shreds" claim false without this test noticing.
+
+    Red-path: make `reapOverwrite`'s assignment conditional on the staging root (e.g. only bake it
+    when `root == ramBackedRoot()`, silently dropping shred whenever the auto-fallback lands on
+    disk — precisely the case --overwrite exists to protect) and this goes red, because the three
+    assignments would no longer share `stageZip`'s own indentation (one of them would move inside
+    an `if`)."""
+    src = LAUNCHER_SRC.read_text()
+    indent_m = re.search(r"^([ \t]*)stageRoot = stageZip\(", src, re.M)
+    assert indent_m, "stageRoot = stageZip(...) not found — main.nim was restructured"
+    indent = indent_m.group(1)
+    for line in ("reapWanted = sc.reap", "reapTarget = stageRoot", "reapOverwrite = sc.overwrite"):
+        m = re.search(rf"^([ \t]*){re.escape(line)}", src, re.M)
+        assert m, f"{line!r} not found in main.nim — it was renamed or removed"
+        assert m.group(1) == indent, (
+            f"{line!r} is no longer set at stageZip's own indentation — it may now be "
+            f"conditioned on which staging root resolveStagingRoot picked, which would let the "
+            f"auto-disk-fallback silently drop --overwrite")
+    # And the reap call itself must be gated only on reapWanted/reapTarget, never on root choice.
+    reap_call = re.search(r"^[ \t]*if reapWanted and reapTarget\.len > 0:\s*\n[ \t]*reapDetached\("
+                          r"reapTarget, reapOverwrite\)", src, re.M)
+    assert reap_call, "reapDetached(reapTarget, reapOverwrite) is no longer gated only on reapWanted/reapTarget.len"

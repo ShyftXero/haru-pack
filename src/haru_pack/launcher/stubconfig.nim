@@ -32,10 +32,14 @@ type
     ramOnly*: bool       ## build-time --ephemeral (wire key still `ram_only`): best-effort
                          ## RAM-backed staging root
     basePath*: string    ## build-time --base-path: staging-root default ("" = normal cache)
-    unpackedBytes*: int  ## build-time size of the staged tree (docs/adr/0005): lets the stub
-                         ## size its RAM-fit check BEFORE staging. 0 = unknown (fail-safe to disk
-                         ## on auto). Emitted only alongside ram_only, so it never changes a
-                         ## non-ephemeral binary's stub-config bytes.
+    unpackedBytes*: int64  ## build-time size of the staged tree (docs/adr/0005): lets the stub
+                           ## size its RAM-fit check BEFORE staging. 0 = unknown (fail-safe to disk
+                           ## on auto). Emitted only alongside ram_only, so it never changes a
+                           ## non-ephemeral binary's stub-config bytes. int64 (BiggestInt), NOT the
+                           ## native `int` — `int` is 32 bits on the supported armv7 target, so a
+                           ## legitimate >2^31 payload read via a narrowing getInt() could truncate
+                           ## (or, with range checks on, fault) before ramWouldFit's own overflow
+                           ## guard ever runs. Read with getBiggestInt (see parseStubConfig).
 
 const
   SupportedStubConfigVersion* = 1
@@ -161,7 +165,13 @@ proc parseStubConfig*(raw: string): StubConfig =
     let n = t["unpacked_bytes"]
     if n.kind != TomlValueKind.Int:
       raise newException(ValueError, "stub-config: unpacked_bytes must be an integer")
-    result.unpackedBytes = n.getInt()
+    # getBiggestInt (int64), NOT getInt (native `int`, 32 bits on armv7) — getInt narrows via
+    # `int(n.intVal)`, which either silently truncates a >2^31 value (range checks off, the
+    # shipped -d:release case) or raises an uncatchable Defect (range checks on) BEFORE
+    # ramWouldFit's own overflow guard ever runs. parsetoml itself already refuses to parse a
+    # TOML integer literal wider than 64 bits (caught above as ValueError), so intVal is always
+    # a valid int64 here — no further range check is needed.
+    result.unpackedBytes = n.getBiggestInt()
 
 proc envForKnob*(sc: StubConfig, k: Knob): string =
   ## The single runtime resolution rule (INV-CANARY-01): knob K is read from

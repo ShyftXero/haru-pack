@@ -11,8 +11,10 @@
      honest note instead of filling RAM and dying mid-extract (the 512 MB CI runner / small VPS
      case).
   3. **Runtime override — a fifth canary knob, `EPHEMERAL`.** The target reads
-     `<canary>_EPHEMERAL`: `0` forces disk, `1` forces RAM (and skips the fit-check), unset is
-     auto. `1` works even on a binary not built `--ephemeral` (target autonomy).
+     `<canary>_EPHEMERAL`: it is 2-state, not 3 — `1` forces RAM (and skips the fit-check),
+     unset (or any other value, including `0`) is auto (fit-detection as in §2). There is
+     deliberately **no value that forces disk.** `1` works even on a binary not built
+     `--ephemeral` (target autonomy).
 - Builds ON TOP of ADR 0003 (stub-config section, versioned footer, per-knob canary map) and
   ADR 0004 (the `reap`/`ram_only`/`base_path` staging keys). It adds **no new footer version and
   no new `stub_config_version`** — see §back-compat.
@@ -67,8 +69,12 @@ fit  = /dev/shm free bytes ≥ need  AND  /proc/meminfo MemAvailable ≥ need
   (adversarial review W2). The launcher never stages to RAM it cannot account for.
 - **cgroup-aware.** A container or CI runner caps memory in a cgroup while `/proc/meminfo` still
   reports the HOST's RAM. The gate also reads the cgroup budget — v2 `memory.max` − `memory.current`,
-  v1 `memory.limit_in_bytes` − `memory.usage_in_bytes` — and requires `need` to clear it too; an
-  absent/`max`/unreadable limit falls through to `MemAvailable` (adversarial review W3).
+  v1 `memory.limit_in_bytes` − `memory.usage_in_bytes` — and requires `need` to clear it too
+  (adversarial review W3). A genuinely ABSENT limit file, or v2's explicit `max`, falls through to
+  `MemAvailable` (no cgroup limit in effect). A limit file that EXISTS but does not parse fails
+  CLOSED at the cgroup layer itself ("does not fit"), never falls through as if unlimited — the
+  same fail-safe posture as `shmFreeBytes`/`memAvailableBytes` (adversarial re-review: the earlier
+  version conflated "absent" and "corrupt" into the same not-gated answer).
 - On a non-Linux host there is no guaranteed RAM filesystem, so the auto path defers to the
   existing best-effort `ramBackedRoot()` (which itself notes the fallback to disk).
 
