@@ -39,8 +39,8 @@ def verify(exe: Path):
 def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
          force: bool = typer.Option(False, "--force", help="overwrite an existing haru_pack.toml")):
     """Scaffold a haru_pack.toml, pre-filled from discovery + any available venv."""
-    from . import scaffold
-    from .discovery import discover
+    from .. import scaffold
+    from ..discovery import discover
     out_dir = path if path.is_dir() else path.parent
     out = out_dir / "haru_pack.toml"
     if out.exists() and not force:
@@ -63,5 +63,5 @@ def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
 @app.command("machine-id")
 def machine_id_cmd():
     """Print this machine's id (give it to a vendor to bind an --encrypt license)."""
-    from .crypto import machine_id
+    from ..crypto import machine_id
     print(machine_id())

@@ -35,7 +35,7 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
     # `--wine` bundle step failed on a host the operator believed was fully set up
     # (INV-TOOL-01).
     caps = toolchain.capabilities()
-    from .targets import KNOWN_TARGETS
+    from ..targets import KNOWN_TARGETS
     # wine is a TOOL, not a target — listing it under "can build for" would be wrong, and
     # the flag to add it differs (`--with` vs `--target`).
     tgt_have = [c.name for c in caps if c.present and c.name in KNOWN_TARGETS]
@@ -54,8 +54,8 @@ def doctor(path: Path = typer.Argument(None, help="project/script to scan for ne
     print(f"                full list: `{prog()} bootstrap --list`", style="detail")
 
     if path is not None:
-        from . import scaffold
-        from .discovery import discover
+        from .. import scaffold
+        from ..discovery import discover
         try:
             disc = discover(path)
         except Exception as e:
