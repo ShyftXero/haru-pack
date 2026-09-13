@@ -110,18 +110,16 @@ def _bar(label: str, n: int, total: int, width: int = 28) -> str:
     return f"  {label:14} {n:5}  {'#' * filled}{'.' * (width - filled)}"
 
 
-def format_analysis(a: dict) -> str:
-    L = ["=" * W, f"busybody analysis — {a['run']}", "=" * W, ""]
+def _setup_failure_block(a: dict) -> list:
+    """The one state where zero findings means nothing at all."""
+    return ["SETUP FAILURE \u2014 the harness never reached the starting line, so there are",
+            "no results. Zero findings here does not mean zero problems.", "",
+            f"  {a['setup_failure'][:W - 4]}", ""]
 
-    if a["state"] == "SETUP FAILURE":
-        L += ["SETUP FAILURE — the harness never reached the starting line, so there are",
-              "no results. Zero findings here does not mean zero problems.", "",
-              f"  {a['setup_failure'][:W - 4]}", ""]
-        return "\n".join(L)
 
-    n_cases, n_fix = len(a["cases"]), len(a["fixtures"])
-    distinct = len(a["fingerprints"])
-    L += [f"state        : {a['state']}",
+def _summary_block(a: dict, n_cases: int, n_fix: int) -> list:
+    """Counts first, then whichever caveat applies to them."""
+    L = [f"state        : {a['state']}",
           f"case runs    : {n_cases}",
           f"fixtures     : {n_fix}  ({', '.join(a['fixtures'][:6])}"
           + (f", +{n_fix - 6} more" if n_fix > 6 else "") + ")",
@@ -148,8 +146,20 @@ def format_analysis(a: dict) -> str:
         L += ["  *** INTERRUPTED — the numbers above are what completed, not the suite ***",
               f"  {n_cases} of {planned} planned run(s) finished.", ""]
 
-    # ---------------------------------------------------------------- the census
-    L += ["-" * W,
+    return L
+
+
+def _census_block(a: dict, n_cases: int, n_fix: int, distinct: int) -> list:
+    """Did this sweep buy anything, or confirm one fact N times?
+
+    The distinction this block exists to keep straight: a FINGERPRINT folds in the
+    diagnostic TEXT, so two runs with the same outcome and different messages count as
+    distinct results. That is the right granularity for triage and the wrong one for "did
+    the sweep buy anything" \u2014 for that, only a differing OUTCOME counts. An earlier
+    version branched on the fingerprint count and printed "0 case(s) DIVERGED" on a sweep
+    where nothing had.
+    """
+    L = ["-" * W,
           "FINGERPRINT CENSUS — did this sweep buy anything?",
           "-" * W, "",
           f"  {n_cases} case run(s) produced {distinct} distinct result(s).", ""]
@@ -195,24 +205,32 @@ def format_analysis(a: dict) -> str:
                   "  confirmed the same fact once per fixture."]
         L.append("")
 
-    # ---------------------------------------------------------------- divergence
-    if n_fix > 1:
-        L += ["-" * W, "DIVERGENCE — cases whose answer depends on the package", "-" * W, ""]
-        if not a["diverged"]:
-            L += ["  (none)", ""]
-        else:
-            for name, outs in sorted(a["diverged"].items()):
-                groups: dict = collections.defaultdict(list)
-                for fix, out in outs.items():
-                    groups[out].append(fix.replace("fixture-", ""))
-                L.append(f"  {name}")
-                for out, fixes in sorted(groups.items()):
-                    shown = ", ".join(sorted(fixes)[:8])
-                    more = f" (+{len(fixes) - 8})" if len(fixes) > 8 else ""
-                    L.append(f"      {out:12} {shown}{more}")
-                L.append("")
+    return L
 
-    # ---------------------------------------------------------------- distributions
+
+def _divergence_block(a: dict) -> list:
+    """The cases whose answer actually depends on which package was packed."""
+    L = []
+    L += ["-" * W, "DIVERGENCE — cases whose answer depends on the package", "-" * W, ""]
+    if not a["diverged"]:
+        L += ["  (none)", ""]
+    else:
+        for name, outs in sorted(a["diverged"].items()):
+            groups: dict = collections.defaultdict(list)
+            for fix, out in outs.items():
+                groups[out].append(fix.replace("fixture-", ""))
+            L.append(f"  {name}")
+            for out, fixes in sorted(groups.items()):
+                shown = ", ".join(sorted(fixes)[:8])
+                more = f" (+{len(fixes) - 8})" if len(fixes) > 8 else ""
+                L.append(f"      {out:12} {shown}{more}")
+            L.append("")
+    return L
+
+
+def _distribution_block(a: dict, n_cases: int) -> list:
+    """Outcomes, blame, and the slowest cases."""
+    L = []
     L += ["-" * W, "OUTCOMES", "-" * W, ""]
     for outcome, n in a["by_outcome"].most_common():
         L.append(_bar(outcome, n, n_cases))
@@ -230,21 +248,50 @@ def format_analysis(a: dict) -> str:
     for name, secs in a["slowest"]:
         L.append(f"  {name:44} {secs:6.1f}s")
     L.append("")
+    return L
 
+
+def _findings_block(a: dict) -> list:
+    """What this sweep actually found, and where the full explanations live."""
+    L = []
+    L += ["-" * W, f"FINDINGS ({len(a['findings'])})", "-" * W, ""]
+    for f in a["findings"]:
+        L.append(f"  [{f.get('severity', '?'):8}] {f['outcome']:12} "
+                 f"{f.get('fixture', '?')} {f['persona']}/{f['name']}")
+        if f.get("inv"):
+            L.append(f"             invariant: {f['inv']}")
+    L += ["", f"  Full explanations: {(a['dir'] / 'report.txt')}", ""]
+    return L
+
+
+def _reproduce_block(a: dict) -> list:
+    """Never end a report without the command that regenerates it."""
+    return ["-" * W,
+            "REPRODUCE THIS",
+            "-" * W, "",
+            f"  python tools/busybody.py --analyze {a['run']}",
+            "  python tools/busybody.py --history         # every run, interrupted ones marked",
+            "  python tools/busybody.py --triage          # findings grouped across runs",
+            ""]
+
+
+def format_analysis(a: dict) -> str:
+    """The whole report, as text. A pure function of the analysis dict.
+
+    Each section is its own function so a change to the census wording cannot reach into
+    the divergence table, and so the sections can be read one at a time.
+    """
+    L = ["=" * W, f"busybody analysis \u2014 {a['run']}", "=" * W, ""]
+    if a["state"] == "SETUP FAILURE":
+        return "\n".join(L + _setup_failure_block(a))
+
+    n_cases, n_fix = len(a["cases"]), len(a["fixtures"])
+    L += _summary_block(a, n_cases, n_fix)
+    L += _census_block(a, n_cases, n_fix, len(a["fingerprints"]))
+    if n_fix > 1:
+        L += _divergence_block(a)
+    L += _distribution_block(a, n_cases)
     if a["findings"]:
-        L += ["-" * W, f"FINDINGS ({len(a['findings'])})", "-" * W, ""]
-        for f in a["findings"]:
-            L.append(f"  [{f.get('severity', '?'):8}] {f['outcome']:12} "
-                     f"{f.get('fixture', '?')} {f['persona']}/{f['name']}")
-            if f.get("inv"):
-                L.append(f"             invariant: {f['inv']}")
-        L += ["", f"  Full explanations: {(a['dir'] / 'report.txt')}", ""]
-
-    L += ["-" * W,
-          "REPRODUCE THIS",
-          "-" * W, "",
-          f"  python tools/busybody.py --analyze {a['run']}",
-          "  python tools/busybody.py --history         # every run, interrupted ones marked",
-          "  python tools/busybody.py --triage          # findings grouped across runs",
-          ""]
+        L += _findings_block(a)
+    L += _reproduce_block(a)
     return "\n".join(L)
