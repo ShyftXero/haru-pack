@@ -5,6 +5,33 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-12
 
+### Features — `--emit-nim`: a reproduction kit for the launcher stub
+
+- **`haru-pack build … --emit-nim DIR`** writes a kit alongside the finished binary so you can
+  inspect, modify, and manually recompile the launcher stub. The packed binary is still
+  produced; `DIR` gets the launcher's Nim source (byte-identical to what haru-pack compiles),
+  this build's `payload.bin` and `stubconfig.bin`, a portable `zig-cc` shim, a stdlib-only
+  `assemble.py`, and a `compile.sh` that recompiles the stub and reassembles the binary.
+- **The stub is generic; the config is data.** Encryption, licence policy, reap/ephemeral,
+  remote-fetch and injects are not compiled into the Nim — they live in `payload.bin` (policy
+  inside it) and `stubconfig.bin`, which the always-present stub functions read at runtime. So
+  the kit is source + those two blobs + a reassembler. Edit `stub/*.nim`, run `sh compile.sh`,
+  and `assemble.py` recomputes the footer offsets (the payload offset is the stub's length, so
+  a modified stub is reassembled, not patched).
+- **Faithful, and honest about the limit (INV-EMIT-01).** A real recompile of the emitted stub
+  yields a WORKING binary — its overlay verifies and its payload + stub-config are this build's
+  exact bytes — proven by actually running the emitted `compile.sh` with nim+zig in the tests.
+  Byte-for-byte identity of the launcher is **not** claimed (a Nim/C recompile is not
+  reproducible in general). The `nim c` flag set is defined once (`emit.nim_target_flags`) and
+  shared with the real build, so the recipe cannot silently drift. Emitting `payload.bin`
+  exposes exactly what the binary already exposes (encrypted stays encrypted); the build secret
+  is never written to any kit file.
+- **Assumes zig, no build-host paths baked in.** `compile.sh` reproduces haru-pack's own `nim c`
+  flag set for the resolved target (host by default) and drives `${HARU_ZIG:-zig} cc` through
+  the shim; Nim resolves via `${HARU_NIM:-nim}` — no absolute home/username paths, so the kit
+  is shareable. An unsafe emit target (symlink, or a foreign non-empty `stub/`) is refused, and
+  a kit failure is a warning, never a build failure.
+
 ### Tooling — BusyBody run-control hardening (adopted from lotek)
 
 - **Single-instance run control (INV-CHAOS-13).** Two busybody sweeps each stage a real

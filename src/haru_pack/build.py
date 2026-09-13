@@ -4,6 +4,7 @@ import re as _re
 import os, secrets, shutil, string, subprocess, tempfile
 from pathlib import Path
 from . import tomlio, discovery, crypto, toolchain
+from . import emit as emit_mod
 from .paths import launcher_src_dir
 from .payload import build_payload_zip
 from .overlay import attach, FOOTER_FLAG_ENCRYPTED
@@ -453,24 +454,23 @@ def compile_launcher(nim: str, target, workdir: Path, cc: str = "", log=None) ->
     if not src.exists():
         raise BuildError(f"launcher source missing: {src}")
     out = workdir / ("launcher" + tgt.exe_suffix)
-    args = [nim, "c", "-d:release", f"--nimcache:{workdir/'nimcache'}", f"--out:{out}"]
 
     provider = resolve_cc(cc, target=tgt, log=log)
+    shim = None
     if provider == "zig":
         # A generated shim, not a bare `zig cc`: Nim wants ONE executable for the compiler
         # key, and one GCC-only flag has to be translated per invocation. Nim also ignores
         # the generic `--gcc.exe` for a cross target and reads `--<cpu>.<os>.gcc.exe`, which
-        # is why the keys below are spelled out per target.
+        # is why the keys are spelled out per target inside emit.nim_target_flags.
         zig = toolchain.find_managed_zig() or toolchain.install_zig(
             log=log or (lambda _m: None))
         shim = toolchain.zig_cc_shim(str(zig), tgt.zig_triple(), workdir / "zig-cc")
-        cpu, os_ = tgt.nim_cpu, tgt.nim_os
-        args += [f"--cpu:{cpu}", f"--os:{os_}",
-                 f"--{cpu}.{os_}.gcc.exe:{shim}",
-                 f"--{cpu}.{os_}.gcc.linkerexe:{shim}"]
-    else:
-        args += tgt.nim_flags()          # empty for a native build
-    args.append(str(src))
+    # The per-target flag set is defined ONCE, in emit.nim_target_flags, and reused by the
+    # --emit-nim kit's compile.sh, so the emitted recipe cannot drift from this build
+    # (INV-EMIT-01). Only the ambient nim/nimcache/out/source path is added here.
+    args = [nim, "c", *emit_mod.nim_target_flags(tgt, provider,
+                                                 shim_ref=(str(shim) if shim else None)),
+            f"--nimcache:{workdir/'nimcache'}", f"--out:{out}", str(src)]
     r = subprocess.run(args, capture_output=True, text=True)
     if r.returncode != 0 or not out.exists():
         raise BuildError(f"nim compile failed (cc={provider}):\n"
@@ -833,7 +833,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
           base_path: str = "", source_url: str = "", env_append=None,
-          cc: str = "", log=None) -> dict:
+          cc: str = "", emit_nim: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
@@ -1024,4 +1024,19 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                          ("tracer", "dropped_files", "freed_bytes",
                           "payload_bytes_before", "payload_bytes_after")}
         info["shake"]["report"] = str(shake_mod.write_report(shake_report, out))
+    # --emit-nim: a reproduction kit alongside the finished binary. The stub is generic, so
+    # the kit is its Nim source plus the exact DATA this build attached (payload + stub-config)
+    # and a script that recompiles and reassembles them. `flags` and `source_url` are the same
+    # values attach() used above (INV-EMIT-01). The binary is ALREADY written and chmod'd, so a
+    # kit failure is reported as a distinct kit warning, never as a build failure (W2b).
+    if emit_nim:
+        try:
+            dest = emit_mod.emit_nim_kit(Path(emit_nim), tgt=tgt, provider=provider,
+                                         payload=payload, stub_config=sc_bytes, flags=flags,
+                                         remote=bool(source_url), out_name=out.name, log=say)
+            info["emit_nim"] = str(dest)
+        except (emit_mod.EmitError, OSError) as e:
+            info["emit_nim_error"] = str(e)
+            say(f"WARNING: --emit-nim kit was not written: {e}\nThe packed binary at "
+                f"{out} is unaffected and ready to use.")
     return info
