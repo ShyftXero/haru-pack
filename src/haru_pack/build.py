@@ -7,7 +7,7 @@ from . import tomlio, discovery, crypto, toolchain
 from . import emit as emit_mod
 from .paths import launcher_src_dir
 from .payload import build_payload_zip
-from .overlay import attach, FOOTER_FLAG_ENCRYPTED
+from .overlay import attach, FOOTER_FLAG_ENCRYPTED, FOOTER_FLAG_REMOTE
 from .bootstrap import find_nim, detect_c_toolchain
 from .tiers import apply_tier, bundles_uv
 from .sources import Sources
@@ -454,6 +454,11 @@ def compile_launcher(nim: str, target, workdir: Path, cc: str = "", log=None) ->
     if not src.exists():
         raise BuildError(f"launcher source missing: {src}")
     out = workdir / ("launcher" + tgt.exe_suffix)
+    # Nim writes its build manifest (nimcache/launcher.json: the exact per-file compile
+    # commands + the link command) on every build, and leaves the generated C in the
+    # nimcache. That is what `--emit-c` (see build()) turns into a zig compile.sh — the recipe
+    # is the one Nim actually used, never a hand-written approximation (INV-EMIT-02). No extra
+    # Nim flag is needed for that; `--genScript` would SKIP linking and break this real build.
 
     provider = resolve_cc(cc, target=tgt, log=log)
     shim = None
@@ -833,8 +838,19 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
           base_path: str = "", source_url: str = "", env_append=None,
-          cc: str = "", emit_nim: str = "", log=None) -> dict:
+          cc: str = "", emit_c: str = "", emit_nim: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
+    # --emit-c: a C reproduction kit written beside the binary. Resolve the directory now
+    # (before any tempdir/chdir) so a relative path lands where the user expects, and validate
+    # it up front so an unsafe/occupied target fails FAST — before the whole build runs, never
+    # after a binary has already been written (INV-BASE-01 posture; see emit.validate_emit_dir).
+    emit_c_dir = Path(emit_c).resolve() if emit_c else None
+    if emit_c_dir is not None:
+        from . import emit as _emit
+        try:
+            _emit.validate_emit_dir(emit_c_dir)
+        except _emit.EmitError as e:
+            raise BuildError(str(e)) from e
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim = find_nim()
     if not nim:
@@ -999,6 +1015,30 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 f"serve these bytes unchanged.")
         else:
             info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes)
+        if emit_c_dir is not None:
+            # Emit the reproduction kit AFTER the binary is written and from the SAME bytes:
+            # the C haru just compiled (nimcache in tdp), plus the exact payload + stub-config
+            # that were attached, plus the assembler that reproduces this overlay. Footer flags
+            # include the remote bit iff this was a remote-fetch build, matching attach.
+            #
+            # A kit failure here must NOT report an already-successful build as failed — the
+            # binary exists and is correct. So an EmitError becomes a loud warning, not a raise
+            # (the up-front validate_emit_dir already caught the likely causes before the build).
+            from . import emit
+            exe_name = "launcher" + tgt.exe_suffix
+            try:
+                emit.emit_c_sources(tdp / "nimcache", emit_c_dir, tgt.zig_triple(),
+                                    exe=exe_name, log=log)
+                emit.finish_kit(emit_c_dir, payload=payload, stub_config=sc_bytes,
+                                flags=flags | (FOOTER_FLAG_REMOTE if source_url else 0),
+                                remote=bool(source_url), exe=exe_name, out_name=out.name,
+                                triple=tgt.zig_triple(), encrypted=bool(enc["enabled"]),
+                                source_url=source_url)
+                info["emit_c"] = str(emit_c_dir)
+            except emit.EmitError as e:
+                say(f"WARNING: {out} built successfully, but the --emit-c kit is incomplete: "
+                    f"{e}")
+                info["emit_c_error"] = str(e)
     try:
         out.chmod(0o755)
     except Exception:

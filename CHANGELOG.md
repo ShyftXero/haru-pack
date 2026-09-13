@@ -5,32 +5,40 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-12
 
-### Features — `--emit-nim`: a reproduction kit for the launcher stub
+### Features — `--emit-nim` and `--emit-c`: reproduction kits for the launcher stub
 
 - **`haru-pack build … --emit-nim DIR`** writes a kit alongside the finished binary so you can
   inspect, modify, and manually recompile the launcher stub. The packed binary is still
   produced; `DIR` gets the launcher's Nim source (byte-identical to what haru-pack compiles),
   this build's `payload.bin` and `stubconfig.bin`, a portable `zig-cc` shim, a stdlib-only
   `assemble.py`, and a `compile.sh` that recompiles the stub and reassembles the binary.
-- **The stub is generic; the config is data.** Encryption, licence policy, reap/ephemeral,
-  remote-fetch and injects are not compiled into the Nim — they live in `payload.bin` (policy
-  inside it) and `stubconfig.bin`, which the always-present stub functions read at runtime. So
-  the kit is source + those two blobs + a reassembler. Edit `stub/*.nim`, run `sh compile.sh`,
-  and `assemble.py` recomputes the footer offsets (the payload offset is the stub's length, so
-  a modified stub is reassembled, not patched).
-- **Faithful, and honest about the limit (INV-EMIT-01).** A real recompile of the emitted stub
-  yields a WORKING binary — its overlay verifies and its payload + stub-config are this build's
-  exact bytes — proven by actually running the emitted `compile.sh` with nim+zig in the tests.
-  Byte-for-byte identity of the launcher is **not** claimed (a Nim/C recompile is not
-  reproducible in general). The `nim c` flag set is defined once (`emit.nim_target_flags`) and
-  shared with the real build, so the recipe cannot silently drift. Emitting `payload.bin`
-  exposes exactly what the binary already exposes (encrypted stays encrypted); the build secret
-  is never written to any kit file.
-- **Assumes zig, no build-host paths baked in.** `compile.sh` reproduces haru-pack's own `nim c`
-  flag set for the resolved target (host by default) and drives `${HARU_ZIG:-zig} cc` through
-  the shim; Nim resolves via `${HARU_NIM:-nim}` — no absolute home/username paths, so the kit
-  is shareable. An unsafe emit target (symlink, or a foreign non-empty `stub/`) is refused, and
-  a kit failure is a warning, never a build failure.
+- **`haru-pack build … --emit-c DIR`** writes the same kind of kit built instead from the Nim C
+  backend's own output for your `--target`: the stub as plain `.c`/`.h` files, `nimbase.h` +
+  the xz headers vendored so it needs **no Nim toolchain** — only a `zig` (on `PATH`, or via
+  `HARU_ZIG`). `compile.sh` is derived from Nim's own build manifest (per-file flags and all),
+  never a hand-written approximation, so nimcrypto's SHA-2 fast paths (`-mssse3`/`-mavx2`)
+  survive the translation to zig.
+- **The stub is generic; the config is data**, for both kits. Encryption, licence policy,
+  reap/ephemeral, remote-fetch and injects are not compiled into the Nim/C — they live in
+  `payload.bin` (policy inside it) and `stubconfig.bin`, which the always-present stub
+  functions read at runtime. So each kit is source + those two blobs + a reassembler.
+  `--emit-nim` and `--emit-c` share the SAME reassembler (`assemble.py` + `kit.json`) — one
+  implementation, so the two flags cannot drift on what "reassemble" means.
+- **Faithful, and honest about the limit (INV-EMIT-01 / INV-EMIT-02).** A real recompile of the
+  emitted stub/C yields a WORKING binary — its overlay verifies and its payload + stub-config
+  are this build's exact bytes — proven by actually running the emitted `compile.sh` with
+  nim(+zig) in the tests. Byte-for-byte identity of the launcher is **not** claimed (a Nim/C
+  recompile is not reproducible in general). The `nim c` flag set is defined once
+  (`emit.nim_target_flags`) and shared with the real build, so `--emit-nim`'s recipe cannot
+  silently drift; `--emit-c`'s recipe comes from Nim's own build manifest for the same reason.
+  Emitting `payload.bin` exposes exactly what the binary already exposes (encrypted stays
+  encrypted, and a remote build's kit gets the same `<out>.haru-payload` sidecar the real build
+  ships); the build secret is never written to any kit file (INV-SECRET-02).
+- **Assumes zig, no build-host paths baked in.** Both kits' `compile.sh` drive
+  `${HARU_ZIG:-zig} cc` through a relocatable shim (`toolchain.zig_cc_shim`); `--emit-nim`
+  additionally resolves Nim via `${HARU_NIM:-nim}`. No absolute home/username paths, so a kit
+  is shareable. An unsafe emit target (symlink, or a non-empty/foreign directory) is refused up
+  front (INV-BASE-01 posture), and a kit failure is a warning, never a build failure.
 
 ### Tooling — BusyBody run-control hardening (adopted from lotek)
 

@@ -79,7 +79,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
                reap=False, ephemeral=False, ram_only=False, overwrite=False, base_path="",
-               source_url="", env_append=None, cc="", emit_nim="") -> None:
+               source_url="", env_append=None, cc="", emit_c="", emit_nim="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -126,7 +126,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          obfuscate=obfuscate,
                          obfuscate_args=[a for a in obfuscate_args.split() if a],
                          entry_point=entry_point, shake=shake,
-                         shake_keep=list(shake_keep or []), cc=cc,
+                         shake_keep=list(shake_keep or []), cc=cc, emit_c=emit_c,
                          env_canary=env_canary, env_canary_random=env_canary_random,
                          stub_env_secret_canary=stub_env_secret_canary,
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
@@ -160,6 +160,12 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                     f"{sh['tracer']} — receipt {sh['report']}", style="ok")
     print(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
                 f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", style="ok")
+    if info.get("emit_c"):
+        print(f"emitted C reproduction kit: {info['emit_c']}  (recompile: sh compile.sh)",
+              style="ok")
+    elif info.get("emit_c_error"):
+        print(f"emit-c kit NOT written: {info['emit_c_error']}  (the binary above is fine)",
+              style="warn")
     if info.get("emit_nim"):
         print(f"emit-nim kit: {info['emit_nim']}  (edit stub/, then `sh compile.sh`)", style="ok")
     elif info.get("emit_nim_error"):
@@ -508,6 +514,11 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
               help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
                    "Lives in the payload — use --encrypt to hide a secret value"),
+          emit_c: str = typer.Option("", "--emit-c", metavar="DIR",
+              help="also write a self-contained C reproduction kit to DIR: the launcher stub "
+                   "as C (recompiles with zig alone, no Nim), this build's payload + "
+                   "stub-config, and a compile.sh that rebuilds the exact binary. For "
+                   "inspecting, modifying, or manually compiling the stub"),
           emit_nim: str = typer.Option("", "--emit-nim", metavar="DIR",
               help="also write a Nim reproduction kit to DIR (the launcher's Nim source, this "
                    "build's payload + stub-config, a portable zig shim, and a compile.sh that "
@@ -533,7 +544,7 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_base_path_canary=stub_env_base_path_canary,
                reap=reap, ephemeral=ephemeral, ram_only=ram_only, overwrite=overwrite,
                base_path=base_path, source_url=source_url, env_append=env_append,
-               emit_nim=emit_nim)
+               emit_c=emit_c, emit_nim=emit_nim)
 
 @app.command()
 def verify(exe: Path):
