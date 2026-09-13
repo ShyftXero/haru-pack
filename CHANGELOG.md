@@ -30,18 +30,26 @@ change one thing.
   constructed inputs and match exactly; busybody still registers the same 80 cases across the
   same 21 personas, and the trait catalogue still holds 42.
 
-Four latent bugs surfaced on the way, each with a guard so the class cannot recur:
+Four things the split exposed or introduced. Each has a guard now, because a refactor
+that only fixes its own breakage teaches nobody anything:
 
-- `build/` in `.gitignore` — and in a very common global `core.excludesFile` — matched
-  `src/haru_pack/build/`, so `git add` silently kept the entire new package untracked. The
-  root artifacts are now anchored (`/build/`) and the package re-included explicitly.
-- Four relative imports broke silently when their files moved into subpackages. One was
-  inside a `try/except Exception` and had been making every project look unnamed;
+- **`build/` in `.gitignore`** — and in a very common global `core.excludesFile` — matched
+  `src/haru_pack/build/`, so `git add` reported nothing at all while keeping the entire new
+  package untracked. This one was a real trap waiting rather than something the split
+  caused: any future `build/` package would have hit it. The root artifacts are now anchored
+  (`/build/`) and the package is re-included explicitly.
+- **Seven relative imports across three files broke silently**, because moving a file into
+  a subpackage changes what `from . import x` means. None raised at import time — the ones
+  that hurt were late-bound inside a function, so nothing ran them until someone ran that
+  exact command. One landed inside a `try/except Exception`, where an ImportError is
+  indistinguishable from a malformed pyproject and made every project look unnamed;
   `from . import scaffold` inside `haru-pack init` was covered by nothing at all.
   `tests/test_imports_resolve.py` now statically resolves every relative import in the
   package, so a function-local one is no harder to see than a top-level one.
-- A command module imported only so its decorators run looks like an unused import.
-  `tests/test_cli_surface.py` asserts the full subcommand set and renders `--help` for each.
+- **A command module imported only so its decorators run looks like an unused import**, and
+  deleting one removes a subcommand with no error anywhere. That hazard is new — it did not
+  exist while `cli` was one file. `tests/test_cli_surface.py` asserts the full subcommand set
+  and renders `--help` for each, which is what caught two NameErrors during the move.
 - `test_the_cli_does_not_import_richs_print_directly` was reading `inspect.getsource(cli)`,
   which on a package returns only `__init__.py`. It now parses the imports of every module in
   the package — and the parsing, rather than substring matching, is what made it see

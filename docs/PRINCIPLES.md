@@ -95,10 +95,16 @@ module it excuses is the one that got too big precisely because nobody was count
 
 The reason this matters for the other two audiences, who never read the source: a module
 nobody can hold in their head is where a silent bug lives. Every refusal in this file
-depends on someone being able to see that it is still wired up. Three of the four god
-modules had already grown a second responsibility that nobody had named, and the split
-surfaced four broken imports — one of them inside a `try/except Exception` that had been
-quietly returning the wrong answer.
+depends on someone being able to see that it is still wired up.
+
+Splitting them was not free, and the honest version of the cost is worth recording. Moving
+a file into a subpackage silently changes what `from . import x` means, and it broke seven
+relative imports across three files. None of them raised at import: the ones that hurt were
+late-bound, inside a function, so nothing ran them until someone ran that exact command —
+and one landed inside a `try/except Exception` where an ImportError is indistinguishable
+from a malformed config. That is now a static check
+(`tests/test_imports_resolve.py`), which is the shape every finding on this page should
+take: not "we were careful", but "the next one cannot get past here".
 
 **What to do when the check fires.** Almost never "shorten it". Name the second
 responsibility the module grew and move that out; if it is a subsystem, make it a package
