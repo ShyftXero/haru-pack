@@ -58,9 +58,11 @@ def test_empty_project_is_not_ambiguous(tmp_path):
     assert not issubclass(AmbiguousProject, EmptyProject)
 
 
-def test_build_refuses_pyc_only_source_without_traceback(tmp_path):
+def test_build_refuses_pyc_only_source_without_traceback(tmp_path, stub_toolchain):
+    # stub_toolchain makes Nim "present" so build() reaches discovery rather than stopping at
+    # its earlier "Nim not found" gate — the point here is the discovery refusal, on a box
+    # (like CI) with no real Nim.
     proj = _pyc_only(tmp_path / "proj")
-    # Refusal happens in discovery, upstream of any toolchain, so this needs no Nim.
     with pytest.raises(EmptyProject):
         build(proj, tmp_path / "out")
 
