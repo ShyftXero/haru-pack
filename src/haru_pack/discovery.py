@@ -55,6 +55,23 @@ class AmbiguousProject(ValueError):
         self.kind, self.name, self.source, self.python = kind, name, source, python
 
 
+class EmptyProject(ValueError):
+    """Nothing packable at the path: no pyproject.toml and no `.py` files.
+
+    Distinct from `AmbiguousProject` (too MANY defensible entrypoints) — here there is
+    NOTHING to pack: a directory of only compiled `.pyc` files, or an empty one. It used to
+    fall through to a bare `ValueError`, which no caller caught, so the build died with a raw
+    traceback instead of refusing intelligibly. busybody's `greenhorn_source_is_a_pyc` case
+    turned that up (CRASHED, not REFUSED). A `.pyc`-only tree cannot be discovered — and
+    unlike ambiguity, `--entry-point` cannot rescue it, because there is no source to point
+    at — so this refuses outright (INV-BUILD-01 / INV-BUILD-03).
+    """
+
+    def __init__(self, message: str, *, source=None):
+        super().__init__(message)
+        self.source = source
+
+
 def discover(path) -> dict:
     """Return {kind, name, app_subdir, entrypoint, python, source} for a project or script.
 
@@ -131,4 +148,8 @@ def discover(path) -> dict:
             f"will not guess which one is the program.", [p.name for p in pys],
             kind="script", name=path.name or "app", source=path)
 
-    raise ValueError(f"can't discover a project in {path}: no pyproject.toml and no .py files")
+    raise EmptyProject(
+        f"nothing to pack in {path}: no pyproject.toml and no .py files. Point haru-pack at "
+        f"a script (e.g. app.py), a project directory with a pyproject.toml, or a folder of "
+        f".py files. A directory of only compiled .pyc files, or an empty directory, cannot "
+        f"be discovered.", source=path)
