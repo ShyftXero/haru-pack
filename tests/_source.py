@@ -35,3 +35,28 @@ def module_source(dotted: str) -> str:
     """Source of one first-party module, e.g. `haru_pack.build.declare`."""
     path = REPO / "src" / Path(*dotted.split("."))
     return path.with_suffix(".py").read_text(encoding="utf-8")
+
+
+TOOLS = REPO / "tools"
+
+
+def harness_source() -> str:
+    """Every `tools/busybody*.py` module, concatenated, sorted by filename.
+
+    The busybody harness became twenty-odd flat modules on 2026-09-13
+    (INV-MODULARITY-01). Several tests assert that a piece of WIRING exists *somewhere in
+    the harness* — that `--analyze` is reachable, that the FATAL floor is what a composed
+    stack is judged against. Pointing each of those at whichever file the code landed in
+    would make them brittle against the next split, and re-pointing them one at a time is
+    how a source-shape assertion quietly stops covering anything.
+    """
+    parts = []
+    for path in sorted(TOOLS.glob("busybody*.py")):
+        parts.append(f"\n# \u2500\u2500 {path.name} \u2500\u2500\n")
+        parts.append(path.read_text(encoding="utf-8"))
+    return "".join(parts)
+
+
+def harness_modules() -> list[Path]:
+    """Every `tools/busybody*.py` path, for a test that must parse each separately."""
+    return sorted(TOOLS.glob("busybody*.py"))

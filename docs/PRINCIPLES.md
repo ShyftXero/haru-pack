@@ -65,3 +65,43 @@ refuses unless there is an environment to prove absence against.
 **When two audiences conflict, the later number wins.** A little more work for us, or one
 more flag for the operator, is worth almost any reduction in the chance that the recipient's
 double-click does nothing.
+
+## No god modules
+
+This one is downstream of user 1, and it should have been written down on day one instead
+of on the day four of them had to be taken apart.
+
+A god module is not just a long file. It is the long file *everything goes through* — the
+widest and heaviest thing in the tree at the same time, that no change can route around.
+By 2026-09-13 haru-pack had four: `build.py` at 735 statements importing sixteen of the
+package's twenty-two modules, `tools/busybody.py` at 3393, `shake.py` at 536, `cli.py` at
+483. None of them got that way by anyone deciding to write a 1177-line file. They got that
+way one reasonable addition at a time, because nothing was counting.
+
+The rule, and it is machine-checked as `INV-MODULARITY-01/02/03` rather than left as
+advice:
+
+> **A module may be the hub, or it may hold the work. Not both.**
+
+300 statements per module, 80 per function, and a module that imports more than eight
+first-party modules gets 150. Statements, not lines — comments and docstrings are free,
+because the comments here are the audit trail for why a refusal exists and a line cap would
+make deleting an explanation the cheapest way to pass. Write as much prose as the decision
+deserves.
+
+There is no allowlist, and there must not be one. An allowlist is how a budget becomes a
+formality: the first exception is always justified, the tenth is never questioned, and the
+module it excuses is the one that got too big precisely because nobody was counting.
+
+The reason this matters for the other two audiences, who never read the source: a module
+nobody can hold in their head is where a silent bug lives. Every refusal in this file
+depends on someone being able to see that it is still wired up. Three of the four god
+modules had already grown a second responsibility that nobody had named, and the split
+surfaced four broken imports — one of them inside a `try/except Exception` that had been
+quietly returning the wrong answer.
+
+**What to do when the check fires.** Almost never "shorten it". Name the second
+responsibility the module grew and move that out; if it is a subsystem, make it a package
+and re-export the entry points so no caller changes. For a long function, the phases are
+usually already there and simply have no names — give them names and the caller becomes the
+readable summary of what happens.
