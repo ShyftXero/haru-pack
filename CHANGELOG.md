@@ -5,6 +5,21 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-13
 
+### Fixes — the build refuses degenerate inputs instead of crashing with a traceback
+
+- A project directory with **no `pyproject.toml` and no `.py` files** (e.g. only compiled
+  `.pyc` files, or an empty directory) now refuses cleanly with an actionable message
+  (`discovery.EmptyProject`) instead of a bare `ValueError` traceback. Unlike an *ambiguous*
+  project, `--entry-point` cannot rescue one with no source, so it refuses outright.
+- An **`-o` path whose parent directory does not exist** now has that directory created (or,
+  if it cannot be, a clean `BuildError`) instead of dying with a raw `FileNotFoundError` when
+  the final binary is written.
+- Both were surfaced by busybody's composed `greenhorn` cases (`greenhorn_source_is_a_pyc`,
+  `greenhorn_output_into_missing_dir`), which graded them `CRASHED` — the FATAL class — because
+  the compose contract is "refuse intelligibly under any stack of hostile conditions". They are
+  build-side (upstream of Nim), so they reproduced identically on x86 and aarch64
+  (INV-BUILD-01 / INV-BUILD-03).
+
 ### Internal — no god modules, and a check that says so (INV-MODULARITY-01/02/03)
 
 Nothing here changes what haru-pack does. It changes how much of it you have to read to

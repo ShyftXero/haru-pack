@@ -21,7 +21,7 @@ from pathlib import Path
 from .. import crypto
 from ..bootstrap import detect_c_toolchain, find_nim
 from ..obfuscate import ObfuscationError, get_engine      # noqa: F401  (ObfuscationError re-export)
-from ..overlay import FOOTER_FLAG_ENCRYPTED, attach
+from ..overlay import FOOTER_FLAG_ENCRYPTED
 from ..payload import build_payload_zip
 from ..targets import Target
 from . import advisories, emitkit, receipt
@@ -32,8 +32,9 @@ from .declare import _resolve
 from .errors import BuildError
 from .geo import build_geo_policy
 from .inject import resolve_injects
-from .staging import resolve_base_path, resolve_source_url
+from .staging import _attach_payload, resolve_base_path, resolve_source_url
 from .tree import _staged_tree_bytes
+from .validate import prepare_output_dir
 from .. import shake as shake_mod
 
 
@@ -81,28 +82,6 @@ def _record_obfuscation(manifest: dict, obfuscate: str, obfuscate_args, tier: st
     advisories.announce_obfuscation_tier(obfuscate=obfuscate, tier=tier, python=python, say=say)
 
 
-def _attach_payload(*, launcher: Path, payload: bytes, out: Path, flags: int,
-                    sc_bytes: bytes, source_url: str, say) -> dict:
-    """Write the finished binary — either with the payload appended, or with a sidecar."""
-    if not source_url:
-        return attach(launcher, payload, out, flags=flags, stub_config=sc_bytes)
-    # Phase 3 remote-fetch (INV-REMOTE-01): the payload is NOT embedded. attach records
-    # its digest as the trust anchor and sets the remote flag; we write the exact
-    # container bytes to a sidecar the packager hosts at source_url. The binary carries
-    # only [launcher][stub-config][footer].
-    info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes, remote=True)
-    sidecar = out.with_name(out.name + ".haru-payload")
-    sidecar.write_bytes(payload)
-    info["source_url"] = source_url
-    info["payload_sidecar"] = str(sidecar)
-    say(f"--source-url: remote-fetch delivery. The binary carries NO payload — host these "
-        f"exact bytes at {source_url}:\n  {sidecar}\n  ({len(payload)} bytes, sha256 "
-        f"{info['sha256']}). The launcher fetches the URL and refuses any bytes whose "
-        f"sha256 is not exactly that digest (INV-REMOTE-01), so a mirror or CDN must "
-        f"serve these bytes unchanged.")
-    return info
-
-
 def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           secret: bytes | None = None, expires: str = "", geo=None,
           geo_restrict=(), geo_api_urls=(), geo_consensus: int = 1,
@@ -118,6 +97,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           no_reap: bool = False, base_path: str = "", source_url: str = "", env_append=None,
           cc: str = "", emit_c: str = "", emit_nim: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
+    prepare_output_dir(out)
     say = log or (lambda _m: None)
     emit_c_dir = emitkit.validate_c_dir(emit_c)
     tgt = target if isinstance(target, Target) else Target.parse(target)

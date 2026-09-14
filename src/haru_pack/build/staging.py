@@ -12,6 +12,9 @@ from __future__ import annotations
 import os
 import re as _re
 
+from pathlib import Path
+
+from ..overlay import attach
 from .errors import BuildError
 
 
@@ -80,3 +83,24 @@ def resolve_source_url(source_url: str) -> str:
         raise BuildError(f"--source-url {source_url!r} has no host.")
     return source_url
 
+
+def _attach_payload(*, launcher: Path, payload: bytes, out: Path, flags: int,
+                    sc_bytes: bytes, source_url: str, say) -> dict:
+    """Write the finished binary — either with the payload appended, or with a sidecar."""
+    if not source_url:
+        return attach(launcher, payload, out, flags=flags, stub_config=sc_bytes)
+    # Phase 3 remote-fetch (INV-REMOTE-01): the payload is NOT embedded. attach records
+    # its digest as the trust anchor and sets the remote flag; we write the exact
+    # container bytes to a sidecar the packager hosts at source_url. The binary carries
+    # only [launcher][stub-config][footer].
+    info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes, remote=True)
+    sidecar = out.with_name(out.name + ".haru-payload")
+    sidecar.write_bytes(payload)
+    info["source_url"] = source_url
+    info["payload_sidecar"] = str(sidecar)
+    say(f"--source-url: remote-fetch delivery. The binary carries NO payload — host these "
+        f"exact bytes at {source_url}:\n  {sidecar}\n  ({len(payload)} bytes, sha256 "
+        f"{info['sha256']}). The launcher fetches the URL and refuses any bytes whose "
+        f"sha256 is not exactly that digest (INV-REMOTE-01), so a mirror or CDN must "
+        f"serve these bytes unchanged.")
+    return info

@@ -42,7 +42,8 @@ from .inject import _looks_secret_shaped, resolve_injects
 from .orchestrate import build
 from .staging import _is_root_like, resolve_base_path, resolve_source_url
 from .tree import _staged_tree_bytes, copy_app_tree, target_is_host
-from .validate import CWD_POLICIES, validate_encryption, validate_manifest
+from .validate import (CWD_POLICIES, prepare_output_dir, validate_encryption,
+                       validate_manifest)
 
 __all__ = [
     "BuildError", "build",
@@ -51,7 +52,8 @@ __all__ = [
     "announce_staging", "assemble_payload", "build_geo_policy", "compile_launcher",
     "couple_staging_flags", "crypto", "emit_mod", "resolve_base_path", "resolve_canary",
     "resolve_cc", "resolve_injects", "resolve_source_url", "stub_config_bytes",
-    "copy_app_tree", "target_is_host", "toolchain", "validate_encryption", "validate_manifest",
+    "copy_app_tree", "target_is_host", "toolchain", "prepare_output_dir",
+    "validate_encryption", "validate_manifest",
     # Underscored, but imported by tests that check a refusal directly rather than through
     # a whole build. Kept exported so those tests keep naming the function they exercise.
     "_declarations", "_entry_relpath", "_is_root_like", "_looks_secret_shaped",

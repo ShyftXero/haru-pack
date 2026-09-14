@@ -21,6 +21,22 @@ from .errors import BuildError
 # resolving a relative path from the wrong directory.
 CWD_POLICIES = ("launch", "exe")
 
+def prepare_output_dir(out: Path) -> None:
+    """Make sure `-o`'s parent exists before a whole build runs into it.
+
+    The operator's `-o` may name a directory that does not exist yet. Creating it here,
+    up front, is the difference between a clean refusal and the final `out.write_bytes`
+    dying with a raw `FileNotFoundError` after the build has already done all the work —
+    busybody's `greenhorn_output_into_missing_dir` graded that CRASHED, the FATAL class,
+    rather than a refusal. A parent that cannot be created is refused intelligibly, never
+    a bare traceback (INV-BUILD-01).
+    """
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise BuildError(f"cannot create the output directory {out.parent}: {e}")
+
+
 def validate_encryption(enc: dict) -> None:
     """Refuse a licence policy that cannot ever be satisfied.
 

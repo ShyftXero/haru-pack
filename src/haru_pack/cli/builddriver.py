@@ -23,7 +23,7 @@ import typer
 
 from ..build import BuildError
 from ..build import build as build_exe
-from ..discovery import AmbiguousProject
+from ..discovery import AmbiguousProject, EmptyProject
 from ..entrypoints import EntryPointError
 from ..targets import Target, TargetError
 from ..tiers import TIERS
@@ -175,6 +175,10 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          log=lambda m: print(
                              f"{prog()}: {m}",
                              style="warn" if "WARNING" in m else "info"))
+    except EmptyProject as e:
+        # Nothing to pack (pyc-only / empty dir). Refuse cleanly — --entry-point can't
+        # rescue a source that isn't there — never a raw ValueError traceback (INV-BUILD-01).
+        print(f"{prog()}: {e}", style="error"); raise typer.Exit(2)
     except AmbiguousProject as e:
         _report_ambiguity(project, e)
         raise typer.Exit(2)
