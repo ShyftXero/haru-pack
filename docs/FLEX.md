@@ -39,13 +39,92 @@ the default.
 
 ## What it does
 
-For each package: build a tiny project that depends on it, whose `flexapp/__main__.py`
-imports it and does one small real thing, then **run the resulting binary** and require it
-to print `FLEX_OK`. The entrypoint is `python -m flexapp`, so stdout comes from a module
-that had to be importable inside the packaged environment.
+For each package: build a tiny project that depends on it, then **run the resulting binary**
+and require it to print `FLEX_OK`. The entrypoint is `python -m flexapp`, so stdout comes
+from a module that had to be importable inside the packaged environment.
 
 Running it is the point. A binary that builds and then dies on startup is a failure, and
 only executing it catches that.
+
+## Three rungs, and flex owns the first two
+
+| style | what a pass proves | how |
+|---|---|---|
+| `importable` | the payload carries a library that **imports** | default |
+| `smoke` | the library does one small **real thing** | `--style smoke` |
+| `suite` | the library passes its **own test suite** | `tools/exam.py` |
+
+`importable` is the default because it has exactly one failure mode, and it is the one this
+harness exists to detect. The `smoke` bodies are hand-written per package in
+`flex/curation.toml`, which makes each one a second thing that can break for reasons that
+have nothing to do with packaging — an API moved, a keyword was removed, the package wants a
+display. When that happened the run said "flex failed" and somebody had to read a traceback
+to find out whether haru-pack had done anything wrong at all.
+
+That is a narrowing, and it costs something real: a default run no longer exercises the
+library. `--style smoke` and `tools/exam.py` are still there when you want the stronger claim.
+
+The style is recorded in `flex/out/results.json` and printed in the summary header. An
+`importable` pass and a `smoke` pass are different claims, and results that do not say which
+one they hold invite comparing two runs that were never asking the same question.
+
+## The import name is discovered, never guessed
+
+`pip install pillow` gives you `import PIL`. Nothing recovers that from the name, which is
+why `flex/curation.toml` used to carry eight hand-written `import_name` entries — eight human
+guesses, each able to go stale without anyone noticing.
+
+The `importable` probe asks the installed distribution instead, from inside the binary, where
+it actually exists. Three routes, best first, and **the route is reported** so a guess never
+reads as a fact:
+
+| route | means |
+|---|---|
+| `packages_distributions` | exact: installed metadata, inverted. 3.10+ |
+| `top_level.txt` | the wheel said so. Back to 3.8; absent from some wheels |
+| `guess` | `name.replace("-", "_")`. Wrong for pillow, and it says so |
+
+Curated `import_name` values are now **assertions**, not inputs: the harness checks each one
+against what the binary found and fails the package on a mismatch, naming both and saying the
+manifest is what is stale (`INV-FLEX-03`). They cannot steer the probe — if they could,
+checking the probe against them would be a tautology.
+
+```
+resolved pyyaml -> _yaml, yaml (via packages_distributions)
+successfully imported _yaml
+successfully imported yaml
+```
+
+Each module is attempted in its own `try/except/finally`: the `except` prints the **full
+traceback**, because that output is the only artefact left to dig into once the container is
+gone, and per-module means a package with several top-level modules tells you *which* one
+broke rather than just that something did.
+
+## Keeping the caches off your disk
+
+```sh
+python tools/flex-run.py --cache-info            # what is using what
+python tools/flex-run.py --flush-cache sandbox   # remove the harness's docker volume
+python tools/flex-run.py --flush-cache host      # `uv cache prune` on the shared host cache
+python tools/flex-run.py --max-cache-gb 20 ...   # prune the volume before a run if over
+```
+
+Measured on the dev box, which moved this design — the sandbox volume was **not** the problem:
+
+| what | size |
+|---|---|
+| `~/.cache/uv` | **18.9 GB** |
+| `haru-flex-cache` (sandbox volume) | 13.5 MB |
+| `~/.cache/haru-pack` | 273 MB |
+| anonymous run volumes | 0 — `--rm` reaps them |
+
+The volume stays small because `warm_cache_and_lock` points `UV_CACHE_DIR` at the payload's
+own bundled cache inside the build tree, not at ours.
+
+Ownership decides what may be reclaimed automatically. The volume is the harness's own and
+rebuildable, so `--max-cache-gb` may remove it. `~/.cache/uv` is shared with every project on
+the machine and most of it has nothing to do with flex, so it is only ever reported, and only
+ever *pruned*, and only when you type `--flush-cache host`. `--max-cache-gb` never touches it.
 
 ## Proving the payload carries its dependencies
 
@@ -246,6 +325,13 @@ See `INV-FLEX-01` and `INV-FLEX-02` in [INVARIANTS.md](../INVARIANTS.md).
 ## First full hard-target run — 2026-09-09
 
 This box: linux-x86_64, all thick unless noted, `--offline-check`.
+
+> **Smoke-era, and on the host.** These numbers predate two changes and are not directly
+> comparable with a run from today. They were produced with the hand-written `smoke` bodies,
+> which is now `--style smoke` rather than the default; and before the harness ran in
+> containers, so the `offline` column here is the old `UV_OFFLINE`-plus-dead-proxy
+> approximation rather than a real network namespace (`INV-SANDBOX-02`). The findings below
+> stand — they are about package *shapes*, which have not changed.
 
 | package | tier | verdict | size | build | run | offline |
 |---|---|---|---|---|---|---|

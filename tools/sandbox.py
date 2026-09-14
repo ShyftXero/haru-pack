@@ -37,10 +37,15 @@ does not close it. And this contains *haru-pack's own test harnesses* — it say
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
+
+#: CSI escape sequences, for stripping colour out of another tool's stdout before parsing it.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 REPO = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO / "docker" / "flex.Dockerfile"
@@ -262,6 +267,166 @@ def preflight(*, require_rootless: bool = False, log=print) -> str:
                 "See docs/ROOTLESS_DOCKER.md.")
         log(ROOTFUL_WARNING.rstrip("\n"))
     return ensure_image(log=log)
+
+
+# ─────────────────────────────────────────────────────────────────────── cache accounting
+#
+# Measured on the dev box 2026-09-14, and the numbers moved the design:
+#
+#   ~/.cache/uv            21 GB    <- the thing actually filling the disk
+#   haru-flex-cache        14 MB    <- the sandbox volume
+#   ~/.cache/haru-pack    279 MB
+#   anonymous run volumes    0      <- `--rm` reaps them; verified by count before/after
+#
+# The assumption going in was that the sandbox volume was the problem. It is not, because
+# `bundle.warm_cache_and_lock` points UV_CACHE_DIR at the payload's own bundled cache inside
+# the build tree rather than at ours. The host cache is where the bytes are.
+#
+# That split decides what may be automatic. The volume is harness-owned, rebuildable, and
+# nobody else's: pruning it on a budget is fine. `~/.cache/uv` is shared with every other
+# project on the machine, so this NEVER deletes it without being asked — it reports it, and
+# `--flush-cache host` prunes it only when a human types that.
+
+def _du_bytes(image: str, volume: str, timeout: int = 300) -> int:
+    """Size of a docker volume, measured by a container that walks only that volume.
+
+    Deliberately not `docker system df -v`: that walks every image and volume on the host,
+    which on this box took minutes and timed out. This takes about a second.
+    """
+    r = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "-v", f"{volume}:/cache",
+         "--cap-drop=ALL", "--security-opt", "no-new-privileges",
+         image, "du", "-sb", CACHEDIR],
+        capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        return -1
+    try:
+        return int(r.stdout.split()[0])
+    except (IndexError, ValueError):
+        return -1
+
+
+def volume_exists(volume: str = CACHE_VOLUME) -> bool:
+    return subprocess.run(["docker", "volume", "inspect", volume],
+                          capture_output=True, timeout=60).returncode == 0
+
+
+def clean_path(text: str) -> Path:
+    """A Path out of another tool's stdout, with colour escapes removed first.
+
+    Not defensive programming for its own sake: `uv cache dir` writes a COLOURED path, the
+    escape codes went into the Path, and `du` then reported **0 B for an 18.9 GB cache**.
+    Nothing errored — the number was simply wrong, and it looked exactly like a right one.
+    """
+    return Path(_ANSI.sub("", text).strip())
+
+
+def host_cache_paths() -> dict:
+    """The caches on THIS machine that a flex/exam run grows. Reported, never auto-deleted."""
+    out = {}
+    try:
+        # NO_COLOR, and an ANSI strip behind it. `uv cache dir` writes a COLOURED path when
+        # it thinks anything is listening, and the escape codes end up inside the Path — so
+        # `du` measures a directory that does not exist and reports 0 B for a 21 GB cache.
+        # A wrong number that looks like a right one is worse than an error.
+        r = subprocess.run(["uv", "cache", "dir"], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, NO_COLOR="1", TERM="dumb"))
+        if r.returncode == 0 and r.stdout.strip():
+            out["uv"] = clean_path(r.stdout)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    out.setdefault("uv", Path.home() / ".cache" / "uv")
+    try:
+        from platformdirs import user_cache_dir
+        out["haru-pack"] = Path(user_cache_dir("haru-pack", appauthor=False))
+    except Exception:
+        out["haru-pack"] = Path.home() / ".cache" / "haru-pack"
+    return out
+
+
+def _tree_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    r = subprocess.run(["du", "-sb", str(path)], capture_output=True, text=True, timeout=600)
+    try:
+        return int(r.stdout.split()[0]) if r.returncode == 0 else -1
+    except (IndexError, ValueError):
+        return -1
+
+
+def human(n: int) -> str:
+    if n < 0:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024.0
+    return f"{n:.1f} TB"
+
+
+def cache_report(image: str | None = None) -> list:
+    """[(label, path-or-volume, bytes, owner)] for everything a run grows.
+
+    `owner` is "harness" for things this tool may delete on its own, and "shared" for the
+    host caches that belong to the whole machine.
+    """
+    rows = []
+    if image and volume_exists():
+        rows.append(("sandbox volume", CACHE_VOLUME, _du_bytes(image, CACHE_VOLUME), "harness"))
+    elif image:
+        rows.append(("sandbox volume", f"{CACHE_VOLUME} (does not exist yet)", 0, "harness"))
+    for label, path in sorted(host_cache_paths().items()):
+        rows.append((f"host {label} cache", str(path), _tree_bytes(path), "shared"))
+    return rows
+
+
+def flush_volume(volume: str = CACHE_VOLUME, image: str | None = None) -> tuple:
+    """(removed, bytes_freed). Removing the volume is safe: it is a cache, and it is ours."""
+    if not volume_exists(volume):
+        return False, 0
+    freed = _du_bytes(image, volume) if image else -1
+    r = subprocess.run(["docker", "volume", "rm", volume],
+                       capture_output=True, text=True, timeout=120)
+    return r.returncode == 0, freed
+
+
+def enforce_cache_budget(max_gb: float, image: str, log=print) -> None:
+    """Bring the sandbox volume under `max_gb` BEFORE a run starts.
+
+    Before, never during: reclaiming space underneath a matrix that is halfway through would
+    turn a disk problem into a pile of confusing package failures.
+
+    `uv cache prune` first, then removal if that was not enough.
+
+    Measured 2026-09-14: prune reclaimed **0 of 13.5 MB** here, and that is expected rather
+    than a bug. Most of this volume is haru-pack's OWN cache at `/cache/haru-pack` (the
+    XZ-compressed uv binaries), which uv neither owns nor knows about; uv's cache is the
+    smaller `/cache/uv`. Prune is still tried first because it is cheap and, on a volume that
+    has done a lot of dependency resolution, it is the non-destructive win. When it is not
+    enough the volume goes — it is a cache, it is ours, and the next run refills what it needs.
+    """
+    if not volume_exists():
+        return
+    size = _du_bytes(image, CACHE_VOLUME)
+    budget = int(max_gb * 1024 ** 3)
+    if size < 0 or size <= budget:
+        return
+
+    log(f"cache: {human(size)} is over the {max_gb} GB budget — pruning")
+    subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "-v", f"{CACHE_VOLUME}:{CACHEDIR}",
+         "-e", f"UV_CACHE_DIR={CACHEDIR}/uv", "--cap-drop=ALL",
+         "--security-opt", "no-new-privileges", image, "uv", "cache", "prune"],
+        capture_output=True, text=True, timeout=900)
+
+    after = _du_bytes(image, CACHE_VOLUME)
+    if 0 <= after <= budget:
+        log(f"cache: pruned to {human(after)} (freed {human(size - after)})")
+        return
+    removed, _ = flush_volume(image=image)
+    if removed:
+        log(f"cache: still {human(after)} after pruning — removed {CACHE_VOLUME} entirely "
+            f"(it is a cache; the next run refills what it needs)")
 
 
 def run(image: str, *, cmd, work: Path, network: bool, cache: str, uid: int, gid: int,

@@ -241,7 +241,7 @@ def test_the_runner_builds_a_project_not_a_bare_script(tmp_path):
 
     proj = mod.make_project(
         {"name": "pyyaml", "import_name": "yaml", "python": "3.12",
-         "smoke": "import yaml\nprint('FLEX_OK')"}, tmp_path)
+         "smoke": "import yaml\nprint('FLEX_OK')"}, tmp_path, "smoke")
 
     pyproject = (proj / "pyproject.toml").read_text()
     assert 'dependencies = ["pyyaml"]' in pyproject
@@ -272,7 +272,7 @@ def test_declared_sharp_edges_reach_haru_pack_toml(tmp_path):
         "smoke": "print('FLEX_OK')",
         "bundle": '[[bundle]]\n  run = ["playwright", "install", "firefox"]\n'
                   '  into = "vendor/ms-playwright"',
-    }, tmp_path)
+    }, tmp_path, "smoke")
     hp = (proj / "haru_pack.toml").read_text()
     assert "[[bundle]]" in hp and "ms-playwright" in hp
 
@@ -286,8 +286,9 @@ def test_a_package_with_its_own_dash_m_entrypoint_is_exercised(tmp_path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    body = mod.smoke_body({"name": "certifi", "import_name": "certifi",
-                           "module": "certifi", "smoke": "print('FLEX_OK')"})
+    import flex_probes
+    body = flex_probes.smoke_body({"name": "certifi", "import_name": "certifi",
+                                   "module": "certifi", "smoke": "print('FLEX_OK')"})
     assert "runpy.run_module('certifi'" in body
     assert "except SystemExit" in body, (
         "a module that exits normally would otherwise abort the harness's own script"

@@ -352,3 +352,68 @@ def test_the_harness_imports_the_sandbox_at_all(name: str):
     assert "sandbox" in path.read_text(encoding="utf-8"), (
         f"tools/{name} does not reference the sandbox runner"
     )
+
+
+# ───────────────────────────────────────────────────────────────── cache accounting (#33)
+
+def test_a_coloured_path_from_another_tool_is_cleaned_before_it_is_used():
+    """Regression. `uv cache dir` emits a COLOURED path when it thinks anything is listening.
+
+    The escape codes went into the Path, so `du` measured a directory that does not exist and
+    reported **0 B for an 18.9 GB cache**. Nothing raised; the number was just wrong, and it
+    looked exactly like a right one — the worst shape a bug can have in a tool whose entire
+    output is numbers.
+
+    Red-path: drop the strip and pass the raw stdout to Path().
+    """
+    coloured = "\x1b[36m/home/shyft/.cache/uv\x1b[39m\n"
+    assert sandbox.clean_path(coloured) == Path("/home/shyft/.cache/uv")
+    assert sandbox.clean_path("/plain/path\n") == Path("/plain/path")
+
+
+def test_sizes_are_reported_in_units_a_person_can_act_on():
+    assert sandbox.human(0) == "0 B"
+    assert sandbox.human(2048) == "2.0 KB"
+    assert sandbox.human(18_900_000_000).endswith("GB")
+
+
+def test_an_unmeasurable_size_is_never_reported_as_zero():
+    """`-1` means "could not measure". Rendering it as `0 B` would tell someone their cache
+    is empty when the truth is that we failed to look at it."""
+    assert sandbox.human(-1) == "?"
+
+
+def test_the_host_caches_are_labelled_as_shared_and_the_volume_is_not():
+    """The label decides what may be deleted automatically.
+
+    `~/.cache/uv` is used by every project on the machine — 18.9 GB of it on the dev box,
+    almost none of it flex's. Only the harness's own volume is ever removed without being
+    asked. Red-path: mark a host cache "harness" and it becomes eligible for the budget.
+    """
+    owners = {label: owner for label, _where, _size, owner in sandbox.cache_report(None)}
+    assert owners, "expected at least the host caches to be reported"
+    for label, owner in owners.items():
+        expected = "harness" if "sandbox" in label else "shared"
+        assert owner == expected, f"{label} is labelled {owner}, expected {expected}"
+
+
+@pytest.mark.invariant("INV-SANDBOX-01")
+def test_the_cache_budget_is_enforced_before_the_matrix_not_during_it():
+    """Red-path: call `enforce_cache_budget` from `run_one`.
+
+    Reclaiming space underneath a run that is halfway through turns a disk problem into a
+    pile of confusing package failures — builds start failing for a reason that has nothing
+    to do with the packages being tested.
+    """
+    src = (REPO / "tools" / "flex-run.py").read_text(encoding="utf-8")
+    callers = set()
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for child in ast.walk(node):
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "enforce_cache_budget"):
+                callers.add(node.name)
+    assert callers == {"choose_runner"}, (
+        f"the cache budget must be enforced once, before the run starts; called from {callers}"
+    )
