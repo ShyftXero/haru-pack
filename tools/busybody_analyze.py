@@ -8,7 +8,7 @@ the machine can compute in a millisecond.
 
 So the questions are the tool now:
 
-    --analyze     did this sweep buy anything, and what diverged?
+    --analyze     did this sweep buy anything, and what diverged by fixture?
     --calibrate   where is the band that separates two packages?
 
 Both print plain text with the reasoning attached. Neither needs a model, and neither needs
@@ -26,7 +26,7 @@ import collections
 import statistics
 from pathlib import Path
 
-from busybody_ledger import human_bytes, read_jsonl  # noqa: F401
+from busybody_ledger import is_finding, human_bytes, read_jsonl  # noqa: F401
 
 __all__ = ["analyze_run", "analyze_exit_code", "format_analysis", "RESOURCE_LADDER"]
 
@@ -51,8 +51,12 @@ def analyze_run(run_dir: Path) -> dict:
     for c in cases:
         matrix[c["name"]][c.get("fixture", "?")] = c["outcome"]
 
-    diverged = {name: outs for name, outs in matrix.items()
-                if len(set(outs.values())) > 1}
+    # FIXTURE-DIVERGENCE: one case answering differently depending on which package
+    # was packed. Named in full because `divergence` alone is ambiguous across the two
+    # busybody implementations — lotek's means a UI surface disagreeing with an API
+    # surface, which is an unrelated mechanism (docs/BUSYBODY-SCHEMA.md, S3).
+    fixture_diverged = {name: outs for name, outs in matrix.items()
+                        if len(set(outs.values())) > 1}
 
     secs = [c.get("seconds", 0) or 0 for c in cases]
     return {
@@ -68,8 +72,9 @@ def analyze_run(run_dir: Path) -> dict:
         "cases": cases,
         "fixtures": fixtures,
         "matrix": dict(matrix),
-        "diverged": diverged,
-        "findings": [c for c in cases if not c.get("ok")],
+        "fixture_diverged": fixture_diverged,
+        "findings": [c for c in cases if is_finding(c)],
+        "indeterminate": [c for c in cases if c.get("indeterminate")],
         "fingerprints": {c.get("fingerprint") for c in cases if c.get("fingerprint")},
         "by_persona": collections.Counter(c.get("persona", "?") for c in cases),
         "by_outcome": collections.Counter(c["outcome"] for c in cases),
@@ -173,7 +178,7 @@ def _census_block(a: dict, n_cases: int, n_fix: int, distinct: int) -> list:
         # version branched on the fingerprint count and printed "0 case(s) DIVERGED" on a
         # sweep where nothing had.
         n_case_names = len(a["matrix"])
-        if not a["diverged"]:
+        if not a["fixture_diverged"]:
             L += ["",
                   "  NOTHING DIVERGED. Every case answered identically on all "
                   f"{n_fix} fixtures,",
@@ -192,7 +197,8 @@ def _census_block(a: dict, n_cases: int, n_fix: int, distinct: int) -> list:
                       "  package; the verdict did not.)"]
         elif a["state"] == "ABORTED (environment)":
             L += ["",
-                  f"  {len(a['diverged'])} of {n_case_names} case(s) appear to have diverged",
+                  f"  {len(a['fixture_diverged'])} of {n_case_names} case(s) appear "
+                  f"to have diverged",
                   "  by fixture — but this run ABORTED on an environment failure, and that",
                   "  failure splits fixtures into 'ran before it' and 'ran after it'. That",
                   "  is not package-dependent behaviour. Discard this section.",
@@ -200,7 +206,8 @@ def _census_block(a: dict, n_cases: int, n_fix: int, distinct: int) -> list:
                   "  The tell: the passing fixtures are the ones built first."]
         else:
             L += ["",
-                  f"  {len(a['diverged'])} of {n_case_names} case(s) DIVERGED by fixture —",
+                  f"  {len(a['fixture_diverged'])} of {n_case_names} case(s) "
+                  f"FIXTURE-DIVERGED —",
                   "  the sweep earned its cost for those, and only those. The rest",
                   "  confirmed the same fact once per fixture."]
         L.append("")
@@ -208,14 +215,20 @@ def _census_block(a: dict, n_cases: int, n_fix: int, distinct: int) -> list:
     return L
 
 
-def _divergence_block(a: dict) -> list:
-    """The cases whose answer actually depends on which package was packed."""
+def _fixture_divergence_block(a: dict) -> list:
+    """The cases whose answer actually depends on which package was packed.
+
+    FIXTURE-divergence, in full. The bare word is a collision: lotek's busybody uses
+    `divergence` for a UI surface disagreeing with an API surface, which is an entirely
+    different mechanism, and neither meaning may reach a shared API wearing the short name.
+    """
     L = []
-    L += ["-" * W, "DIVERGENCE — cases whose answer depends on the package", "-" * W, ""]
-    if not a["diverged"]:
+    L += ["-" * W, "FIXTURE-DIVERGENCE — cases whose answer depends on the package",
+          "-" * W, ""]
+    if not a["fixture_diverged"]:
         L += ["  (none)", ""]
     else:
-        for name, outs in sorted(a["diverged"].items()):
+        for name, outs in sorted(a["fixture_diverged"].items()):
             groups: dict = collections.defaultdict(list)
             for fix, out in outs.items():
                 groups[out].append(fix.replace("fixture-", ""))
@@ -279,7 +292,7 @@ def format_analysis(a: dict) -> str:
     """The whole report, as text. A pure function of the analysis dict.
 
     Each section is its own function so a change to the census wording cannot reach into
-    the divergence table, and so the sections can be read one at a time.
+    the fixture-divergence table, and so the sections can be read one at a time.
     """
     L = ["=" * W, f"busybody analysis \u2014 {a['run']}", "=" * W, ""]
     if a["state"] == "SETUP FAILURE":
@@ -289,7 +302,7 @@ def format_analysis(a: dict) -> str:
     L += _summary_block(a, n_cases, n_fix)
     L += _census_block(a, n_cases, n_fix, len(a["fingerprints"]))
     if n_fix > 1:
-        L += _divergence_block(a)
+        L += _fixture_divergence_block(a)
     L += _distribution_block(a, n_cases)
     if a["findings"]:
         L += _findings_block(a)

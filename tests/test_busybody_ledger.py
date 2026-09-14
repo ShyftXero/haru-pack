@@ -410,7 +410,7 @@ def test_a_sweep_that_confirmed_one_fact_many_times_says_so(tmp_path):
     got = a.analyze_run(_journal(tmp_path, cases))
 
     assert len(got["cases"]) == 50
-    assert got["diverged"] == {}, "no case was given a differing outcome"
+    assert got["fixture_diverged"] == {}, "no case was given a differing outcome"
     assert len(got["fingerprints"]) == 2, "two cases, one answer each"
 
     text = a.format_analysis(got)
@@ -430,8 +430,9 @@ def test_a_case_whose_answer_depends_on_the_package_is_named(tmp_path):
               _case("varies", "fixture-heavy", "APP-CRASHED", ok=False)]
     got = a.analyze_run(_journal(tmp_path, cases))
 
-    assert set(got["diverged"]) == {"varies"}, (
-        f"expected only `varies` to diverge, got {sorted(got['diverged'])}"
+    assert set(got["fixture_diverged"]) == {"varies"}, (
+        f"expected only `varies` to fixture-diverge, got "
+        f"{sorted(got['fixture_diverged'])}"
     )
     text = a.format_analysis(got)
     assert "NOTHING DIVERGED" not in text
@@ -516,7 +517,7 @@ def test_analyze_exit_code_is_wired_into_the_cli():
 
 
 @pytest.mark.invariant("INV-CHAOS-04")
-def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
+def test_differing_error_text_is_not_reported_as_fixture_divergence(tmp_path):
     """A fingerprint folds in the diagnostic TEXT, so the same outcome with two different
     messages counts as two distinct results. That granularity is right for triage and wrong
     for "did the sweep buy anything" — and conflating them made the census print
@@ -531,7 +532,7 @@ def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
     got = a.analyze_run(_journal(tmp_path, cases))
 
     assert len(got["fingerprints"]) == 25
-    assert got["diverged"] == {}, "the outcome was RAN on every fixture"
+    assert got["fixture_diverged"] == {}, "the outcome was RAN on every fixture"
 
     text = a.format_analysis(got)
     assert "NOTHING DIVERGED" in text
@@ -717,7 +718,8 @@ def test_an_aborted_run_is_never_read_as_a_verdict(tmp_path):
     text = a.format_analysis(got)
     assert "THE BOX FAILED, NOT THE PRODUCT" in text
     assert "Discard this section" in text, (
-        "the divergence a quota failure fabricates must be labelled as fabricated"
+        "the fixture-divergence a quota failure fabricates must be labelled as "
+        "fabricated"
     )
     assert "122" in text, "the abort reason belongs in the report, not just the journal"
 
@@ -913,3 +915,48 @@ def test_main_checkout_falls_back_to_the_path_rule_without_git(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
     assert bl.main_checkout(plain) == plain
+
+
+# ---------------------------------------------------------------- the on-disk contract
+
+
+def test_every_record_type_carries_the_schema_version(tmp_path):
+    """docs/BUSYBODY-SCHEMA.md is the contract; this is the code agreeing with it.
+
+    All three types, in one test, because the failure being guarded against is a record type
+    that quietly stops carrying it — and a version only SOME rows have is worse than none,
+    since a reader cannot then distinguish an old row from a new one written by the path that
+    forgot. There are two ledger-row call sites already (`_finalize` and `_finish_compose`),
+    which is exactly how that happens.
+    """
+    jr = bl.Journal(tmp_path / "run", "bb20260913-000000")
+    jr.write("started", planned=["x"], tier="default")
+    jr.write("case", name="x", ok=True)
+    jr.close()
+    journal = [json.loads(ln) for ln in
+               (tmp_path / "run" / "journal.jsonl").read_text().splitlines()]
+    assert journal and all(r.get("schema_version") == bl.SCHEMA_VERSION for r in journal), (
+        f"a journal line is missing schema_version: {journal}")
+
+    led = tmp_path / "findings.jsonl"
+    bl.ledger_append([{"fingerprint": "abc123", "at": 1.0, "outcome": "CRASHED",
+                       "severity": "critical", "message": "boom"}], path=led)
+    rows = [json.loads(ln) for ln in led.read_text().splitlines()]
+    assert rows[0].get("schema_version") == bl.SCHEMA_VERSION, rows
+
+    roll = bl.ledger_rollup(led)
+    assert roll[0].get("schema_version") == bl.SCHEMA_VERSION, roll
+
+
+def test_a_record_written_before_the_schema_existed_still_reads(tmp_path):
+    """Version 1 is defined as "no key at all", so nothing on disk needed migrating.
+
+    This is the property that made stamping cheap. If an unversioned row had to be rejected
+    or rewritten, adding the field would have meant a migration over every ledger anyone
+    has — including the three orphaned ones recovered from dead worktrees.
+    """
+    led = tmp_path / "findings.jsonl"
+    led.write_text(json.dumps({"fingerprint": "old", "at": 1.0, "outcome": "SILENT",
+                               "severity": "critical", "message": "x"}) + "\n")
+    groups = bl.ledger_rollup(led)
+    assert len(groups) == 1 and groups[0]["fingerprint"] == "old"

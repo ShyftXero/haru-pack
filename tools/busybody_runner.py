@@ -19,6 +19,7 @@ from pathlib import Path
 
 import busybody_config as cfg
 from busybody_config import MARKER
+from busybody_ledger import SCHEMA_VERSION
 
 
 
@@ -73,7 +74,14 @@ class Ctx:
 
     @classmethod
     def perturb(cls, action: str, **fields) -> None:
-        """Announce a fault BEFORE performing it, never after.
+        """Announce a NEMESIS action BEFORE performing it, never after.
+
+        `nemesis` is Jepsen's word for deliberate fault injection — the process that
+        partitions the network, pauses a node, skews a clock. It is the right word for what
+        this records: a fault the harness CHOSE, as opposed to the probabilistic kind
+        (FoundationDB calls that **buggification**), which is what a trait's firing
+        probability produces. Both end up in this file; the distinction is whether a human
+        named the fault or a draw did.
 
         A fault whose moment was chosen from a seed is unattributable if it is recorded
         after the fact: a kill at 0.4s and a kill at 4.0s leave the same case name with
@@ -82,7 +90,8 @@ class Ctx:
         """
         if cls.work is None:
             return
-        rec = {"at": round(time.time(), 3), "kind": "perturb", "case": cls.case,
+        rec = {"schema_version": SCHEMA_VERSION, "at": round(time.time(), 3),
+               "kind": "perturb", "case": cls.case,
                "fixture": cls.fixture, "seed": cls.seed, "action": action, **fields}
         with open(Path(cls.work) / cls.PERTURBATIONS, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
@@ -100,12 +109,47 @@ class Ctx:
         """
         if cls.work is None:
             return
-        rec = {"at": round(time.time(), 3), "kind": kind, "case": cls.case,
-               "fixture": cls.fixture, "seed": cls.seed, **fields}
+        rec = {"schema_version": SCHEMA_VERSION, "at": round(time.time(), 3), "kind": kind,
+               "case": cls.case, "fixture": cls.fixture, "seed": cls.seed, **fields}
         with open(Path(cls.work) / cls.PERTURBATIONS, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+
+    @classmethod
+    def forensics(cls, reason: str, cache=None) -> str:
+        """Collect a forensic bundle NOW, from the living system. Returns its path, or "".
+
+        The distinction that makes this worth having: `preserve()` copies what the case LEFT
+        BEHIND, afterwards. This captures what was GOING ON, at the moment. By the time a
+        case returns, the processes are gone, the descriptors are closed, and which of the
+        sixteen children was holding the stage is unrecoverable — and a HUNG or STALLED
+        finding is exactly the one where the record is least useful and the live state is
+        most.
+
+        Written into the work directory, the same durable channel `perturb` and `observe`
+        use, so it survives this process being killed by the thing it is documenting.
+
+        Never raises and never blocks for long; see busybody_bundle for the rules its
+        collectors follow. A collector that throws while investigating a failure turns a
+        finding into a CASE-ERROR and loses both.
+        """
+        if cls.work is None:
+            return ""
+        try:
+            import busybody_bundle
+
+            bundle = busybody_bundle.collect(work=cls.work, cache=cache, reason=reason)
+            bundle.update(case=cls.case, fixture=cls.fixture, seed=cls.seed)
+            n = len(list(Path(cls.work).glob("forensics-*.json")))
+            dest = Path(cls.work) / f"forensics-{n:02d}.json"
+            dest.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8")
+            return str(dest)
+        except Exception:
+            # Deliberately bare. This runs on the failure path; a forensic collector that
+            # can itself fail the case is worse than no forensic collector.
+            return ""
 
     @classmethod
     def announced(cls, work) -> list:
@@ -273,8 +317,19 @@ def blame(out: str, err: str) -> str:
     return "unknown"
 
 
-def classify(rc, out: str, err: str, timed_out: bool) -> str:
+def classify(rc, out: str, err: str, timed_out: bool, *, unresolved: bool = False) -> str:
     """Map a process outcome onto the vocabulary.
+
+    `unresolved` distinguishes HUNG from INDETERMINATE, and the difference is what the
+    harness is entitled to claim.
+
+    HUNG says "this would never have exited". One process, given its own full timeout, with
+    nothing else competing for the machine, is enough to support that. A herd of sixteen
+    children sharing one deadline is NOT: a child still working when the clock ran out may
+    have been seconds from finishing, and the observer that can tell the difference is the
+    stall watchdog, which makes its own claim separately. So a deadline kill inside the herd
+    passes `unresolved=True` and gets INDETERMINATE — Jepsen's `:info`, the absence of a
+    verdict rather than a bad one.
 
     CRASHED vs APP-CRASHED is the distinction that makes app-level personas usable. A Nim
     traceback out of the launcher is always a defect. A Python traceback out of the PACKAGED
@@ -287,7 +342,7 @@ def classify(rc, out: str, err: str, timed_out: bool) -> str:
     """
     blob = (out or "") + (err or "")
     if timed_out:
-        return "HUNG"
+        return "INDETERMINATE" if unresolved else "HUNG"
     if any(m in blob for m in TRACEBACK_MARKERS):
         return "CRASHED" if blame(out, err) == "launcher" else "APP-CRASHED"
     if rc == 0:

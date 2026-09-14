@@ -55,8 +55,9 @@ def _parser(doc: str) -> argparse.ArgumentParser:
     ap.add_argument("--compose-runs", type=int, default=120, metavar="N",
                     help="how many stacks to sample (default 120)")
     ap.add_argument("--compose-seed", type=int, default=None, metavar="S",
-                    help="seed for stack selection and for trait fallibility "
-                         "(default: derived from the run id, and always recorded)")
+                    help="seed for stack selection and for each trait's per-action "
+                         "perturbation probability (default: derived from the run id, and "
+                         "always recorded)")
     ap.add_argument("--compose-only", metavar="A,B,C", default="",
                     help="run exactly this stack, repeatedly if --compose-runs > 1; "
                          "the way to reproduce a finding")
@@ -66,6 +67,12 @@ def _parser(doc: str) -> argparse.ArgumentParser:
     ap.add_argument("--scratch-cap-gb", type=float, default=cfg.SCRATCH_CAP_GB,
                     metavar="N", help=f"abort if the scratch root exceeds N GiB "
                                       f"(default {cfg.SCRATCH_CAP_GB}; guards against a leak)")
+    ap.add_argument("--replay", metavar="SIGNATURE", default="",
+                    help="reconstruct the run that produced a finding, from its signature "
+                         "(a fingerprint prefix; 6 chars is plenty) and stop")
+    ap.add_argument("--author", action="store_true",
+                    help="write a corpus script covering what no recorded run has "
+                         "exercised, to stdout, and stop. Proposes; never runs")
     ap.add_argument("--calibrate", action="store_true",
                     help="measure the resource band between fixtures and stop")
     return ap

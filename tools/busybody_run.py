@@ -18,26 +18,32 @@ import time
 from pathlib import Path
 
 import busybody_config as cfg
-from busybody_fixtures import build_fixture, build_top25_fixtures, calibrate
 from busybody_guard import guard_single_instance
-from busybody_ledger import (Journal, Reaper, human_bytes, ledger_append, ledger_path,
-                             prune_runs, reap_orphans)
+from busybody_ledger import (Journal, Reaper, human_bytes, is_finding, ledger_append,
+                             ledger_path, prune_runs, reap_orphans)
+from busybody_markdown import write_markdown
 from busybody_report import write_report
 from busybody_runner import InfraFailure, dir_bytes, infra_failure_reason, work_root_report
 from busybody_sweep import compose_sweep, run_one, worker_pool
 
 
-def _make_fixtures(a, jr, run_dir: Path, reaper) -> list:
+def _make_fixtures(a, jr, run_dir: Path, reaper, paths) -> list:
     """The binaries the cases attack. Raises SystemExit(2) on a SETUP FAILURE.
 
     lotek calls it that: the harness never reached the starting line, so there are no
     results, and reporting zero findings would be a lie.
     """
     try:
-        if a.fixtures == "synthetic":
-            return [("synthetic", build_fixture(a.tier))]
-        if a.fixtures == "top25":
-            return build_top25_fixtures(a.tier, reaper)
+        # Looked up in the registry rather than imported by name (INV-MODULARITY-04): a
+        # fixture source knows about tiers, the top-25 list and flex-run, and none of that
+        # is the sweep driver's business. `busybody.py` imports the catalogue, which is what
+        # fills this in; an empty registry here means somebody reached `_sweep` without it.
+        if source := cfg.FIXTURE_SOURCES.get(a.fixtures):
+            return source(a.tier, reaper)
+        if not cfg.FIXTURE_SOURCES and a.fixtures != "synthetic":
+            raise SystemExit(
+                f"no fixture sources are registered, so {a.fixtures!r} cannot be resolved. "
+                f"Import the catalogue (`import busybody`) before running a sweep.")
         exe = Path(a.fixtures).expanduser().resolve()
         if not exe.exists():
             raise SystemExit(f"no such binary: {exe}")
@@ -45,7 +51,7 @@ def _make_fixtures(a, jr, run_dir: Path, reaper) -> list:
     except SystemExit as e:
         jr.write("setup_failure", detail=str(e)[:400])
         print(f"SETUP FAILURE: {e}", file=sys.stderr)
-        print(f"no cases ran; journal at {run_dir.relative_to(cfg.REPO)}", file=sys.stderr)
+        print(f"no cases ran; journal at {paths.relative(run_dir)}", file=sys.stderr)
         raise
 
 
@@ -160,13 +166,13 @@ def _report_abort(e: InfraFailure, jr, results: list) -> None:
 
 
 def _finalize(a, jr, reaper, bb_reg: Path, run_dir: Path, run_id: str, results: list,
-              interrupted: bool, aborted: bool, peak_scratch: int) -> None:
+              interrupted: bool, aborted: bool, peak_scratch: int, paths) -> None:
     """Everything that must happen whether the sweep succeeded, raised, or was killed.
 
     Reaping is not conditional on success: a chaos harness is the program most likely to be
     interrupted, and at the thick tier each work directory holds a staged interpreter.
     """
-    bad = [r for r in results if not r["ok"]]
+    bad = [r for r in results if is_finding(r)]
     if bad and not aborted:
         ledger_append([{k: v for k, v in r.items()
                         if k in ("name", "persona", "outcome", "severity",
@@ -177,8 +183,15 @@ def _finalize(a, jr, reaper, bb_reg: Path, run_dir: Path, run_id: str, results: 
                        for r in bad])
     if results:
         (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-        write_report(results, ", ".join(sorted({r["fixture"] for r in results})),
-                     run_dir / "report.txt", run_id=run_id, interrupted=interrupted)
+        fixtures = ", ".join(sorted({r["fixture"] for r in results}))
+        write_report(results, fixtures, run_dir / "report.txt", run_id=run_id,
+                     interrupted=interrupted)
+        # Both, not one. The text report is what an operator reads in a terminal with
+        # nothing else open; the markdown is what a diff, a PR comment and a static site
+        # can all use, and it is byte-identical across regenerations so it can be committed
+        # without generating noise.
+        write_markdown(results, fixtures, run_dir / "report.md", run_id=run_id,
+                       interrupted=interrupted)
     if not interrupted and not aborted and results:
         jr.write("finished", cases=len(results), findings=len(bad),
                  peak_scratch_bytes=peak_scratch)
@@ -187,34 +200,46 @@ def _finalize(a, jr, reaper, bb_reg: Path, run_dir: Path, run_id: str, results: 
     # Unconditional. This is the line the whole finally block exists for.
     print()
     reaper.reap()
-    prune_runs(cfg.RUNS, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
+    prune_runs(paths.runs, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
     # Release the single-instance registry (INV-CHAOS-13) so the next sweep can start. A
     # crash that skips this leaves a marker whose pid is now dead, which the next run reaps.
     bb_reg.unlink(missing_ok=True)
 
 
 def _summarize(run_dir: Path, results: list, interrupted: bool, aborted: bool,
-               peak_scratch: int) -> int:
+               peak_scratch: int, paths) -> int:
     """What the operator reads last, and the exit code they get.
 
     lotek's exit-code contract. An interrupt WINS over findings: a run the operator killed
     did not finish, and reporting its partial findings as a completed verdict is the same
     lie facing the other way.
     """
-    bad = [r for r in results if not r["ok"]]
+    bad = [r for r in results if is_finding(r)]
+    unresolved = [r for r in results if r.get("indeterminate")]
     if aborted:
         print(f"\n{len(results)} case(s) ran before the environment failed. This run is NOT"
               f"\na verdict on haru-pack — see the message above.")
         return 2
-    print(f"\n{len(results) - len(bad)}/{len(results)} behaved as expected"
+    # Indeterminates come out of the denominator, not out of one side of it. "14/15 behaved
+    # as expected" with one indeterminate is two different lies depending on which way you
+    # round it, and the honest sentence has three numbers in it.
+    settled = len(results) - len(unresolved)
+    print(f"\n{settled - len(bad)}/{settled} behaved as expected"
           + ("  (RUN INTERRUPTED — this is not the whole suite)" if interrupted else ""))
+    if unresolved:
+        print(f"{len(unresolved)} INDETERMINATE — the harness stopped observing before the "
+              f"action\nresolved, so these are counted as neither a pass nor a finding:")
+        for r in unresolved:
+            print(f"  {r['persona']}/{r['name']}  {r.get('fixture', '?')}")
     if peak_scratch:
         print(f"peak scratch per case: {human_bytes(peak_scratch)}  "
               f"(cap {cfg.SCRATCH_CAP_GB} GiB on the root)")
     if results:
-        print(f"report : {(run_dir / 'report.txt').relative_to(cfg.REPO)}   "
+        print(f"report : {paths.relative(run_dir / 'report.txt')}   "
               f"<- read this; it explains every finding")
-        print(f"journal: {(run_dir / 'journal.jsonl').relative_to(cfg.REPO)}")
+        print(f"         {paths.relative(run_dir / 'report.md')}   "
+              f"(the same, in markdown, byte-stable between runs)")
+        print(f"journal: {paths.relative(run_dir / 'journal.jsonl')}")
     if bad:
         print(f"ledger : {ledger_path()}   (--triage to group by fingerprint)")
         print(f"\n{len(bad)} finding(s):")
@@ -226,12 +251,21 @@ def _summarize(run_dir: Path, results: list, interrupted: bool, aborted: bool,
     return 1 if bad else 0
 
 
-def _sweep(a, picked: list, jobs: int) -> int:
-    """One whole run: guard, fixtures, passes, report."""
+def _sweep(a, picked: list, jobs: int, paths=None) -> int:
+    """One whole run: guard, fixtures, passes, report.
+
+    `paths` is built ONCE here, at the top of the run, and handed to everything below it.
+    Nothing under this function asks the module where the repo is (INV-MODULARITY-04's
+    sibling concern): a run's layout does not change while it is running, so it is a frozen
+    value, and making it an argument is what an extraction would otherwise have to do by
+    hand across a dozen call sites. It defaults to the module shim so `_sweep(a, picked,
+    jobs)` keeps working for callers that have not been converted.
+    """
+    paths = paths if paths is not None else cfg.paths()
     # A run id from the wall clock, so run directories sort chronologically and a human
     # can say "the 14:05 run" without consulting anything.
     run_id = "bb" + time.strftime("%Y%m%d-%H%M%S")
-    run_dir = cfg.RUNS / run_id
+    run_dir = paths.runs / run_id
     # Single-instance guard (INV-CHAOS-13): refuse to start (exit 3) while another sweep is
     # live; reap a dead run's stale registry. Done BEFORE creating the journal dir so a
     # refusal litters nothing. Released in the finally below.
@@ -243,14 +277,18 @@ def _sweep(a, picked: list, jobs: int) -> int:
     results, interrupted, aborted = [], False, False
     record, fixtures = None, []
     try:
-        reap_orphans(cfg.RUNS, log=lambda m: print(f"  {m}"))
+        reap_orphans(paths.runs, log=lambda m: print(f"  {m}"))
         try:
-            fixtures = _make_fixtures(a, jr, run_dir, reaper)
+            fixtures = _make_fixtures(a, jr, run_dir, reaper, paths)
         except SystemExit:
             return 2
 
         if a.calibrate:
-            return calibrate(fixtures)
+            if cfg.CALIBRATOR is None:
+                print("--calibrate: no calibrator is registered; import the catalogue "
+                      "(`import busybody`) first.", file=sys.stderr)
+                return 2
+            return cfg.CALIBRATOR(fixtures)
 
         # fixture-free cases run once; everything else once per fixture
         fixture_free = [c for c in picked if not c.get("per_fixture", True)]
@@ -267,7 +305,8 @@ def _sweep(a, picked: list, jobs: int) -> int:
 
         record = _Recorder(jr, results, fixtures)
         if a.compose is not None or a.compose_only:
-            return compose_sweep(a, fixtures, jr, run_dir, run_id, reaper, results)
+            return compose_sweep(a, fixtures, jr, run_dir, run_id, reaper, results,
+                                 paths)
         _run_passes(a, per_fixture, fixture_free, fixtures, jobs, run_dir, record)
     except InfraFailure as e:
         aborted = True
@@ -283,7 +322,7 @@ def _sweep(a, picked: list, jobs: int) -> int:
     finally:
         peak = record.peak_scratch if record is not None else 0
         _finalize(a, jr, reaper, bb_reg, run_dir, run_id, results, interrupted, aborted,
-                  peak)
+                  peak, paths)
 
     return _summarize(run_dir, results, interrupted, aborted,
-                      record.peak_scratch if record is not None else 0)
+                      record.peak_scratch if record is not None else 0, paths)

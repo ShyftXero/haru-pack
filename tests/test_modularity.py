@@ -1,4 +1,5 @@
-"""INV-MODULARITY-01/02/03 — no module is allowed to become the place everything goes.
+"""INV-MODULARITY-01/02/03/04 — no module becomes the place everything goes, and
+busybody's engine does not depend on busybody's catalogue.
 
 There is no allowlist in this file, and adding one would defeat it. An allowlist is how a
 size budget becomes a formality: the first exception is always justified, the tenth is
@@ -17,6 +18,8 @@ from _modularity import (
     CENTRAL_MAX_CODE,
     FUNCTION_MAX_CODE,
     MODULE_MAX_CODE,
+    busybody_layer_violations,
+    busybody_unclassified,
     collect_modules,
 )
 
@@ -80,4 +83,51 @@ def test_no_module_is_both_large_and_central(mod):
         f"This is the god-module shape. A module is allowed to be the hub OR to hold the "
         f"work, not both: keep the wiring here and push the work down into the modules it "
         f"already imports."
+    )
+
+
+@pytest.mark.invariant("INV-MODULARITY-04")
+def test_the_engine_does_not_import_the_catalogue():
+    """busybody's engine may not depend on busybody's catalogue of faults.
+
+    The size budgets above cannot express this one. `busybody_run` importing
+    `busybody_fixtures` broke no budget — both files were small and neither was central —
+    and it still meant the module that drives a sweep held a hard reference into the list
+    of ways to break haru-pack. A budget measures how much a module holds; this measures
+    which way it points, and only the second says anything about whether the engine could
+    ever be lifted out.
+
+    The dependency in the other direction is fine and expected: a case calls `run_exe`, a
+    trait registers through `@trait`, and a catalogue that could not reach the engine would
+    have nothing to run on.
+
+    The fix is never "move the import inside a function" — that hides the edge from this
+    scan without removing it. It is to invert the dependency: let the catalogue REGISTER
+    what it offers and have the engine look it up, exactly as `CASES` has always worked and
+    as `FIXTURE_SOURCES` now does.
+    """
+    violations = busybody_layer_violations()
+    assert not violations, (
+        "busybody's engine imports its catalogue:\n  "
+        + "\n  ".join(f"{engine} -> {catalogue}" for engine, catalogue in violations)
+        + "\nInvert it. Add a registry to busybody_config that the catalogue writes at "
+        "import time and the engine reads by name — `CASES` and `FIXTURE_SOURCES` are both "
+        "that shape. Moving the import into a function body would hide this edge from the "
+        "scan without removing it, and the engine would still be unextractable."
+    )
+
+
+def test_every_busybody_module_is_on_one_side_or_the_other():
+    """A module in neither set is governed by nothing, and the check above would not see it.
+
+    This is the guard-of-guards for the partition: the layering rule is only as complete as
+    the classification, and a new `busybody_*.py` that nobody placed would silently sit
+    outside the rule while the suite stayed green.
+    """
+    stray = busybody_unclassified()
+    assert not stray, (
+        f"these busybody modules are in neither BUSYBODY_ENGINE nor BUSYBODY_CATALOGUE: "
+        f"{stray}. Place each one deliberately in tests/_modularity.py — engine if a sweep "
+        f"needs it to run at all, catalogue if it declares or builds something specific to "
+        f"breaking haru-pack. Leaving it out exempts it from INV-MODULARITY-04."
     )

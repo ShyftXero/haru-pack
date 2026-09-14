@@ -3,6 +3,115 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-09-14
+
+### busybody — an alignment pass against lotek's independent implementation
+
+haru-pack's busybody was a deliberate reimplementation of lotek's, from lessons learned. This
+brings the two closer together **without extracting a shared library**, and puts a process
+under the cross-project transfer that had been happening by hand.
+
+**The contracts are written down.** [`docs/BUSYBODY-SCHEMA.md`](docs/BUSYBODY-SCHEMA.md) is
+the on-disk contract for the three record types — journal line, finding record, ledger rollup
+— field by field, and every record now carries a `schema_version` (1; a record without the key
+predates the document and is version 1 by definition, so nothing needed migrating). Writing it
+down was a documentation pass: six things it could not describe cleanly are recorded under
+`## Smells` rather than quietly fixed, including two undeclared contracts — the ledger's field
+list is duplicated in two places that already disagree, and `expect` is a list of outcomes
+everywhere except on a composed stack, where it is a string describing a negation.
+
+**One word collided and had to be resolved.** Both projects used *divergence* for unrelated
+mechanisms. lotek's is a UI surface disagreeing with an API surface; ours is one case
+answering differently across fixtures, and is now **fixture-divergence** in identifiers and in
+prose. Neither keeps the bare word.
+
+**Standard vocabulary, where we had invented our own.** Described rather than renamed, because
+the identifiers are for the people who work on this daily and the vocabulary is for whoever is
+placing the tool against the literature: *nemesis* (Jepsen) for deliberate fault injection and
+*buggification* (FoundationDB) for the probabilistic kind; *bucketing by signature* and
+*signature normalization* for what `fingerprint` does; *per-action perturbation probability*
+for what `fires` is; *external watchdog* detecting violation of a *liveness (progress)
+property* for the stall detector; *first-failure attribution* for cascade suppression. Two
+names are kept deliberately against the field, and the schema doc says why.
+
+### busybody — three additions the field expects
+
+- **A golden run.** Every composed campaign now runs one un-perturbed control first, through
+  the same code path as everything it is the baseline for. Not a flag: a baseline somebody can
+  forget is missing on the run where it mattered. A campaign whose control is itself a finding
+  says so above everything else — it has not measured fault tolerance, it has measured a broken
+  product N times with faults on top. A stack where the firing draw happened to fire nothing is
+  **not** a golden run and is named differently; an accident is not a control.
+- **"Did the fault land?"** A deliberately injected fault that gets swallowed before reaching
+  the target produces silence, and silence reads identically to the system absorbing it
+  correctly. Every trait acts by mutating the context it is handed, so busybody snapshots that
+  context around each one; a trait that fires and changes nothing is a **test-infrastructure
+  finding**, journalled under its own kind and deliberately never written to the findings
+  ledger.
+- **`INDETERMINATE`**, Jepsen's `:info`. The outcome that is *not a verdict*: the harness
+  stopped observing before the action resolved. Never a pass, never a finding — it comes out of
+  the denominator, because "14/15 behaved as expected" with one indeterminate is two different
+  lies depending on which way you round. It had a producer already, mislabelled: the herd gives
+  sixteen children one shared deadline and called whatever missed it `HUNG`, which is a claim
+  one process with its own timeout can support and sixteen racing children cannot.
+
+### busybody — what lotek had that we did not
+
+- **`report.md` beside `report.txt`**, byte-identical across regenerations so it can be diffed
+  and committed without noise. No generation timestamp, every section sorted by an explicit
+  key, findings ordered by severity rather than by run order (run order changes with `--jobs`).
+- **`--replay SIGNATURE`** reconstructs the invocation behind a finding from the ledger, which
+  is the only place it survives once run directories are pruned. It reconstructs the
+  invocation, never the outcome, and a row it cannot reproduce says so instead of emitting a
+  plausible command.
+- **`--author`** writes a corpus script covering what no recorded run has exercised — cases
+  that never ran, traits that never *fired*, layer pairs never stacked. It proposes and never
+  runs.
+- **Forensic bundles.** `preserve()` copies what a case left behind; this collects what was
+  going on, from the living system, at the moment of the finding — process tree, open
+  descriptors, the staged tree with any half-staged `.tmp-` directory called out, scratch
+  including the quota `df` cannot see, load average. The important one is taken the instant a
+  stall is declared, while every child is still up.
+
+### busybody — shrinking, costed and declined
+
+`ddmin` over the fired trait stack was spiked and **rejected for that axis**
+([`docs/BUSYBODY-SHRINKING-SPIKE.md`](docs/BUSYBODY-SHRINKING-SPIKE.md)). At the stack sizes
+this project runs it costs more than exhaustive search and returns the same answer — 10 calls
+against 4 at k=3. The small search space that made haru-pack look like the better place to try
+it is exactly why it does not pay. Two findings outlived the verdict: ddmin never
+under-approximates under a flaky oracle (it inflates, which is the safe direction), and
+`--compose-only` already forces every trait to fire, so an oracle built on it runs at p=1.
+
+### Internal
+
+- **INV-MODULARITY-04: the engine may not import the catalogue.** The 2026-09-13 split
+  separated busybody's engine from its catalogue of faults and nothing held that separation
+  open — `tools/` is a flat directory of siblings and no size budget can express *direction*.
+  Declaring it turned up one real violation: `busybody_run` imported the fixture builders by
+  name. Fixed by inversion (`busybody_config.FIXTURE_SOURCES`, the same shape `CASES` has
+  always had), not by exception.
+- **`INV-DOC-01` now covers the harness.** `CITATION_ROOTS` did not include `tools/`, so the
+  `inv=` strings on 80 cases were validated by nothing — a hole the split widened from one file
+  to twelve. Plus a check neither repo had: every `inv=` on a case or trait must resolve to a
+  declared invariant, and a non-empty value citing no id at all is a failure too
+  (`inv="see THREAT_MODEL.md"` had shipped).
+- **A frozen `Paths`**, built once at startup and passed down through the whole sweep
+  lifecycle, replacing module-level `REPO`/`OUT`/`RUNS` reads in the engine. The module-level
+  names remain as a deprecated shim.
+- **Two mechanical gates** in a now-tracked `.claude/`: bulk staging (`git add -A` and
+  friends) is refused, and a version tag needs `.claude/release-ack.json` pinned to the exact
+  sha (`scripts/ack-release.sh` produces it). Two, not thirteen — these are the two that encode
+  a mechanical rule rather than a judgement.
+- **[`docs/BUSYBODY-TRANSFER.md`](docs/BUSYBODY-TRANSFER.md)**, an append-only log replacing
+  the hand-curated prose list, backfilled with 22 rows including the declined ones. Its
+  uncomfortable section: as of today fourteen of the first fifteen rows run lotek→haru, and the
+  return trip is evidenced nowhere in lotek.
+- **[`docs/BUSYBODY-PROTOCOLS.md`](docs/BUSYBODY-PROTOCOLS.md)** — what this harness would need
+  from a shared core, written independently of lotek's sketch so the two can be diffed. Its
+  headline is not comfortable: haru-pack's cases do not decompose into steps, so a step-wise
+  `TargetDriver` would make this harness worse.
+
 ## 2026-09-13
 
 ### Fixes — the build refuses degenerate inputs instead of crashing with a traceback

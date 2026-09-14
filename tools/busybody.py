@@ -8,6 +8,8 @@
     python tools/busybody.py --triage             # past findings, grouped by fingerprint
     python tools/busybody.py --history            # every run, including interrupted ones
     python tools/busybody.py --analyze [RUN]      # did the sweep buy anything? what diverged?
+    python tools/busybody.py --replay SIGNATURE   # reconstruct the run behind a finding
+    python tools/busybody.py --author             # propose what no run has exercised yet
     python tools/busybody.py --calibrate          # find the band that separates two packages
 
 THE POINT IS NOT "DOES IT BREAK"
@@ -131,7 +133,10 @@ from busybody_fixtures import build_fixture, build_top25_fixtures, calibrate  # 
 from busybody_guard import guard_single_instance  # noqa: E402,F401
 from busybody_herd import (herd_collect, herd_deadline, herd_start,  # noqa: E402,F401
                            herd_verdict, stage_key)
+from busybody_author import coverage, print_author, script_for  # noqa: E402,F401
 from busybody_history import print_history, print_triage  # noqa: E402,F401
+from busybody_markdown import render, write_markdown  # noqa: E402,F401
+from busybody_replay import command_for, find_rows, print_replay  # noqa: E402,F401
 from busybody_report import (OUTCOME_MEANING, preserve, severity_for,  # noqa: E402,F401
                              write_report)
 from busybody_runner import (Ctx, InfraFailure, blame, classify, clean_env,  # noqa: E402,F401

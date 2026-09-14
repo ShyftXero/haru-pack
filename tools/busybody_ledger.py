@@ -26,12 +26,17 @@ caught by `git stash`, by worktree switches, and by branch changes — losing hi
 when you are moving between branches to investigate something. haru-pack is developed in
 git worktrees, so this applies with force.
 
-## Why fingerprints
+## Why fingerprints — bucketing by signature
 
-Three cases failing for one reason should read as one problem. A fingerprint normalises the
-volatile parts of a message — paths, timestamps, hex, ports, numbers — and hashes what is
-left, so repeats collapse into a group with a count and a first-seen date. Without it every
-run looks like a fresh set of unrelated failures.
+Three cases failing for one reason should read as one problem. **Bucketing by signature** is
+the universal fuzzing term for this, and `fingerprint` is the field that carries it: the
+volatile parts of a message — paths, timestamps, hex, ports, numbers — are replaced with
+placeholders (**signature normalization**) and what is left is hashed, so repeats collapse
+into a group with a count and a first-seen date. Without it every run looks like a fresh set
+of unrelated failures.
+
+The field name stays `fingerprint`, because it is written into every row on disk and into
+lotek's; only the description adopts the standard vocabulary.
 """
 from __future__ import annotations
 
@@ -45,9 +50,24 @@ import tempfile
 import time
 from pathlib import Path
 
-__all__ = ["SEVERITIES", "normalize", "fingerprint", "Journal", "ledger_path",
-           "ledger_append", "ledger_rollup", "scan_runs", "heartbeat_state",
-           "Reaper", "reap_orphans", "prune_runs", "human_bytes"]
+__all__ = ["SEVERITIES", "SCHEMA_VERSION", "normalize", "fingerprint", "Journal",
+           "ledger_path", "ledger_append", "ledger_rollup", "scan_runs", "heartbeat_state",
+           "Reaper", "reap_orphans", "prune_runs", "human_bytes", "is_finding"]
+
+# The on-disk contract's version, stamped into every record busybody writes.
+# `docs/BUSYBODY-SCHEMA.md` IS the contract; this constant is the code agreeing with it.
+#
+# It lives here rather than in busybody_config because this module owns the record shapes —
+# the journal, the ledger and the roll-up are all defined in this file — and because this is
+# the module with no first-party imports at all, which is the property that makes it the
+# cheapest thing in the harness to lift out. `busybody_runner` imports it for the perturb and
+# observe records, which travel through the journal.
+#
+# It goes up when a field CHANGES MEANING or disappears, not when one is added: a reader that
+# ignores unknown keys is unaffected by an addition, and bumping for those would train
+# everyone to ignore the number. A record with no `schema_version` at all predates the
+# document and is version 1 by definition, which is why nothing on disk needs migrating.
+SCHEMA_VERSION = 1
 
 # A closed vocabulary, as in lotek. Not "error", not "info" — three levels, chosen once.
 #   critical  the product did something it must never do
@@ -57,8 +77,9 @@ SEVERITIES = ("critical", "warning", "note")
 
 HEARTBEAT_STALE_S = 120          # older than this and the run is not live
 
-# Volatile substrings, stripped before fingerprinting. Straight from lotek's ledger.py:
-# without these, one root cause splits into as many groups as there are runs.
+# SIGNATURE NORMALIZATION: the volatile substrings replaced before hashing. Straight from
+# lotek's ledger.py — without these, one root cause splits into as many groups as there are
+# runs, because a path or a pid makes every occurrence look unique.
 _VOLATILE = [
     (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I), "<uuid>"),
     (re.compile(r"\b[0-9a-f]{16,}\b", re.I), "<hex>"),
@@ -79,7 +100,11 @@ def normalize(text: str) -> str:
 
 
 def fingerprint(persona: str, case: str, outcome: str, message: str) -> str:
-    """A stable 16-hex identity for one failure mode.
+    """A stable 16-hex identity for one failure mode: the bucketing signature.
+
+    "Bucketing by signature" is the standard fuzzing term for what this does — collapsing
+    many crashes into the distinct faults behind them. The identifier stays `fingerprint`
+    because it is a field name on every row ever written, here and in lotek.
 
     Keyed on the case as well as the message: the same underlying fault reached through a
     different persona is worth seeing separately, because the route matters when you are
@@ -87,6 +112,21 @@ def fingerprint(persona: str, case: str, outcome: str, message: str) -> str:
     """
     basis = f"{persona}|{case}|{outcome}|{normalize(message)}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def is_finding(rec: dict) -> bool:
+    """Does this record count against the product?
+
+    One predicate, because the answer is consulted in six places — the ledger append, the
+    run summary, the report, the compose summary, `scan_runs` and `analyze_run` — and six
+    copies of `not rec["ok"]` is how the summary and the census end up disagreeing about how
+    many findings a run had.
+
+    An INDETERMINATE result is not ok and is not a finding. The harness stopped observing
+    before the action resolved, so there is no verdict to record; writing one to the ledger
+    would put a non-event into the fingerprint census forever.
+    """
+    return not rec.get("ok") and not rec.get("indeterminate")
 
 
 # ---------------------------------------------------------------- per-run journal
@@ -106,7 +146,8 @@ class Journal:
         self._fh = open(self.path, "a", encoding="utf-8", buffering=1)
 
     def write(self, kind: str, **fields) -> None:
-        rec = {"run": self.run_id, "at": round(time.time(), 3), "kind": kind, **fields}
+        rec = {"schema_version": SCHEMA_VERSION, "run": self.run_id,
+               "at": round(time.time(), 3), "kind": kind, **fields}
         self._fh.write(json.dumps(rec, sort_keys=True) + "\n")
         self._fh.flush()
         os.fsync(self._fh.fileno())
@@ -179,9 +220,10 @@ def scan_runs(out_dir: Path) -> list:
             # Counted the same way --triage groups them, or the two views disagree
             # sixteen-to-one about one stall and neither number can be trusted.
             "findings": len([r for r in cases
-                             if not r.get("ok") and not r.get("post_stall")]),
+                             if is_finding(r) and not r.get("post_stall")]),
             "cascades": len([r for r in cases
-                             if not r.get("ok") and r.get("post_stall")]),
+                             if is_finding(r) and r.get("post_stall")]),
+            "indeterminate": len([r for r in cases if r.get("indeterminate")]),
             "planned": started.get("planned"),
             "at": started.get("at"),
         })
@@ -247,7 +289,12 @@ def ledger_append(records: list, path: Path | None = None) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8", buffering=1) as fh:
         for rec in records:
-            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            # Stamped HERE rather than at each call site that builds ledger rows, because
+            # there are two of them (`_finalize` and `_finish_compose`) and a version that
+            # only some rows carry is worse than none — a reader could not distinguish an
+            # old row from a new one written by the path that forgot.
+            fh.write(json.dumps({"schema_version": SCHEMA_VERSION, **rec},
+                                sort_keys=True) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
     return p
@@ -257,6 +304,9 @@ def ledger_rollup(path: Path | None = None) -> list:
     """One row per (fingerprint, cascade?): count, first_seen, last_seen, runs, cases.
 
     WHY THE CASCADE FLAG IS PART OF THE GROUPING KEY AND NOT OF THE FINGERPRINT
+
+    This is cascade suppression, and its stated intent is FIRST-FAILURE ATTRIBUTION — the
+    SRE term for reporting the fault that started it rather than the N faults it caused.
 
     When the herd persona declares a stall, every child that resolves afterwards fails too,
     and it fails for the stall rather than for itself. Sixteen of those share a persona, a
@@ -283,6 +333,7 @@ def ledger_rollup(path: Path | None = None) -> list:
             continue
         cascade = bool(r.get("post_stall"))
         g = groups.setdefault((fp, cascade), {
+            "schema_version": SCHEMA_VERSION,
             "fingerprint": fp, "count": 0, "runs": set(), "cases": set(),
             "personas": set(), "outcome": r.get("outcome"), "severity": r.get("severity"),
             "inv": r.get("inv", ""), "remedy": r.get("remedy", ""),

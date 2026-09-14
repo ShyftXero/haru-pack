@@ -255,7 +255,7 @@ any heavy package — the exact outcome those cases exist to produce. Or set
 Source: Both learned on 2026-09-10 while building the app-level personas. The first
 `tight_address_space` used 256 MB, which is below what a bare interpreter needs — so every
 package failed identically and the case discriminated nothing. Once calibrated to 768 MB it
-diverged, and then reported the divergence as `CRASHED`, i.e. as a haru-pack bug, because the
+diverged, and then reported the fixture-divergence as `CRASHED`, i.e. as a haru-pack bug, because the
 classifier could not tell a numpy `MemoryError` from a Nim traceback.
 Note: The split is cheap because the launcher prefixes every diagnostic with `haru-pack:`.
 That convention is now load-bearing for triage, not only for readability.
@@ -283,7 +283,7 @@ Assets: whether the harness's output means anything to a human. A sweep that rep
 "925/925 passed" and nothing else reads like 925x the assurance of a single run. It is not,
 if every case answered identically 925 times, and the difference is not visible without
 computing it.
-Red-path: Delete the divergence computation from `analyze_run`, or the FINGERPRINT CENSUS
+Red-path: Delete the fixture-divergence computation from `analyze_run`, or the FINGERPRINT CENSUS
 from `format_analysis`, and a 25-fixture sweep reports a large run count with no way to see
 that it confirmed the same handful of facts once per fixture. Two claiming tests feed
 `analyze_run` synthetic journals — one where every fixture agrees, one where they do not —
@@ -332,7 +332,7 @@ quota exceeded` and reported 470 findings. Three separate defects in one event:
   3. `--analyze` reported 30 of 37 cases as having DIVERGED by fixture. They had not. The
      five fixtures that passed everything were the five built before the quota ran out.
 
-Note: The divergence report was what made the run readable at all — the same five fixtures
+Note: The fixture-divergence report was what made the run readable at all — the same five fixtures
 passing every single case is not a pattern any package property produces. The tool found its
 own run invalid, which is the point of having it. It should not have needed to.
 Note: `df` is not the ceiling. This box reported 31 GiB free on /tmp and refused the next
@@ -459,12 +459,13 @@ Note: The pass condition is deliberately weak and must stay weak. `RAN`, `REFUSE
 7,431. Asserting anything stronger — "haru-pack always works under any three of these" —
 would be an overclaim of exactly the kind this file exists to prevent. The floor is the
 claim: it refuses intelligibly, or it works.
-Note: FALLIBILITY. Each trait has a probability of acting, so a persona is a person rather
+Note: PER-ACTION PERTURBATION PROBABILITY (cf. human error probability; FoundationDB calls
+the same mechanism buggification). Each trait has a probability of acting, so a persona is a person rather
 than a fixture. If greenhorn always fumbles, then "greenhorn fumbled AND auditor left a .env
 behind" is the only thing ever tested, and "greenhorn got it right, auditor still left the
 .env" — a different code path — never runs. A run's identity is the set that FIRED, not the
 set that was selected, and both are journalled.
-Note: Fallibility is forced OFF for two passes, and only two. The k=1 pass IS the attribution
+Note: The probability is forced to 1 for two passes, and only two. The k=1 pass IS the attribution
 baseline — "does trait A fail alone?" cannot be answered by a run where A did not fire, and a
 baseline with holes makes every composed finding unattributable. `--compose-only` is forced
 because someone asked for a specific stack, and handing them a control run answers a
@@ -1728,15 +1729,26 @@ Territory: src/haru_pack/build/, src/haru_pack/cli/
 
 ### INV-DOC-01
 Status: active
-Statement: Every `INV-` identifier cited anywhere in `src/`, `docs/`, `tests/` or a root
-markdown file resolves to a real entry in this file.
+Statement: Every `INV-` identifier cited anywhere in `src/`, `docs/`, `tests/`, `tools/` or a
+root markdown file resolves to a real entry in this file. In addition, every `inv=` value on a
+registered busybody case or trait either names declared invariants or is empty — a non-empty
+value that cites no id at all is a case that reads as governed and is not.
 Actors: a future maintainer or AI agent citing an invariant that was never declared.
 Assets: the credibility of the whole scheme. lotek added this scanner after discovering
 `INV-MODULARITY-01` cited across seven source files and five plans docs without ever
-being declared.
-Red-path: Write `INV-NONSENSE-99` in any tracked file. The claiming test goes red.
-Source: Adopted from lotek `tests/test_invariants_enforced.py`.
-Territory: INVARIANTS.md, tests/test_invariants_enforced.py
+being declared. The `inv=` half protects the same credibility one layer down: that field is
+printed under INVARIANT in every busybody report and rolled up into the findings ledger, so an
+unresolvable value sends whoever is triaging a finding to an entry that does not exist.
+Red-path: Write `INV-NONSENSE-99` in any tracked file. The claiming test goes red. For the
+second half, set `inv="INV-NONSENSE-99"` on any case in `tools/busybody_cases_*.py`, or set it
+to a string with no id in it at all; `test_every_case_inv_citation_resolves` goes red naming
+the case and the value. Walked 2026-09-13 — the check found `inv="see THREAT_MODEL.md"` on
+`geo_spoofed`, which had shipped, and which is what the second clause was written for.
+Source: Adopted from lotek `tests/test_invariants_enforced.py`. The `tools/` root and the
+`inv=` resolution check were added 2026-09-13: the 2026-09-13 modularity split moved busybody's
+cases out of one file into twelve, and `tools/` was scanned by nothing, so the `inv=` strings
+on 80 cases were validated by nothing either.
+Territory: INVARIANTS.md, tests/_invariants.py, tests/test_invariants_enforced.py, tools/
 
 ### INV-DOC-02
 Status: active
@@ -3013,3 +3025,44 @@ Note: A hub is allowed and is often right. `build/__init__.py` imports fifteen s
 is a facade holding no logic; `cli/__init__.py` imports every command module because that is
 what REGISTERS them. Both pass, because both are thin.
 Territory: tests/_modularity.py, tests/test_modularity.py, src/haru_pack/, tools/
+
+### INV-MODULARITY-04
+Status: active
+Statement: No module in busybody's ENGINE imports a module in busybody's CATALOGUE. The
+engine is what runs a sweep, classifies an outcome, journals it and reports it; the
+catalogue is the declared faults and the fixtures they are thrown at. The dependency runs
+one way only — catalogue on engine — and the partition is declared explicitly in
+`tests/_modularity.py`, not inferred from filenames.
+Actors: not an attacker. Whoever needs the sweep machinery without haru-pack's specific
+list of ways to break haru-pack — a second project, or this one after an extraction — and
+the ordinary afternoon in which an engine module grows one convenient import and nobody
+notices that the seam closed.
+Assets: the separation the 2026-09-13 split created. It landed on roughly the seam an
+extraction would want, and nothing held it open: `tools/` is a flat directory of siblings on
+`sys.path`, there is no package, and no budget can express direction. `busybody_run`
+importing `busybody_fixtures` broke no budget — both files are small, neither is central —
+and still meant the sweep driver held a hard reference into the catalogue. A size budget
+measures how much a module holds; only this one says which way it points.
+Red-path: add `import busybody_cases_stage` to `tools/busybody_runner.py` and run
+`pytest tests/test_modularity.py`. `test_the_engine_does_not_import_the_catalogue` goes red
+naming the pair. Walked 2026-09-13, and walked the other way too: before the registry below
+existed the check named `busybody_run -> busybody_fixtures` unprompted, which is the
+violation that was actually there.
+Source: 2026-09-13, from the alignment pass against lotek's independent busybody. Declaring
+it required one real fix: `busybody_run` imported `build_fixture` / `build_top25_fixtures` /
+`calibrate` by name. Those are now registered — `busybody_config.FIXTURE_SOURCES` and
+`CALIBRATOR`, filled by `busybody_fixtures` at import and read by name from the engine —
+which is the same inversion `CASES` has always used.
+Note: The fix for a violation is never "move the import inside a function". That hides the
+edge from an AST scan without removing it, and the engine stays unextractable. Invert the
+dependency instead: the catalogue registers what it offers, the engine looks it up.
+Note: The partition must stay TOTAL. `test_every_busybody_module_is_on_one_side_or_the_other`
+fails on any `busybody_*.py` in neither set, because a rule that silently stops covering new
+modules is worse than no rule — it reads as enforcement while enforcing less every month.
+`busybody.py` itself is the single exemption: it is the composition root, whose entire job is
+to import the catalogue for its decorators' side effects and hand off to the engine.
+Note: This deliberately stops short of making `tools/` a package. The import-direction rule is
+the valuable half and it is cheap; packaging is a bigger change and belongs with an extraction
+decision that has not been made (docs/BUSYBODY-PROTOCOLS.md is the input to it).
+Territory: tests/_modularity.py, tests/test_modularity.py, tools/
+

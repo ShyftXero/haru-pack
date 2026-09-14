@@ -20,6 +20,7 @@ Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Values unchanged.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -34,6 +35,78 @@ WORK_ROOT: Path | None = None
 # had written 470 bogus findings.
 SCRATCH_CAP_GB = 8.0
 RUNS = OUT / "runs"
+
+# ── where things live ─────────────────────────────────────────────────────────────────
+#
+# `REPO`, `OUT` and `RUNS` below are a DEPRECATED SHIM, kept because rebinding them is how
+# every existing reader and every test redirects the harness. New engine code should take a
+# `Paths` and read it, not reach for a module global.
+#
+# The distinction matters for exactly one reason. A global is a fact about THIS checkout: it
+# is computed from `__file__`, it is haru-pack's repo root, and it is correct precisely
+# while the harness lives inside haru-pack. The moment the engine runs against anything
+# else, "where things live" stops being a fact and becomes an argument — and the tell that
+# it was always an argument is already in the suite, where a test has to monkeypatch three
+# module attributes to move the harness somewhere writable.
+#
+# So: one frozen value, constructed once at startup, passed down. `paths()` builds it from
+# the shim, which is what keeps `monkeypatch.setattr(cfg, "RUNS", tmp)` reaching code that
+# has already been converted. When an extraction happens, the body of `paths()` is the only
+# thing that changes; every call site is already taking the value.
+
+
+@dataclass(frozen=True)
+class Paths:
+    """Where one run of the harness reads and writes. Frozen: a run does not move.
+
+    `repo`  the tree the harness is reporting on. Used for `relative_to` in operator-facing
+            output, and to locate `.venv/bin/haru-pack` and `flex/packages.toml`.
+    `out`   scratch and artifacts that belong to the harness itself.
+    `runs`  one directory per run: journal, heartbeat, report, preserved findings.
+    """
+
+    repo: Path
+    out: Path
+    runs: Path
+
+    @classmethod
+    def rooted_at(cls, repo: Path) -> "Paths":
+        """The conventional layout under a repo root. One place computes it."""
+        out = Path(repo) / "busybody" / "out"
+        return cls(repo=Path(repo), out=out, runs=out / "runs")
+
+    def relative(self, p: Path) -> str:
+        """`p` relative to the repo, or absolute if it is outside it.
+
+        `Path.relative_to` raises on a path outside the tree, and the harness prints these
+        in its closing summary — so a work root moved outside the repo (the documented fix
+        for a quota'd scratch filesystem) would turn the last line of a successful run into
+        a traceback.
+        """
+        try:
+            return str(Path(p).relative_to(self.repo))
+        except ValueError:
+            return str(p)
+
+
+def paths() -> Paths:
+    """The active layout, read through the deprecated module-level names.
+
+    Built per call rather than cached, and that is deliberate: `main()` rewrites the shim
+    from the command line after every module has been imported, and the tests rebind it. A
+    cached value would be the same stale-copy bug the docstring at the top of this module
+    exists to warn about, one level up.
+    """
+    return Paths(repo=REPO, out=OUT, runs=RUNS)
+
+
+def set_paths(p: Paths) -> None:
+    """Point the harness at a different layout, shim included. For tests and for a caller
+    that is not haru-pack's own checkout."""
+    global REPO, OUT, RUNS
+    REPO, OUT, RUNS = p.repo, p.out, p.runs
+
+
 MARKER = "BUSYBODY_OK"
 
 # Never acceptable, in any case, whatever it declared.
@@ -58,12 +131,56 @@ MARKER = "BUSYBODY_OK"
 # which side lost. That is the behaviour the wedge persona is asking for, not a defect.
 FATAL = ("CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "STALLED", "ESCAPED", "SMUGGLED")
 
+# INDETERMINATE is not here, and the reason is the most important thing about it: it is not
+# a verdict at all. Jepsen's operation model is `:invoke / :ok / :fail / :info`, and `:info`
+# means "the request timed out; it may or may not have been applied". Every other name in this
+# file asserts something about what happened. INDETERMINATE asserts that the harness STOPPED
+# OBSERVING before the action resolved, which is a fact about us.
+#
+# It is therefore neither a pass nor a finding, and counting it as either is a lie in one
+# direction or the other. Records carry `indeterminate: true`, are kept out of the findings
+# ledger, and are subtracted from the pass count and reported on their own line.
+#
+# This distinction is currently thin in haru-pack — a packed binary usually starts, prints and
+# exits, so most actions resolve — and it is here anyway, because retrofitting a fourth value
+# into a closed vocabulary means revisiting every `if outcome ==` in two codebases. The one
+# live producer is the herd, where sixteen children share one deadline; see herd_collect.
+
 # SANCTIONED is deliberately NOT fatal, for the same reason EXPOSED is not: it means a
 # project-controlled capability haru-pack DOCUMENTS ran, and the build log named it before
 # it ran. Folding that into ESCAPED would train the reader to skip the one outcome that
 # distinguishes "we chose this" from "nobody knew".
 
 CASES = []
+
+# The fixture catalogue, registered the same way CASES is and for the same reason.
+#
+# `--fixtures synthetic` and `--fixtures top25` name ways of PRODUCING the binaries under
+# attack, and producing them is catalogue work: it knows about tiers, about the top-25 list,
+# about flex-run. The sweep driver needs none of that — it needs "give me a list of
+# (name, exe)". While `busybody_run` imported `build_fixture` by name, the engine held a
+# hard reference into the catalogue and INV-MODULARITY-04 could not be stated, let alone
+# held. Registering here inverts it: the catalogue announces what it can build, and the
+# engine looks the name up.
+#
+# A value is `fn(tier, reaper) -> [(name, Path)]`, and may raise SystemExit for a setup
+# failure, which `_make_fixtures` already reports as one.
+FIXTURE_SOURCES: dict = {}
+
+# `fn(fixtures, log=print) -> exit code`, for --calibrate. One slot, because there is one
+# question ("where is the band between two packages?") and a second answer to it would be a
+# second question.
+CALIBRATOR = None
+
+
+def fixture_source(name: str):
+    """Register a way of producing the binaries a sweep attacks. See FIXTURE_SOURCES."""
+    def deco(fn):
+        if name in FIXTURE_SOURCES:
+            raise ValueError(f"duplicate fixture source {name!r}")
+        FIXTURE_SOURCES[name] = fn
+        return fn
+    return deco
 
 
 def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",

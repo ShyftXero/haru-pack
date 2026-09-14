@@ -107,7 +107,11 @@ def herd_collect(kids: list, watch: StallWatch, deadline_s: int | None = None) -
             done[i] = time.monotonic()
         fh.close()
         blob = log.read_text("utf8", "replace") if log.exists() else ""
-        outcome = classify(p.returncode, blob, "", timed_out)
+        # `unresolved=timed_out`: this deadline is SHARED by all N children, so a child
+        # still working when it passed may have been seconds from done. HUNG would be a
+        # claim we cannot support here — the observer that CAN say the system stopped
+        # progressing is the watchdog, and it makes that claim separately as STALLED.
+        outcome = classify(p.returncode, blob, "", timed_out, unresolved=timed_out)
         cascade = watch.stalled_at is not None and done[i] >= watch.stalled_at
         subs.append({"i": i, "rc": p.returncode, "outcome": outcome,
                      "blame": blame(blob, "") if outcome != "RAN" else "none",
@@ -136,9 +140,17 @@ def herd_verdict(subs: list, watch: StallWatch, t0: float, ignore=()) -> dict:
     """
     killed = set(ignore)
     judged = [s for s in subs if s["i"] not in killed]
+    # An INDETERMINATE child contributes no verdict, so it cannot be the worst of anything.
+    # But a herd where NOTHING resolved has not shown that the system is fine — it has shown
+    # that we stopped watching — so the reduction of an all-indeterminate herd is
+    # INDETERMINATE and not RAN.
+    settled = [s for s in judged if s["outcome"] != "INDETERMINATE"]
+    unresolved = [s for s in judged if s["outcome"] == "INDETERMINATE"]
     worst = "RAN"
-    for s in judged:
+    for s in settled:
         worst = _worse(worst, s["outcome"])
+    if judged and not settled:
+        worst = "INDETERMINATE"
     if watch.stalled_at is not None:
         worst = "STALLED"
     tally = {}
@@ -150,6 +162,10 @@ def herd_verdict(subs: list, watch: StallWatch, t0: float, ignore=()) -> dict:
         detail.append("killed by this case: "
                       + ", ".join(f"#{s['i']} {s['outcome']}" for s in subs
                                   if s["i"] in killed))
+    if unresolved:
+        detail.append(f"{len(unresolved)} child(ren) had not resolved when the shared "
+                      f"deadline passed and were killed: INDETERMINATE, counted as neither "
+                      f"a pass nor a finding")
     detail.append(f"longest quiet stretch {watch.quiet_max:.0f}s of the "
                   f"{watch.quiet_s:.0f}s a stall needs, over {watch.ticks} tick(s)")
     if watch.stalled_at is not None:
@@ -159,9 +175,10 @@ def herd_verdict(subs: list, watch: StallWatch, t0: float, ignore=()) -> dict:
     if cascades:
         detail.append(f"{len(cascades)} child(ren) resolved after the stall and are "
                       f"cascades of it, not separate faults")
-    bad = next((s for s in judged if s["outcome"] != "RAN"), None)
+    bad = next((s for s in settled if s["outcome"] != "RAN"), None)
     return {"outcome": worst,
-            "rc": bad["rc"] if bad else (judged[0]["rc"] if judged else None),
+            "indeterminate": worst == "INDETERMINATE",
+            "rc": bad["rc"] if bad else (settled[0]["rc"] if settled else None),
             "seconds": round(time.monotonic() - t0, 1),
             "blame": watch.stall_blame if worst == "STALLED"
                      else (bad["blame"] if bad else "none"),

@@ -177,7 +177,7 @@ def _run_on_a_pty(exe: Path, cwd: Path, env: dict, timeout: int) -> tuple:
              "Formatting may legitimately differ (rich honours NO_COLOR and a non-tty "
              "stdout, and a tty gets width-dependent wrapping); TEXT may not. The record "
              "reports whether the two agree once escape sequences are stripped, so a "
-             "divergence is visible without failing the case on a terminal width.")
+             "fixture-divergence is visible without failing the case on a terminal width.")
 def the_message_survives_a_tty_and_a_pipe(exe: Path, work: Path) -> dict:
     t0 = time.monotonic()
     env = clean_env(work / "c")
@@ -198,7 +198,7 @@ def the_message_survives_a_tty_and_a_pipe(exe: Path, work: Path) -> dict:
     # Stripped BEFORE classifying, and on BOTH sides: a marker wearing a colour code
     # would otherwise read as SILENT and this case would report ANSI as a launcher
     # defect. Comparing a stripped tty against an unstripped pipe would also call every
-    # run a divergence, which is the same mistake one step later.
+    # run a fixture-divergence, which is the same mistake one step later.
     tty_out, pipe_plain = _plain(tty_raw), _plain(pipe_out or "")
     pipe, tty = (classify(pipe_rc, pipe_plain, pipe_err, pipe_to),
                  classify(tty_rc, tty_out, "", tty_to))
@@ -221,7 +221,7 @@ def the_message_survives_a_tty_and_a_pipe(exe: Path, work: Path) -> dict:
       "not die first — a comment in the source says so, and nothing tested it until now. "
       "TIMING-SENSITIVE, and honestly so: the signal goes 0.7s in, so whether it lands "
       "mid-run depends on how long the app takes to start. Measured 2026-09-10 — numpy "
-      "(slow import) REFUSED, iniconfig (finishes first) RAN. That divergence is a fact "
+      "(slow import) REFUSED, iniconfig (finishes first) RAN. That fixture-divergence is a fact "
       "about import speed on this box, not a stable property of either package; do not "
       "read a change here as a regression without checking the machine.",
       inv="INV-LAUNCH-06",

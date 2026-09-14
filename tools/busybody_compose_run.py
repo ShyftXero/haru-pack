@@ -11,6 +11,7 @@ import busybody_config as cfg  # noqa: E402
 
 from busybody_compose import TRAITS  # noqa: E402
 
+import dataclasses
 import io
 import shutil
 import subprocess
@@ -163,9 +164,59 @@ def _static_verdict(ctx, exe: Path) -> dict:
                       f"{len(members)} member(s) inspected", "stderr": ""}
 
 
+def _show(v) -> str:
+    """A value rendered so that CHANGING it changes the string. Not a hash — readable."""
+    if callable(v):
+        return f"<fn {getattr(v, '__name__', '?')}>"
+    if isinstance(v, (list, tuple)):
+        return "[" + ",".join(_show(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ",".join(f"{k}:{_show(x)}" for k, x in sorted(v.items())) + "}"
+    return repr(v)
+
+
+def _snapshot(ctx) -> str:
+    """The whole of a trait context, as a comparable string.
+
+    This is the INJECTION POINT for a composed run. Every trait in this catalogue acts by
+    mutating the context it is handed — `ctx.cli += [...]`, `ctx.files[...] = ...`,
+    `ctx.env[...] = ...`, appending to `ctx.post` — and none touches the filesystem directly
+    inside its own body. So "did this trait's mutation land?" is answerable exactly, by
+    comparing the context before and after, with no per-trait bookkeeping.
+    """
+    return "|".join(f"{f.name}={_show(getattr(ctx, f.name))}"
+                    for f in dataclasses.fields(ctx))
+
+
+def _apply_traits(names, ctx) -> list:
+    """Run each trait against `ctx`. Returns the names that changed NOTHING.
+
+    A trait that fires and leaves the injection point untouched is a fault that was
+    swallowed before it reached the target — and the outcome it produces is indistinguishable
+    from "the system absorbed the fault correctly", which is the specific confusion this
+    exists to remove. AWS FIS spends one of its five stop-condition alarms on the same
+    distinction.
+
+    The result is a finding about the HARNESS, never about haru-pack. See
+    `_stack_record`/`inert`.
+    """
+    inert = []
+    for n in names:
+        before = _snapshot(ctx)
+        TRAITS[n]["fn"](ctx)
+        if _snapshot(ctx) == before:
+            inert.append(n)
+    return inert
+
+
 def run_stack(fixture_exe: Path, work: Path, combo: tuple, seed: int,
-              run_index: int, force: bool = False) -> dict:
-    """Run one stack of traits. The single code path for every composed run."""
+              run_index: int, force: bool = False, golden: bool = False) -> dict:
+    """Run one stack of traits. The single code path for every composed run.
+
+    `golden` marks the un-perturbed control: an empty stack, run through this exact path, so
+    the baseline is produced by the same machinery as everything it is the baseline FOR. A
+    control built beside the pipeline rather than through it measures the wrong thing.
+    """
     fired = realize(combo, seed, run_index, force=force)
     skipped = [n for n in fired if TRAITS[n]["needs"] and not _have(TRAITS[n]["needs"])]
     fired = tuple(n for n in fired if n not in skipped)
@@ -174,15 +225,15 @@ def run_stack(fixture_exe: Path, work: Path, combo: tuple, seed: int,
     run_traits = [n for n in fired if TRAITS[n]["phase"] == "run"]
 
     meta = {"selected": list(combo), "fired": list(fired), "skipped": skipped,
-            "seed": seed, "run_index": run_index,
+            "seed": seed, "run_index": run_index, "golden": golden,
             "layers": sorted({TRAITS[n]["layer"] for n in fired})}
+    inert: list = []
 
     exe, build_note = fixture_exe, ""
     bctx = None
     if build_traits:
         bctx = BuildCtx(proj=work / "proj")
-        for n in build_traits:
-            TRAITS[n]["fn"](bctx)
+        inert += _apply_traits(build_traits, bctx)
         rc, so, se, built = _build_composed(bctx, work)
         build_note = (so + se).strip()[-300:]
         if rc != 0 or not built.exists():
@@ -190,15 +241,15 @@ def run_stack(fixture_exe: Path, work: Path, combo: tuple, seed: int,
             # a refusal and not a traceback.
             outcome = "CRASHED" if any(m in (so + se) for m in TRAITS_TRACEBACKS) \
                 else "REFUSED"
-            return {**meta, "outcome": outcome, "rc": rc, "seconds": 0,
+            return {**meta, "inert": inert, "outcome": outcome, "rc": rc, "seconds": 0,
                     "blame": "builder", "stdout": "", "stderr": build_note}
         exe = built
         if not bctx.runnable:
-            return {**meta, **_static_verdict(bctx, exe), "build_note": build_note}
+            return {**meta, "inert": inert, **_static_verdict(bctx, exe),
+                    "build_note": build_note}
 
     rctx = RunCtx(env=clean_env(work / "c"), cwd=work)
-    for n in run_traits:
-        TRAITS[n]["fn"](rctx)
+    inert += _apply_traits(run_traits, rctx)
     for fn in [*rctx.pre, *rctx.pre_late]:
         fn(work, exe)
 
@@ -208,7 +259,7 @@ def run_stack(fixture_exe: Path, work: Path, combo: tuple, seed: int,
     if degrades and r["outcome"] == "CRASHED" and r.get("blame") == "app":
         # A trait that declared it can starve the application got what it asked for.
         r["outcome"] = "APP-CRASHED"
-    return {**meta, **r, "build_note": build_note}
+    return {**meta, "inert": inert, **r, "build_note": build_note}
 
 
 # Markers that mean the BUILD produced a traceback rather than a diagnostic. Separate from

@@ -36,9 +36,95 @@ clean verdict. A run that silently skipped what you asked for reads exactly like
 ```sh
 python tools/busybody.py --history     # every run; interrupted ones say so
 python tools/busybody.py --triage      # findings grouped by fingerprint, across all runs
-python tools/busybody.py --analyze     # did the last sweep buy anything? what diverged?
+python tools/busybody.py --analyze     # did the last sweep buy anything? what fixture-diverged?
+python tools/busybody.py --replay 6b21  # reconstruct the run behind one finding
+python tools/busybody.py --author      # propose what no recorded run has exercised
 python tools/busybody.py --calibrate --fixtures top25    # find a discriminating threshold
 ```
+
+## Three questions about a body of runs
+
+`--analyze` asks whether one sweep bought anything. Two more ask the questions that come
+before and after it.
+
+**`--replay SIGNATURE`** reconstructs the invocation behind a finding, from the findings
+ledger. The ledger is the only place a finding survives: run directories are pruned at ten by
+default, so by the time anyone asks "is this still there?", one row is all that is left. Give
+it a fingerprint prefix — six characters is unambiguous, and nobody copies sixteen correctly.
+
+It reconstructs the **invocation**, never the outcome. A seed makes the harness's own choices
+repeatable — which moment a fault landed, which traits fired — and that is all it makes
+repeatable; whether the finding is still there also depends on the fixture, the box, and the
+version under test. A row it cannot reproduce says so rather than emitting a plausible
+command: composed rows written before `fired` entered the ledger subset carry no trait list,
+and `"fired": []` (nothing fired) and no `fired` key at all (nobody recorded it) are different
+facts.
+
+**`--author`** writes a corpus script covering what no recorded run has exercised: cases that
+have never run, traits that have never **fired** (selection and firing are separate, so a
+trait with a low perturbation probability can be selected often and act never), and layer
+pairs that have never been stacked. It reads the journals, not the ledger — the ledger holds
+findings, so asking it "what has run?" would report every healthy case as never-run.
+
+It **proposes and never runs.** `--compose` at k=3 over this catalogue is hours of somebody's
+machine, and a gap is not a defect: it is a place where a clean bill of health was issued for
+something nobody looked at, which is the cheaper of the two problems to have.
+
+Both are deterministic, as is the markdown report below, so their output can be diffed.
+
+## Every run writes two reports
+
+`report.txt` is what an operator reads in a terminal with nothing else open. `report.md` is
+the same content for a diff, a PR comment or a static site, and it is **byte-identical across
+regenerations** — no generation timestamp, every section sorted by an explicit key, no
+absolute paths. That is what makes "what changed since last week" a `diff` instead of an
+exercise in reading two documents, and what lets it be committed without generating noise.
+
+Findings sort by severity then name, never by the order they ran: run order changes with
+`--jobs`, and a report that reorders itself when you add a worker is not diffable.
+
+## The golden run
+
+Every composed campaign runs one un-perturbed control first — an empty stack, through the same
+code path as every perturbed one. It is not a flag and cannot be skipped.
+
+Three things depend on it. A finding is only attributable to a fault if the same thing does
+not happen without one. Nondeterminism in the thing under test is invisible without a
+repeatable baseline. And `fault window` has nothing to be a window *from*
+(`docs/BUSYBODY-SCHEMA.md`).
+
+A stack where the firing draw happened to fire nothing is **not** a golden run, and the report
+names them differently — an accident is not a control. When the golden run is itself a
+finding, the summary says so above everything else: a campaign whose baseline is broken has
+not measured fault tolerance, it has measured a broken product N times with faults on top.
+
+## Did the fault actually land?
+
+A deliberately injected fault that is swallowed before reaching the target produces silence —
+and silence reads identically to "the system absorbed it correctly", so the run looks like
+evidence of robustness while being evidence of nothing. AWS FIS spends one of its five
+stop-condition alarms on this distinction.
+
+Every trait in the catalogue acts by mutating the context object it is handed, so busybody
+snapshots that context around each one. A trait that fires and changes nothing never reached
+the target, and is reported as a **test-infrastructure finding** — about busybody, not about
+haru-pack. It is journalled under its own `harness_finding` kind and is deliberately never
+written to the findings ledger: the ledger is the record of what haru-pack did.
+
+## Forensic bundles
+
+`preserve()` copies what a failing case left behind. It cannot say what was going on — by the
+time a case returns the processes are gone, the descriptors are closed, and which of sixteen
+children was holding the stage is unrecoverable. A `HUNG` or `STALLED` finding is exactly the
+one where the record is least useful and the live state is most.
+
+So a bundle is collected from the living system: the process tree with its `STAT` column, open
+file descriptors (from `/proc`, never `lsof` — bare `lsof` walks every mount and blocks on a
+dead NFS mount), a listing of the staged tree with any half-staged `.tmp-` directory called
+out, the scratch filesystem including the quota that `df` cannot see, and the load average.
+
+The important one is taken the instant a stall is declared, while every child is still up.
+Ten seconds later they have all been killed and "stuck on what?" is unanswerable forever.
 
 ## Analysis is a tool, not a reading exercise
 
@@ -50,7 +136,7 @@ machine computes in a millisecond.
 
 So the questions are the tool:
 
-**`--analyze [RUN]`** prints the fingerprint census, the divergence matrix, the outcome and
+**`--analyze [RUN]`** prints the fingerprint census, the fixture-divergence matrix, the outcome and
 blame distributions, and the slowest cases. The census is the one that matters: *N case runs
 produced M distinct results*. A 25-fixture sweep with a 25:1 ratio confirmed the same facts
 once per fixture — which is not 25× the assurance, and the report says so in those words.
@@ -525,7 +611,7 @@ asserting *"haru-pack works under any three of these"* would be an overclaim of 
 kind `INVARIANTS.md` exists to prevent. **The floor is the claim: it works, or it refuses
 intelligibly.**
 
-### Fallibility — the persona is a person, not a fixture
+### Per-action perturbation probability — the persona is a person, not a fixture
 
 A trait has a *probability* of acting. Some days the new developer reads the flag correctly.
 
@@ -719,10 +805,10 @@ distinct defects, all in one event:
    at ~145 MB each needs about 100 GB. 168 x 145 MB is 24 GiB — exactly where it died.
 2. **The failure was scored per case.** One environment failure became thirty different
    "findings" per fixture, and 470 rows went into the findings ledger.
-3. **`--analyze` called it divergence.** It reported *30 of 37 cases diverged by fixture*.
+3. **`--analyze` called it fixture-divergence.** It reported *30 of 37 cases diverged by fixture*.
    None had.
 
-What made it readable in seconds was the divergence matrix itself: the same five fixtures
+What made it readable in seconds was the fixture-divergence matrix itself: the same five fixtures
 passed every single case, and no property of a Python package produces that. Those five were
 the five built before the quota ran out. The tool found its own run invalid — which is the
 point of having it, and it should not have needed to.
@@ -736,7 +822,7 @@ point of having it, and it should not have needed to.
 | ledger | an aborted run writes **nothing** — a ledger full of one failure in thirty costumes is worse than an empty one |
 | `--work-root DIR` | put scratch on a filesystem with room |
 | `--scratch-cap-gb N` | abort on a leak at a number you chose, default 8 |
-| `--analyze` | an aborted run prints `THE BOX FAILED, NOT THE PRODUCT` and labels the fake divergence |
+| `--analyze` | an aborted run prints `THE BOX FAILED, NOT THE PRODUCT` and labels the fake fixture-divergence |
 
 ### `df` is not the ceiling
 
@@ -1068,14 +1154,14 @@ this box:
 stops diverging, recalibrate — do not nudge it.
 
 **"The launcher crashed" and "the app crashed" are different findings.** Once calibrated, the
-case diverged and then reported the divergence as `CRASHED` — a haru-pack defect — because the
+case diverged and then reported the fixture-divergence as `CRASHED` — a haru-pack defect — because the
 classifier could not tell a numpy `MemoryError` from a Nim traceback. There is now an
 `APP-CRASHED` outcome and a `blame` field (`launcher` / `app` / `os` / `harness`), split cheaply on
 the fact that the launcher prefixes every diagnostic with `haru-pack:`. `APP-CRASHED` is
 deliberately **not** fatal: an application declining a limit a persona imposed on purpose is
 behaving correctly, and a case has to opt into accepting it.
 
-### Measured divergence
+### Measured fixture-divergence
 
 Across `iniconfig` (pure Python, 60 MB) and `numpy` (native BLAS, 77 MB):
 
@@ -1184,8 +1270,12 @@ announce it with `Ctx.perturb()` **before** acting. A case that merely observes 
 uses `Ctx.observe()`; the two are different record types on purpose.
 
 
-Cases are plain Python functions in `tools/busybody.py`, not data. They mutate binaries and
-environments, so code is the honest representation.
+Cases are plain Python functions, not data. They mutate binaries and environments, so code
+is the honest representation. They live in the ten `tools/busybody_cases_*.py` modules —
+`_app`, `_config`, `_directives`, `_exam`, `_io`, `_launch`, `_repro`, `_reveng`, `_stage`,
+`_trojan` — plus `busybody_herd.py` and `busybody_docker.py`. `tools/busybody.py` imports
+every one of them for the side effect of their `@case(...)` decorators and holds no cases
+of its own.
 
 ```python
 @case("vandal", ("REFUSED",),

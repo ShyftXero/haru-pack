@@ -20,7 +20,14 @@ MARKER_RE = re.compile(r"""@pytest\.mark\.invariant\(\s*["'](INV-[A-Z]+-\d{2})["
 REQUIRED_FIELDS = ("Statement", "Actors", "Assets", "Red-path", "Source")
 
 # Trees scanned for prose citations of an INV- id (INV-DOC-01).
-CITATION_ROOTS = ("src", "docs", "tests")
+#
+# `tools/` is here because leaving it out was a real hole, not a theoretical one. busybody's
+# cases carry `inv=` strings naming the invariant each one governs, and those strings are
+# citations in every sense that matters — they are printed in the report, rolled up in the
+# ledger, and read by whoever triages a finding. While `tools/` went unscanned they resolved
+# to nothing and were checked by nothing. The 2026-09-13 modularity split multiplied the
+# files carrying them from one to twelve, which is when it became worth saying out loud.
+CITATION_ROOTS = ("src", "docs", "tests", "tools")
 
 
 @dataclass
