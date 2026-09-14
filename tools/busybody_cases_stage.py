@@ -238,11 +238,20 @@ def two_cold_starts_at_once(exe: Path, work: Path) -> dict:
 
 # ================================================================ timetraveller
 
+# STALE, flagged not fixed 2026-09-13. INV-GEO-01 records that the `HARUPACK_GEO` bypass was
+# REMOVED — `cryptbox.checkPolicy` now reads no environment variable for location at all. The
+# case below still passes, because the fixture it attacks is unencrypted and therefore never
+# enters the licence path, so what it now demonstrates is "an unencrypted binary ignores a
+# variable nothing reads" rather than "the geo check is advisory". Rewriting it to attack an
+# ENCRYPTED fixture, and deciding what it should then expect, is a scoping conversation about
+# INV-GEO-01 and not a citation fix.
+
 @case("timetraveller", ("RAN",),
       "Spoof the location the geo check reads. HARUPACK_GEO is supplied by the person "
       "being restricted, so this MUST get through — the docs say the check is advisory. "
-      "A refusal here would mean the documentation understates what geo does.",
-      inv="see THREAT_MODEL.md",
+      "A refusal here would mean the documentation understates what geo does. See "
+      "THREAT_MODEL.md; this case governs no declared invariant of its own.",
+      inv="",
       remedy="RAN is correct and expected. If this ever refuses, the geo check became "
              "load-bearing and README/THREAT_MODEL must stop calling it advisory.")
 def geo_spoofed(exe: Path, work: Path) -> dict:

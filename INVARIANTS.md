@@ -1728,15 +1728,26 @@ Territory: src/haru_pack/build/, src/haru_pack/cli/
 
 ### INV-DOC-01
 Status: active
-Statement: Every `INV-` identifier cited anywhere in `src/`, `docs/`, `tests/` or a root
-markdown file resolves to a real entry in this file.
+Statement: Every `INV-` identifier cited anywhere in `src/`, `docs/`, `tests/`, `tools/` or a
+root markdown file resolves to a real entry in this file. In addition, every `inv=` value on a
+registered busybody case or trait either names declared invariants or is empty — a non-empty
+value that cites no id at all is a case that reads as governed and is not.
 Actors: a future maintainer or AI agent citing an invariant that was never declared.
 Assets: the credibility of the whole scheme. lotek added this scanner after discovering
 `INV-MODULARITY-01` cited across seven source files and five plans docs without ever
-being declared.
-Red-path: Write `INV-NONSENSE-99` in any tracked file. The claiming test goes red.
-Source: Adopted from lotek `tests/test_invariants_enforced.py`.
-Territory: INVARIANTS.md, tests/test_invariants_enforced.py
+being declared. The `inv=` half protects the same credibility one layer down: that field is
+printed under INVARIANT in every busybody report and rolled up into the findings ledger, so an
+unresolvable value sends whoever is triaging a finding to an entry that does not exist.
+Red-path: Write `INV-NONSENSE-99` in any tracked file. The claiming test goes red. For the
+second half, set `inv="INV-NONSENSE-99"` on any case in `tools/busybody_cases_*.py`, or set it
+to a string with no id in it at all; `test_every_case_inv_citation_resolves` goes red naming
+the case and the value. Walked 2026-09-13 — the check found `inv="see THREAT_MODEL.md"` on
+`geo_spoofed`, which had shipped, and which is what the second clause was written for.
+Source: Adopted from lotek `tests/test_invariants_enforced.py`. The `tools/` root and the
+`inv=` resolution check were added 2026-09-13: the 2026-09-13 modularity split moved busybody's
+cases out of one file into twelve, and `tools/` was scanned by nothing, so the `inv=` strings
+on 80 cases were validated by nothing either.
+Territory: INVARIANTS.md, tests/_invariants.py, tests/test_invariants_enforced.py, tools/
 
 ### INV-DOC-02
 Status: active

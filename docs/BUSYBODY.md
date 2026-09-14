@@ -1184,8 +1184,12 @@ announce it with `Ctx.perturb()` **before** acting. A case that merely observes 
 uses `Ctx.observe()`; the two are different record types on purpose.
 
 
-Cases are plain Python functions in `tools/busybody.py`, not data. They mutate binaries and
-environments, so code is the honest representation.
+Cases are plain Python functions, not data. They mutate binaries and environments, so code
+is the honest representation. They live in the ten `tools/busybody_cases_*.py` modules —
+`_app`, `_config`, `_directives`, `_exam`, `_io`, `_launch`, `_repro`, `_reveng`, `_stage`,
+`_trojan` — plus `busybody_herd.py` and `busybody_docker.py`. `tools/busybody.py` imports
+every one of them for the side effect of their `@case(...)` decorators and holds no cases
+of its own.
 
 ```python
 @case("vandal", ("REFUSED",),

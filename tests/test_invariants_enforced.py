@@ -10,11 +10,13 @@ Adopted from lotek's tests/test_invariants_enforced.py.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 from _invariants import (
+    ID_RE,
     INVARIANTS_MD,
     REPO,
     REQUIRED_FIELDS,
@@ -87,6 +89,71 @@ def test_every_cited_invariant_id_resolves():
     assert not dangling, (
         "these INV- ids are cited in the repo but declared nowhere in INVARIANTS.md: "
         f"{dangling}"
+    )
+
+
+def _catalogue() -> tuple[list, dict]:
+    """busybody's registered cases and traits, loaded the way the harness loads them.
+
+    The registry, not a text scan: `@case(...)` and `@trait(...)` run at import and append to
+    `busybody_config.CASES` / `busybody_compose.TRAITS`, so this is the citation set the
+    report, the ledger and `--triage` will actually print. A regex over the source would also
+    match a commented-out case or miss one built by a loop.
+    """
+    import importlib.util
+
+    tools = REPO / "tools"
+    if str(tools) not in sys.path:
+        sys.path.insert(0, str(tools))
+    spec = importlib.util.spec_from_file_location("busybody", tools / "busybody.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    import busybody_compose
+    import busybody_config
+    return list(busybody_config.CASES), dict(busybody_compose.TRAITS)
+
+
+@pytest.mark.invariant("INV-DOC-01")
+def test_every_case_inv_citation_resolves():
+    """A case's `inv=` must name declared invariants, or name nothing at all.
+
+    This is the half of the linkage contract that neither repo had. `collect_citations`
+    proves that an id APPEARING in a file is real; it cannot prove that the specific field
+    busybody prints under "INVARIANT" in every report is a citation rather than prose. Two
+    distinct failures are caught here:
+
+      * an `inv=` naming an id that was never declared — a report sends its reader to an
+        entry that does not exist;
+      * an `inv=` that is non-empty but contains no id at all (`inv="see THREAT_MODEL.md"`
+        was real, and shipped) — a case that looks governed and is not. Cite an id, or leave
+        the field empty and put the pointer in `why`/`remedy` where prose belongs.
+
+    Traits are held to the same rule: `_stack_record` folds their `inv` values into the same
+    ledger field, so a composed finding cites them identically.
+
+    The reverse check — every declared invariant has a covering case — is deliberately NOT
+    here. It would fail loudly today and it is a scoping conversation, not a fix.
+    """
+    cases, traits = _catalogue()
+    entries = ([(f"case {c['name']}", c.get("inv", "")) for c in cases]
+               + [(f"trait {n}", t.get("inv", "")) for n, t in traits.items()])
+    offenders = []
+    for label, value in entries:
+        value = (value or "").strip()
+        if not value:
+            continue
+        ids = ID_RE.findall(value)
+        if not ids:
+            offenders.append(f"{label}: inv={value!r} cites no INV- id at all")
+            continue
+        for inv_id in ids:
+            if inv_id not in INVARIANTS:
+                offenders.append(f"{label}: inv={value!r} names undeclared {inv_id}")
+    assert not offenders, (
+        "busybody catalogue entries carry `inv=` citations that resolve to nothing. Every "
+        "one of these is printed under INVARIANT in a report and rolled up in the ledger, so "
+        "a reader is being sent somewhere that does not exist:\n  "
+        + "\n  ".join(offenders)
     )
 
 
