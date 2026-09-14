@@ -301,6 +301,14 @@ user data — the code lives in the stage dir.
 - [docs/ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) — `--encrypt` + license checks
 - [docs/FLEX.md](docs/FLEX.md) — the flex harness: top-25 breadth + hard targets
 - [docs/BUSYBODY.md](docs/BUSYBODY.md) — chaos testing: the personas and how to read a report
+- [docs/BUSYBODY-SCHEMA.md](docs/BUSYBODY-SCHEMA.md) — the on-disk contract for what a
+  chaos run writes: journal line, finding record, ledger rollup
+- [docs/BUSYBODY-PROTOCOLS.md](docs/BUSYBODY-PROTOCOLS.md) — what this harness would need
+  from a shared core, and the assumptions it makes that one would have to allow
+- [docs/BUSYBODY-TRANSFER.md](docs/BUSYBODY-TRANSFER.md) — the append-only log of ideas
+  moved between this harness and lotek's, including the declined ones
+- [docs/BUSYBODY-SHRINKING-SPIKE.md](docs/BUSYBODY-SHRINKING-SPIKE.md) — a costed and
+  **declined** `ddmin`, kept for the two findings that outlived the verdict
 - [docs/RELEASING.md](docs/RELEASING.md) — cutting a release (`./scripts/cut-release.sh`)
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — publishing to PyPI
 - [docs/adr/](docs/adr/) — architecture decision records (stub-config + canary, reap +
