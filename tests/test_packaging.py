@@ -261,12 +261,12 @@ def test_a_thin_build_records_the_pinned_uv_digest():
     with no pin behind it, warning on every fetch. The thin tier now writes the pinned
     ARCHIVE digest from pins.toml, and refuses to build without one.
 
-    Red-path: delete the `manifest["uv_sha256"]` assignment in `assemble_payload`. This goes
-    red, and a --thin binary fetches and executes an unverified uv on the target.
+    Red-path: delete the `manifest["uv_sha256"]` assignment in `build.assemble._stage_uv`.
+    This goes red, and a --thin binary fetches and executes an unverified uv on the target.
     """
     import inspect
-    from haru_pack import build as build_mod
-    src = inspect.getsource(build_mod.assemble_payload)
+    from haru_pack.build import assemble as assemble_mod
+    src = inspect.getsource(assemble_mod._stage_uv)
     assert 'manifest["uv_sha256"]' in src, "the thin tier records no uv digest"
     assert "UV_SHA256.get" in src, "the digest does not come from the pins"
     # and it must be the ARCHIVE digest, not the bundled binary's

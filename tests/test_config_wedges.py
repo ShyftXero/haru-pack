@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from _source import module_source
+
 from haru_pack.build import (CWD_POLICIES, BuildError, validate_encryption,
                              validate_manifest)
 
@@ -131,8 +133,8 @@ def test_an_expiry_the_launcher_cannot_parse_is_refused(bad):
 def test_the_validators_are_actually_called_by_the_build():
     """Both were written because an artifact shipped without them. A validator nothing calls
     is the same as no validator, and it reads better in a diff."""
-    src = (REPO / "src" / "haru_pack" / "build.py").read_text()
-    body = src[src.index("def _resolve("):src.index("def assemble_payload(")]
+    src = module_source("haru_pack.build.declare")
+    body = src[src.index("def _resolve("):]
     assert "validate_manifest(manifest)" in body, (
         "_resolve must validate the manifest before any build work happens"
     )

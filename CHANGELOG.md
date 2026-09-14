@@ -20,6 +20,56 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
   build-side (upstream of Nim), so they reproduced identically on x86 and aarch64
   (INV-BUILD-01 / INV-BUILD-03).
 
+### Internal — no god modules, and a check that says so (INV-MODULARITY-01/02/03)
+
+Nothing here changes what haru-pack does. It changes how much of it you have to read to
+change one thing.
+
+- **Four god modules are gone.** `build.py` (735 statements, importing 16 of the package's
+  22 modules), `tools/busybody.py` (3393), `shake.py` (536) and `cli.py` (483) are now
+  packages and flat sibling modules named for what they are FOR — `build/orchestrate` reads
+  as the list of phases a build has, `shake/` is its three phases plus the one function that
+  runs them in order, `cli/` is one module per command. Four more files that were merely too
+  long (`emit.py`, `exam.py`, `busybody_traits.py`, `busybody_hostile.py`) went the same way.
+- **The public surface did not move.** `from haru_pack.build import X`, `from haru_pack
+  import cli`, `python tools/busybody.py`, `python tools/exam.py` — all unchanged. Every name
+  that was importable still is, including the underscored helpers tests reach for.
+- **Three budgets, machine-checked, no allowlist.** 300 statements per module, 80 per
+  function, and 150 for a module that imports more than eight first-party modules — that last
+  one is the actual definition of a god module: a module may be the hub, or hold the work, not
+  both. Comments and docstrings are free; see `docs/PRINCIPLES.md`.
+- **Behaviour preservation was measured, not asserted.** `tools/gen-package-manifest.py`
+  regenerates `flex/packages.toml` byte-identically; `exam.py emit` reproduces
+  `top_n_pypi_stats.md` unchanged; `busybody_analyze.format_analysis` and
+  `busybody_report.write_report` were diffed against their pre-split selves across fifteen
+  constructed inputs and match exactly; busybody still registers the same 80 cases across the
+  same 21 personas, and the trait catalogue still holds 42.
+
+Four things the split exposed or introduced. Each has a guard now, because a refactor
+that only fixes its own breakage teaches nobody anything:
+
+- **`build/` in `.gitignore`** — and in a very common global `core.excludesFile` — matched
+  `src/haru_pack/build/`, so `git add` reported nothing at all while keeping the entire new
+  package untracked. This one was a real trap waiting rather than something the split
+  caused: any future `build/` package would have hit it. The root artifacts are now anchored
+  (`/build/`) and the package is re-included explicitly.
+- **Seven relative imports across three files broke silently**, because moving a file into
+  a subpackage changes what `from . import x` means. None raised at import time — the ones
+  that hurt were late-bound inside a function, so nothing ran them until someone ran that
+  exact command. One landed inside a `try/except Exception`, where an ImportError is
+  indistinguishable from a malformed pyproject and made every project look unnamed;
+  `from . import scaffold` inside `haru-pack init` was covered by nothing at all.
+  `tests/test_imports_resolve.py` now statically resolves every relative import in the
+  package, so a function-local one is no harder to see than a top-level one.
+- **A command module imported only so its decorators run looks like an unused import**, and
+  deleting one removes a subcommand with no error anywhere. That hazard is new — it did not
+  exist while `cli` was one file. `tests/test_cli_surface.py` asserts the full subcommand set
+  and renders `--help` for each, which is what caught two NameErrors during the move.
+- `test_the_cli_does_not_import_richs_print_directly` was reading `inspect.getsource(cli)`,
+  which on a package returns only `__init__.py`. It now parses the imports of every module in
+  the package — and the parsing, rather than substring matching, is what made it see
+  `from ..ui import fields, print`.
+
 ## 2026-09-12
 
 ### Features — `--emit-nim` and `--emit-c`: reproduction kits for the launcher stub

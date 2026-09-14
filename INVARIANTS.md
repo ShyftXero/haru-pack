@@ -100,7 +100,7 @@ no extra assurance.
 Note: A vacuous pass is prevented twice over. The generated script verifies the test paths
 exist and exits 2 with `PAYLOAD INCOMPLETE` if they do not, and pytest itself returns 5
 rather than 0 when it collects nothing. The success marker is printed only on rc == 0.
-Territory: src/haru_pack/build.py, src/haru_pack/bundle.py, src/haru_pack/discovery.py,
+Territory: src/haru_pack/build/, src/haru_pack/bundle.py, src/haru_pack/discovery.py,
 tests/test_tiers_offline.py, tests/test_examiner_fixtures.py, tools/flex-run.py
 
 ### INV-TIER-03
@@ -130,7 +130,7 @@ aarch64 case is not hypothetical. ARM Linux is a target, not a build host.
 Note: `tourist` covers the adjacent question — what happens when a foreign artifact IS
 executed here — and its honest scope is "fails cleanly". A real foreign run needs a real
 foreign machine; `openclaw` is the ARM one on hand.
-Territory: src/haru_pack/targets.py, src/haru_pack/bundle.py, tools/busybody.py,
+Territory: src/haru_pack/targets.py, src/haru_pack/bundle.py, tools/busybody*.py,
 tests/test_compose.py, tests/test_targets.py
 
 ---
@@ -148,7 +148,7 @@ Source: docs/FREE_THREADED.md, 2026-09-10 — found by reading `launcher/main.ni
 noticing `manifest.python` is a path, not a version, so no tier without a staged interpreter
 carries the variant to the target at all.
 Territory: not yet — nothing is implemented. Planned:
-src/haru_pack/build.py, src/haru_pack/launcher/manifest.nim, src/haru_pack/launcher/main.nim
+src/haru_pack/build/, src/haru_pack/launcher/manifest.nim, src/haru_pack/launcher/main.nim
 
 ---
 
@@ -176,7 +176,7 @@ Note: A warning, not a refusal. haru-pack cannot tell whether a given step needs
 cases. The fix for a downloading step is a `[[bundle]]` step, which runs at build time and
 ships its output in the payload; that is what playwright does, and playwright passed thick +
 offline at 225 MB with firefox bundled.
-Territory: src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_tiers_offline.py
+Territory: src/haru_pack/build/, src/haru_pack/cli/, tests/test_tiers_offline.py
 
 ---
 
@@ -212,7 +212,7 @@ Note: Severity is a closed three-value vocabulary — critical / warning / note 
 A `CASE-ERROR` (busybody's own bug) is a `note`, never a finding about haru-pack. Two of
 those turned up on the first real run, and conflating them with product defects is precisely
 what the split prevents.
-Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_ledger.py
+Territory: tools/busybody_ledger.py, tools/busybody*.py, tests/test_busybody_ledger.py
 
 ### INV-CHAOS-02
 Status: active
@@ -237,7 +237,7 @@ Note: Orphan reaping and run pruning follow lotek's `cleanup.py` heartbeat rule:
 has a fresh heartbeat, something may still be using its directories and nothing is touched. A
 missing or unreadable heartbeat means not live, and both are safe to reap, because a live run
 always has a fresh one.
-Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_ledger.py
+Territory: tools/busybody_ledger.py, tools/busybody*.py, tests/test_busybody_ledger.py
 
 ### INV-CHAOS-03
 Status: active
@@ -268,7 +268,7 @@ change that. Measured 2026-09-10: 575 runs across 25 packages produced 23 finger
 per case. App-level personas are the only ones for which `--fixtures top25` buys anything,
 and even then only 2 of 13 diverged — the bundled interpreter absorbs most environmental
 difference.
-Territory: tools/busybody.py, tests/test_busybody_ledger.py
+Territory: tools/busybody*.py, tests/test_busybody_ledger.py
 
 ---
 
@@ -300,7 +300,7 @@ Note: This invariant is why `tools/busybody.py --calibrate` exists at all. A com
 source already promised it ("re-run tools/busybody.py --calibrate rather than nudging the
 number") while no such flag existed — a dangling claim of exactly the kind INV-DOC-02 exists
 to catch, found in our own code.
-Territory: tools/busybody_analyze.py, tools/busybody.py, tests/test_busybody_ledger.py
+Territory: tools/busybody_analyze.py, tools/busybody*.py, tests/test_busybody_ledger.py
 
 ---
 
@@ -341,7 +341,7 @@ write at 24 GiB, because the mount carries `usrquota` and a per-user quota is in
 `--work-root` moves scratch elsewhere.
 Note: `--scratch-cap-gb` (default 8) aborts on a leak at a number the operator chose rather
 than at whatever the filesystem happens to allow.
-Territory: tools/busybody.py, tools/busybody_ledger.py, tools/busybody_analyze.py,
+Territory: tools/busybody*.py, tools/busybody_ledger.py, tools/busybody_analyze.py,
 tests/test_busybody_ledger.py
 
 ---
@@ -379,7 +379,7 @@ serially and says so when it is absent — a missing convenience must not stop t
 Note: ordered `imap`, not `imap_unordered`. An unordered journal is not byte-comparable
 between two runs of the same sweep, and that comparability is what makes the fingerprint
 census reproducible rather than merely repeatable.
-Territory: tools/busybody.py, tests/test_busybody_ledger.py
+Territory: tools/busybody*.py, tests/test_busybody_ledger.py
 
 ---
 
@@ -429,7 +429,7 @@ saying which side lost is the behaviour this invariant asks for, not a defect.
 Note: Wedge cases are `per_fixture=False`. They build their own artifact and say nothing
 about the packed package, so running them once per fixture would repeat one answer 25 times
 and inflate the census that INV-CHAOS-04 exists to keep honest.
-Territory: src/haru_pack/build.py, tools/busybody.py, tests/test_config_wedges.py
+Territory: src/haru_pack/build/, tools/busybody*.py, tests/test_config_wedges.py
 
 ---
 
@@ -481,7 +481,7 @@ reshuffle every other trait's firing decisions in every other run.
 Note: Conflicts are declared for pairs where one trait CANCELS another, not for pairs that
 break together. A stack whose members cancel tests less than either member alone; a stack
 that breaks together is the finding.
-Territory: tools/busybody_compose.py, tools/busybody_traits.py, tools/busybody.py,
+Territory: tools/busybody_compose.py, tools/busybody_traits.py, tools/busybody*.py,
 tests/test_compose.py
 
 ---
@@ -526,7 +526,7 @@ default-tier fixture on 2026-09-11, longest quiet stretch 0.0s over 9 to 13 tick
 TODO naming the thick-tier measurement that has not been taken, because a thick fixture cannot
 be built on that box at all (no pinned sha256 for the CPython it wants). The threshold is not
 what this entry claims. Who is allowed to declare the outcome is.
-Territory: tools/busybody.py, tests/test_busybody_faults.py, tests/test_busybody_ledger.py
+Territory: tools/busybody*.py, tests/test_busybody_faults.py, tests/test_busybody_ledger.py
 
 ### INV-CHAOS-10
 Status: active
@@ -559,7 +559,7 @@ Note: A cascade is de-emphasised, never hidden. It keeps `ok=False`, it reaches 
 it prints under its own heading with the numbering running on — because the shape of a cascade
 is the primary evidence for the stall that caused it. Suppressing it is triage's job, not the
 ledger's.
-Territory: tools/busybody_ledger.py, tools/busybody.py, tests/test_busybody_faults.py,
+Territory: tools/busybody_ledger.py, tools/busybody*.py, tests/test_busybody_faults.py,
 tests/test_busybody_ledger.py
 
 ### INV-CHAOS-11
@@ -591,7 +591,7 @@ test alone would therefore be satisfiable by a claim; the source-shape half is a
 fault performed inside a helper the case calls, and says so.
 Note: `Journal.write` flushes and fsyncs per record for this reason, which is the same property
 INV-CHAOS-01 needs for an interrupted run.
-Territory: tools/busybody.py, tools/busybody_ledger.py, tests/test_busybody_faults.py
+Territory: tools/busybody*.py, tools/busybody_ledger.py, tests/test_busybody_faults.py
 
 ### INV-CHAOS-12
 Status: active
@@ -610,7 +610,7 @@ truncated_binary runs alone, the process exits 0, and
 host (observed the typo silently swallowed and rc 0).
 Source: adopted from lotek BusyBody #558 (`_corpus_scripts` — an unmatched selection is fatal,
 not dropped). docs/BUSYBODY.md "Selection is fail-loud".
-Territory: tools/busybody.py, tests/test_busybody_runcontrol.py
+Territory: tools/busybody*.py, tests/test_busybody_runcontrol.py
 
 ### INV-CHAOS-13
 Status: active
@@ -640,7 +640,7 @@ registry follows the scratch dir). Walked 2026-09-12 on this Linux host (all thr
 Source: adopted from lotek BusyBody #738 (single-instance reaper, graceful stop, project-tagged
 registry — lotek explicitly reserves its own tag so haru-pack gets its own). docs/BUSYBODY.md "Run control".
 Checks pids directly with `os.kill(pid, 0)`, so there is no ps-grep self-match trap (CLAUDE.md).
-Territory: tools/busybody.py, tests/test_busybody_runcontrol.py
+Territory: tools/busybody*.py, tests/test_busybody_runcontrol.py
 
 ### INV-CHAOS-14
 Status: active
@@ -661,7 +661,7 @@ Red-path: In main()'s `--analyze` branch replace `return analyze_exit_code(analy
 red on every non-clean journal. Walked 2026-09-12 on this Linux host.
 Source: adopted from lotek BusyBody #418/#682 (analyze doubles as a gate; refuse a false-clean).
 docs/BUSYBODY.md. Found by auditing haru-pack's `--analyze` against lotek's false-clean hardening.
-Territory: tools/busybody.py, tools/busybody_analyze.py, tests/test_busybody_ledger.py
+Territory: tools/busybody*.py, tools/busybody_analyze.py, tests/test_busybody_ledger.py
 
 ### INV-FLEX-01
 Status: active
@@ -724,7 +724,7 @@ Red-path: Hardcode `encrypted=True` in the `info.update(...)` call in `build.bui
 detach it from the branch that actually calls `crypto.encrypt`. The claiming test inspects
 the produced payload for the container magic and goes red.
 Source: CRIT C1 — `--encrypt` accepted a secret, printed success, and shipped plaintext.
-Territory: src/haru_pack/build.py, src/haru_pack/cli.py
+Territory: src/haru_pack/build/, src/haru_pack/cli/
 
 ### INV-BUILD-02
 Status: active
@@ -736,7 +736,7 @@ Red-path: Remove `encrypt` from the parameters threaded into `build.build()` and
 the `any([expires, geo, machine, user, embed_secret])` enablement rule. `--encrypt --secret X`
 with no policy flag then exits 0 with a plaintext payload and the claiming test goes red.
 Source: CRIT C1, adversarial review 2026-09-09. The bug shipped in a documented example.
-Territory: src/haru_pack/cli.py, src/haru_pack/build.py
+Territory: src/haru_pack/cli/, src/haru_pack/build/
 
 ### INV-BUILD-03
 Status: active
@@ -764,7 +764,7 @@ target with "'<pkg>' is a package and cannot be directly executed". Verified aga
 synthetic package that day. Red-path for that half: change the `__main__.py` test in
 `discovery.discover` back to `__init__.py` and
 `test_an_importable_but_unexecutable_package_is_refused` goes red.
-Territory: src/haru_pack/discovery.py, src/haru_pack/cli.py, tests/test_entrypoints.py
+Territory: src/haru_pack/discovery.py, src/haru_pack/cli/, tests/test_entrypoints.py
 
 ### INV-BUILD-04
 Status: active
@@ -799,7 +799,7 @@ is one less place for the Python and Nim sides to disagree (compare INV-CRYPTO-0
 did). The generated argv sets `sys.argv[0]` and re-raises the callable's return value as
 `SystemExit`, matching what an installed console script does — without which a non-zero exit
 code would be reported as success.
-Territory: src/haru_pack/entrypoints.py, src/haru_pack/build.py, tests/test_entrypoints.py
+Territory: src/haru_pack/entrypoints.py, src/haru_pack/build/, tests/test_entrypoints.py
 
 ### INV-BUILD-05
 Status: active
@@ -844,7 +844,7 @@ Typer `OptionInfo` sentinel, so a plain `haru-pack hello.py` printed "🦣 chonk
 crashed on `OptionInfo.encode()`.
 Note: Both entry points call one plain `_run_build()` with ordinary keyword defaults, rather
 than `ctx.invoke`, which is what produced the sentinel bug. One implementation, two doors.
-Territory: src/haru_pack/cli.py, tests/test_targets.py
+Territory: src/haru_pack/cli/, tests/test_targets.py
 
 ### INV-BUILD-07
 Status: active
@@ -870,7 +870,7 @@ replaces rather than extends the one in `pyproject.toml`; concatenating would le
 add steps but never remove an inherited one.
 Note: PEP 723 permits `[tool]` tables inside a script's inline metadata block. That is NOT
 read yet — a script's directives still go in `haru_pack.toml` beside it.
-Territory: src/haru_pack/build.py, tests/test_entrypoints.py
+Territory: src/haru_pack/build/, tests/test_entrypoints.py
 
 ---
 
@@ -998,7 +998,7 @@ payload from a fixture tree containing `.env` and `id_rsa` and asserts they are 
 the zip; it goes red immediately.
 Source: CRIT C4, adversarial review 2026-09-09. `_IGNORE` excluded `.git` and `__pycache__`
 but nothing secret-shaped.
-Territory: src/haru_pack/build.py
+Territory: src/haru_pack/build/
 
 ### INV-PAYLOAD-02
 Status: active
@@ -1040,7 +1040,7 @@ Source: Found 2026-09-10 while building `--shake` — the tree-shaker's "dists o
 `--no-dev` resolution" rule was dropping eleven trees that had no business being in the
 payload in the first place. Fixed on its own rather than left as a `--shake` side effect,
 since a plain `--thick` build should not ship a test framework either.
-Territory: src/haru_pack/bundle.py, src/haru_pack/build.py
+Territory: src/haru_pack/bundle.py, src/haru_pack/build/
 
 ---
 
@@ -1182,7 +1182,7 @@ come from the same decision. The project path was already safe because it passes
 explicitly; only the script path was exposed.
 Note: busybody's own work directories now live outside the repository for the same reason. A
 chaos harness that can damage the tree it is testing is worse than no harness.
-Territory: src/haru_pack/launcher/main.nim, tools/busybody.py, tests/test_launcher_isolation.py
+Territory: src/haru_pack/launcher/main.nim, tools/busybody*.py, tests/test_launcher_isolation.py
 
 ### INV-LAUNCH-08
 Status: active
@@ -1279,7 +1279,7 @@ each import to the HIGHEST version present in the multi-version package director
 what was installed. Pinning the installer only controls which versions arrive, not which one the
 compiler picks. Marking this active would be exactly the over-claim this file exists to prevent.
 The fix is a project `.nimble` or an explicit `--nimblePath` at compile time.
-Territory: src/haru_pack/bootstrap.py, src/haru_pack/build.py
+Territory: src/haru_pack/bootstrap.py, src/haru_pack/build/
 
 ### INV-SUPPLY-04
 Status: active
@@ -1312,7 +1312,7 @@ pins, empty download, over-cap archive). Separately, delete its CALL from `ensur
 Source: Adversarial review 2026-09-09, boundary B6 / finding W6. `writeFile(arc, fetch(url))`
 had no digest, no cap and no timeout.
 Note: **Read this narrowly. Nothing populates `uv_sha256` yet.** Writing it at build time is
-Python-side work in `build.py`/`tiers.py`, outside the launcher. Until that lands the field is
+Python-side work in `build/`/`tiers.py`, outside the launcher. Until that lands the field is
 absent in every real payload, the pin check is vacuous in production, and the launcher prints a
 warning on stderr that the uv it is about to execute is unverified. The mechanism is proven; the
 deployment is not.
@@ -1590,7 +1590,7 @@ appears, waiting forever on a dead claim arrives with it, and that is what
 `sixteen_starts_against_an_orphaned_stage` is standing guard over.
 Territory: not yet claimed. The behaviour lives in src/haru_pack/launcher/stage.nim
 (`stageZip`'s `<key>.tmp-<pid>` plus the atomic `moveDir`); the harness that probes it is the
-`herd` persona in tools/busybody.py.
+`herd` persona in tools/busybody*.py.
 
 ---
 
@@ -1653,8 +1653,8 @@ kit's `payload.bin` is the exact bytes the binary already carries (ciphertext un
 plaintext otherwise), so it exposes nothing new. The build SECRET/key is derived-from, not
 stored, and is never written to any kit file —
 `test_emit_kit_never_contains_the_build_secret` greps every emitted file to prove it.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, src/haru_pack/emit.py,
-tools/busybody.py, tests/test_reverse_engineer.py, tests/test_emit_nim.py
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, src/haru_pack/emit/,
+tools/busybody*.py, tests/test_reverse_engineer.py, tests/test_emit_nim.py
 
 ---
 
@@ -1704,7 +1704,7 @@ Note: Obfuscation and encryption are INDEPENDENT axes. Neither implies the other
 obfuscate a plaintext-payload binary, encrypt an unobfuscated one, do both, or neither. They
 protect different things (INV-SECRET-02), and the code wires them separately so a change to
 one cannot silently alter the other.
-Territory: src/haru_pack/obfuscate.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+Territory: src/haru_pack/obfuscate.py, src/haru_pack/build/, src/haru_pack/cli/,
 tests/test_obfuscate.py
 
 ### INV-SECRET-02
@@ -1720,7 +1720,7 @@ Source: Adversarial review 2026-09-09. `docs/CONFIG.md` states the secret is nev
 config — asserted in prose only.
 Note: This does **not** cover `--secret <literal>`, which puts key material in shell history
 and `ps` output. That is a documented sharp edge, not a defended one.
-Territory: src/haru_pack/build.py, src/haru_pack/cli.py
+Territory: src/haru_pack/build/, src/haru_pack/cli/
 
 ---
 
@@ -1788,7 +1788,7 @@ or change `build()`'s `except ShakeError` to log a warning and continue. Either 
 `test_a_shake_error_fails_the_build_rather_than_shipping_unshaken` go red.
 Source: Written with the feature, 2026-09-10, from the tier's own precedent: INV-TIER-01
 exists because `--thick` once quietly needed the network. `--shake` can quietly need a file.
-Territory: src/haru_pack/shake.py, src/haru_pack/build.py, tests/test_shake.py
+Territory: src/haru_pack/shake/, src/haru_pack/build/, tests/test_shake.py
 
 ### INV-SHAKE-02
 Status: active
@@ -1806,7 +1806,7 @@ it fail for real: add a dev dependency pinning an older version of a runtime dis
 observe the suite pass against files the payload no longer contains.
 Source: Found while designing the verification step, 2026-09-10 — the first draft installed
 the dev group into the verification env and would have verified the wrong tree.
-Territory: src/haru_pack/shake.py, tests/test_shake.py
+Territory: src/haru_pack/shake/, tests/test_shake.py
 
 ### INV-SHAKE-03
 Status: active
@@ -1823,7 +1823,7 @@ non-zero-exit check in `shake._observe`. `test_shake_refuses_a_project_with_no_t
 or `test_a_failing_observation_run_prunes_nothing` goes red.
 Source: Written with the feature, 2026-09-10. The repo's standing rule — "it refuses instead
 of guessing" — applied to deletion, where guessing is least recoverable.
-Territory: src/haru_pack/shake.py, tests/test_shake.py
+Territory: src/haru_pack/shake/, tests/test_shake.py
 
 ### INV-SHAKE-04
 Status: proposed
@@ -1945,7 +1945,7 @@ environment, because a `[tool.uv] package = false` project does not install its 
 and would otherwise be refused wrongly.
 Source: Asked for 2026-09-10 — "fix both of those issues. user ergonomics is paramount" —
 after `-e serve` with no such script was found to build cleanly.
-Territory: src/haru_pack/entrypoints.py, src/haru_pack/build.py, tests/test_entrypoints.py
+Territory: src/haru_pack/entrypoints.py, src/haru_pack/build/, tests/test_entrypoints.py
 
 ### INV-BUILD-09
 Status: active
@@ -1966,7 +1966,7 @@ Verified 2026-09-10 against a package defining `main` and `helper`: the refusal 
 `demo:main` and `demo:helper` and printed
 `haru-pack build <path> --entry-point demo:main`.
 Source: Asked for 2026-09-10 with INV-BUILD-08.
-Territory: src/haru_pack/discovery.py, src/haru_pack/entrypoints.py, src/haru_pack/cli.py,
+Territory: src/haru_pack/discovery.py, src/haru_pack/entrypoints.py, src/haru_pack/cli/,
 tests/test_entrypoints.py
 
 ---
@@ -2004,7 +2004,7 @@ to tell the operator — `[project.scripts]`, `[tool.haru-pack]`, `[shake]`, `[s
 `[[bundle]]`, `[[post_install]]`. A refusal that names no fix is worse than the bug it
 reports.
 Red-path: Change `ui.print`'s `markup` default to `True`, or `from rich import print`
-directly in `cli.py`. Ten parametrizations of
+directly in `cli/`. Ten parametrizations of
 `test_bracketed_text_survives_printing` go red. Separately, render `ui.fields` as a
 `rich.Table` again — it drops the `:` separator and
 `test_fields_keeps_the_colon_separator` goes red, which is what would have broken
@@ -2018,7 +2018,7 @@ Note: `NO_COLOR=1` and a non-tty stdout are honoured by rich, so piped output is
 verified. Colour is never the carrier of meaning: every state that is coloured is also
 stated in words (`payload integrity: OK`, `nim deps: FAILED`), because a colour is invisible
 to anyone reading a log file.
-Territory: src/haru_pack/ui.py, src/haru_pack/cli.py, tests/test_ui.py
+Territory: src/haru_pack/ui.py, src/haru_pack/cli/, tests/test_ui.py
 
 ---
 
@@ -2047,7 +2047,7 @@ Note: A consequence, verified 2026-09-10: haru-pack's own `pyproject.toml` now d
 console scripts, so `haru-pack .` on this repository correctly refuses as ambiguous and
 lists both. Packing haru-pack with haru-pack needs `-e haru-pack`.
 Source: Asked for 2026-09-10 — "i want to have haru-pack and haru as equivalent commands".
-Territory: pyproject.toml, src/haru_pack/cli.py, tests/test_packaging.py
+Territory: pyproject.toml, src/haru_pack/cli/, tests/test_packaging.py
 
 ### INV-PKG-02
 Status: active
@@ -2207,7 +2207,7 @@ Drop `stub_config=` from the `build.build` `attach()` call (emit a v1 footer) an
 `test_receipt_records_the_canary_map_but_not_the_secret` go red. Walked 2026-09-10.
 Source: docs/adr/0003-stub-config-and-canary.md §2.1/§5. The build half of the one resolution
 rule INV-CANARY-01 defends at runtime; every new binary is v2 (carries the section).
-Territory: src/haru_pack/build.py, src/haru_pack/cli.py, src/haru_pack/overlay.py
+Territory: src/haru_pack/build/, src/haru_pack/cli/, src/haru_pack/overlay.py
 
 ### INV-CANARY-03
 Status: active
@@ -2257,7 +2257,7 @@ red. Walked 2026-09-10.
 Source: docs/adr/0003-stub-config-and-canary.md §4.3. The pairs live post-decrypt; the
 launcher applies them before uv + the app and its own reserved vars win on a collision
 (INV-LAUNCH-09). Called "inject", never "project".
-Territory: src/haru_pack/build.py, src/haru_pack/cli.py
+Territory: src/haru_pack/build/, src/haru_pack/cli/
 
 ---
 
@@ -2312,7 +2312,7 @@ CLOSED: it refuses a staging root whose existing prefix passes through any repar
 Red-path: delete the `physicalPrefix` block in `refuseUnsafeRoot` and
 `test_symlinked_env_base_path_to_a_refused_root_is_refused` goes red (the launcher stages under
 `$HOME` / `/`). See CHANGELOG.md 2026-09-11.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py, src/haru_pack/cli.py
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build/, src/haru_pack/cli/
 
 ### INV-RAM-01
 Status: active
@@ -2335,7 +2335,7 @@ to the auto path: even when `/dev/shm` is available, the launcher stages to RAM 
 baked `unpacked_bytes` provably fits free memory. A real `ram_only` build always bakes that size,
 so this narrows nothing an operator sees; a hand-crafted stub with `ram_only` and no
 `unpacked_bytes` now fails safe to disk rather than gambling RAM.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build/
 
 ### INV-REAP-01
 Status: active
@@ -2355,7 +2355,7 @@ under a temp dir: the staged subtree is still present after exit and
 the base dir and a sentinel survive) goes red. Walked 2026-09-10 on Linux.
 Source: docs/adr/0004-reap-ram-staging.md §5/§6. CONTEXT.md "detached reap" / "reap
 (build-time)".
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build/
 
 ### INV-SHRED-01
 Status: active
@@ -2387,7 +2387,7 @@ reap` raise in `build.build` and `test_overwrite_requires_reap` goes red. Walked
 this Linux host.
 Source: docs/adr/0004-reap-ram-staging.md §5b. Asked for in issue #2 — an honest anti-recovery
 ceiling, native-only (no PowerShell on hardened targets), belt-and-suspenders to encrypt-at-rest.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build.py, src/haru_pack/cli.py
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/build/, src/haru_pack/cli/
 
 ---
 
@@ -2419,7 +2419,7 @@ RUNS on the tampered payload (returncode 0, no "integrity check FAILED"), and
 goes red. Walked 2026-09-12 on this Linux host (the digest neutralization was observed to run
 tampered bytes — zippy tolerates the trailing junk, so the digest check is exactly what stops it).
 Source: docs/adr/0005-remote-fetch.md. CONTEXT.md "remote-fetch" / "payload pipeline". Issue #10.
-Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/uvfetch.nim, src/haru_pack/launcher/overlay.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/overlay.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_remote_fetch.py
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/uvfetch.nim, src/haru_pack/launcher/overlay.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/overlay.py, src/haru_pack/build/, src/haru_pack/cli/, tests/test_remote_fetch.py
 
 ---
 
@@ -2446,7 +2446,7 @@ reports a denied location (and, separately, one whose resolver is unreachable): 
 (returncode 0), and `test_geo_denied_location_fails_closed` /
 `test_geo_resolver_unreachable_fails_closed` go red. Walked 2026-09-12 on this Linux host.
 Source: docs/adr/0006-execution-gates.md. CONTEXT.md "execution gate" / "geo / ip". Issue #11.
-Territory: src/haru_pack/launcher/execgate.nim, src/haru_pack/launcher/cryptbox.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py
+Territory: src/haru_pack/launcher/execgate.nim, src/haru_pack/launcher/cryptbox.nim, src/haru_pack/crypto.py, src/haru_pack/build/, src/haru_pack/cli/, tests/test_geo_gate.py
 
 ### INV-GEO-01
 Status: active
@@ -2479,7 +2479,7 @@ minority of compromised/lying EXTERNAL resolvers. The durable control against a 
 client-side geo — it is not shipping to them. Documented in docs/adr/0006 §"Honest limits".
 Source: docs/adr/0006-execution-gates.md §3. CONTEXT.md "geo / ip (execution gates)". Issue #11 —
 the security gap this phase was asked to close.
-Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/execgate.nim, src/haru_pack/crypto.py, src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_geo_gate.py
+Territory: src/haru_pack/launcher/cryptbox.nim, src/haru_pack/launcher/execgate.nim, src/haru_pack/crypto.py, src/haru_pack/build/, src/haru_pack/cli/, tests/test_geo_gate.py
 
 ---
 
@@ -2529,7 +2529,7 @@ not crash) goes red. All walked 2026-09-12 on this Linux host.
 Source: docs/adr/0007-ephemeral-safe.md §detection. Asked for by Eli: "a machine with only 512mb
 ram might not be able to extract and run the program it packs … need a way to detect the
 environment prior to launch." C1/W2/W3 from the Phantom_Phreak adversarial review 2026-09-12.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build.py, src/haru_pack/bundle.py, tests/test_ephemeral_safe.py
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build/, src/haru_pack/bundle.py, tests/test_ephemeral_safe.py
 
 ### INV-EPHEMERAL-02
 Status: active
@@ -2548,7 +2548,7 @@ Red-path: In `build.build` remove `if ram_only and not no_reap and not reap: rea
 `if no_reap and reap: raise` and `test_reap_and_no_reap_conflict` goes red. Walked 2026-09-12.
 Source: docs/adr/0007-ephemeral-safe.md §coupling. Asked for by Eli: "ephemeral should imply
 reap. maybe fold in reap to ephemeral."
-Territory: src/haru_pack/build.py, src/haru_pack/cli.py, tests/test_ephemeral_safe.py
+Territory: src/haru_pack/build/, src/haru_pack/cli/, tests/test_ephemeral_safe.py
 
 ### INV-EPHEMERAL-03
 Status: active
@@ -2574,7 +2574,7 @@ in `stubconfig.parseStubConfig` drop the `if k == kEphemeral: continue` and a fo
 fails to parse — `test_v1_four_key_stub_still_parses` goes red. Walked 2026-09-12.
 Source: docs/adr/0007-ephemeral-safe.md §override. Asked for by Eli: "allow overriding with an
 env var at the haru stub layer", chosen as a new canary knob.
-Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build.py, tests/test_ephemeral_safe.py
+Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build/, tests/test_ephemeral_safe.py
 
 ---
 
@@ -2615,7 +2615,7 @@ Source: Asked for 2026-09-11 — "be mindful that I do want the default to be th
 sink' model, but I want people to be able to selectively choose what they get". The
 per-target mechanism already existed via `--target`; what changed is that the default is now
 everything and the parts are nameable.
-Territory: src/haru_pack/toolchain.py, src/haru_pack/cli.py, tests/test_toolchain_select.py
+Territory: src/haru_pack/toolchain.py, src/haru_pack/cli/, tests/test_toolchain_select.py
 
 ### INV-TOOL-02
 Status: active
@@ -2658,7 +2658,7 @@ ones.
 Source: Asked for 2026-09-11. The maintainer's reasoning overrode mine: I had suggested
 system-GCC-by-default to avoid changing existing setups, which is inertia rather than a
 benefit, against a real ergonomic win of one less post-install step and no sudo.
-Territory: src/haru_pack/toolchain.py, src/haru_pack/build.py, src/haru_pack/targets.py,
+Territory: src/haru_pack/toolchain.py, src/haru_pack/build/, src/haru_pack/targets.py,
 src/haru_pack/pins.toml, tests/test_zig_provider.py
 
 ## TRUST — the project being packaged is an input, not an author
@@ -2687,7 +2687,7 @@ request added a `haru_pack.toml`; the operator, who typed `haru-pack build .` an
 packaging tool rather than a script runner.
 Assets: the build host, its PATH, its credentials, and every artifact built on it
 afterwards — including ones signed with the vendor's key.
-Red-path: `build.py` runs `for step in steps: run_bundle_step(...)` with no log line. Add
+Red-path: `build/thick.py` runs `for step in steps: run_bundle_step(...)` with no log line. Add
 the print, then delete it again: a claiming test asserts the argv appears in the build's
 stdout, and goes red the moment the line is removed.
 Source: busybody `trojan` persona, case `a_bundle_step_runs_unannounced_on_the_build_host`,
@@ -2722,7 +2722,7 @@ it, in a sentence that says it will run on the customer's machine.
 Actors: the operator who signs the binary; every customer who runs it.
 Assets: the vendor's code-signing identity, and the customer's machine — this is
 `THREAT_MODEL.md`'s worst case expressed as a configuration key.
-Red-path: `build.py` warns only on the `thick` path (`if tier == "thick" and
+Red-path: `build/assemble.py` warns only on the `thick` path (`if tier == "thick" and
 manifest.get("post_install")`). Move the warning outside that condition; a claiming test
 builds at `default` and asserts the argv is in stdout, and goes red when the condition is
 put back.
@@ -2782,7 +2782,7 @@ followed and copied as content.
 Actors: the author of a packed repository; a contributor who added one file to it.
 Assets: everything `INV-PAYLOAD-01` protects — the operator's keys, `.env`, cloud
 credentials — published inside a binary that is distributed and often signed.
-Red-path: `build.py` calls `shutil.copytree(source, app, ignore=_IGNORE)`, whose default
+Red-path: `build/tree.py` calls `shutil.copytree(source, app, ignore=_IGNORE)`, whose default
 `symlinks=False` dereferences, and whose `ignore` callable is given the **name of the entry
 being copied**, never the target of a link. A claiming test plants `assets/logo.png` as a
 symlink to an out-of-tree key file and asserts the key's bytes are absent from every payload
@@ -2799,7 +2799,7 @@ Note: **Not addressed by the `INV-BASE-01` symlink fixes** (`0d804ed`, `ffa2dbc`
 main). Those resolve symlinks in the launcher's *staging-root* refusal — run time, on the
 customer's machine, against whoever sets `HARU_BASE_PATH`. This entry is build time, on the
 operator's machine, against whoever wrote the packed tree. Re-run 2026-09-11 against main
-with both fixes in place: all nine `trojan` findings unchanged, and `build.py` still calls
+with both fixes in place: all nine `trojan` findings unchanged, and `build/tree.py` still calls
 `shutil.copytree(source, app, ignore=_IGNORE)` untouched.
 
 ### INV-TRUST-07
@@ -2873,7 +2873,7 @@ Note: The kit is refused rather than written when the destination is unsafe — 
 target dir or `stub/`, or a non-empty `stub/` that is not a prior haru kit — matching the
 INV-BASE-01 posture. A kit failure is a warning, never a build failure: the binary is already
 written before the kit is attempted.
-Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+Territory: src/haru_pack/emit/, src/haru_pack/build/, src/haru_pack/cli/,
 tests/test_emit_nim.py
 
 ### INV-EMIT-02
@@ -2920,5 +2920,96 @@ The shim is relocatable (`${HARU_ZIG:-zig}`, written by `toolchain.zig_cc_shim` 
 helper `--emit-nim`'s kit uses), so no build-host absolute path is baked in. The `--emit-c`
 directory is refused up front if it is a symlink or a non-empty directory, and a kit failure is
 a WARNING that never reports an already-written binary as failed.
-Territory: src/haru_pack/emit.py, src/haru_pack/build.py, src/haru_pack/cli.py,
+Territory: src/haru_pack/emit/, src/haru_pack/build/, src/haru_pack/cli/,
 tests/test_emit_c.py
+
+---
+
+## MODULARITY — no module becomes the place everything goes
+
+A "god module" is not merely a long file. It is a long file that everything must be routed
+through: the one simultaneously widest and heaviest thing in the tree, which no change can
+go around and no reader can hold in their head. haru-pack grew four of them before anyone
+counted — `build.py` at 735 statements importing 16 of the package's 22 modules,
+`tools/busybody.py` at 3393, `shake.py` at 536, `cli.py` at 483 — and the cost lands on the
+audience `docs/PRINCIPLES.md` puts first: whoever is working on haru-pack.
+
+The three entries below are one claim split by what makes a module unreadable, because the
+three have different remedies. Together they are the definition: **a module may be the hub
+or it may hold the work, but not both.**
+
+The budgets count STATEMENTS, not physical lines. Blank lines, comments and docstrings are
+free, deliberately: this repo's comments are the audit trail for why a refusal exists and
+several of them are cited from this file, so a physical-line cap would tax exactly the
+thing the repo wants more of, and the cheapest way to pass it would be to delete an
+explanation. Write as much prose as the decision deserves.
+
+`tests/` is outside these budgets and the exclusion is reasoned, not squeamish: the
+pathology is CENTRALITY, and a test module is a leaf nothing imports. Splitting a long test
+file moves lines between files and improves nothing. A test file that ever gets imported by
+another stops being a leaf and belongs under the cap.
+
+### INV-MODULARITY-01
+Status: active
+Statement: No module under `src/haru_pack/` or `tools/` holds more than 300 statement
+lines.
+Actors: not an attacker — us, six months from now, and every agent asked to change one
+thing in a file that does forty.
+Assets: the ability to review a change. A diff inside a 1177-line module is read against a
+context nobody has loaded, so the reviewer checks the lines that changed and not what they
+changed *about*. Three of the four god modules this invariant was written against had
+already grown a second responsibility nobody had named.
+Red-path: concatenate any module in `src/haru_pack/build/` with itself. The claiming test
+goes red naming that file, its statement count and the budget. Walked 2026-09-13 by writing
+the check BEFORE the splits: it named exactly eight files — build, cli, emit, shake,
+busybody, busybody_hostile, busybody_traits, exam — which is the same list a reader asked
+"which files are too big" produces unprompted.
+Source: 2026-09-13. The budget is calibrated against this tree rather than picked from the
+air: at 300 it cleared `toolchain.py` (256) and `bundle.py` (251), which are dense but each
+do one job, and named every file a reader would point at.
+Note: There is no allowlist and adding one would defeat this. An allowlist is how a size
+budget becomes a formality — the first exception is always justified, the tenth is never
+questioned, and the module it excuses is the one that got too big precisely because nobody
+was counting.
+Territory: tests/_modularity.py, tests/test_modularity.py, src/haru_pack/, tools/
+
+### INV-MODULARITY-02
+Status: active
+Statement: No function in those trees has a body of more than 80 statement lines.
+Actors: the same reader, one screen further down.
+Assets: visible control flow. `build()` was 209 statements and `busybody.main()` was 286;
+in both, the sequence of phases a run has — the thing you actually want to know — was
+invisible underneath the phases themselves.
+Red-path: paste any function body in `src/haru_pack/build/orchestrate.py` into itself. The
+claiming test goes red naming the function, its line and its statement count. Walked
+2026-09-13: before the splits it named ten functions across six files, including the two
+above.
+Source: 2026-09-13, with INV-MODULARITY-01. 80 statements is roughly 120 physical lines in
+this repo's comment style — about two screens.
+Note: The fix is almost never "shorten it". A long build/dispatch function is a sequence of
+named steps that were never given names; extracting each one makes the caller the readable
+summary of what happens. That is what `orchestrate.build()` and `busybody_cli.main()` are
+now.
+Territory: tests/_modularity.py, tests/test_modularity.py, src/haru_pack/, tools/
+
+### INV-MODULARITY-03
+Status: active
+Statement: A module that imports more than 8 first-party modules holds no more than 150
+statement lines.
+Actors: anyone trying to change one subsystem without reading another.
+Assets: the ability to work on a part of haru-pack in isolation. This is the entry that
+actually says "no god modules"; the other two are about length. Either half alone is fine
+and normal — `cli` must import most of the package to dispatch to it, `shake` is 500 lines
+importing almost nothing — and what must not exist is the module that is both.
+Red-path: move `orchestrate.build()`'s body into `src/haru_pack/build/__init__.py`, which
+already imports most of the package. The claiming test goes red naming the module, its
+import list and its statement count. Walked 2026-09-13: before the splits it named `build`
+(16 imports, 735 statements) and `cli` (12, 483), and no others — the metric does not fire
+on modules that are merely large.
+Source: 2026-09-13. Found by asking what distinguishes a god module from a long one, since
+a pure line cap would have called `shake.py` and `busybody.py` the same problem as
+`build.py` when only the last was a hub.
+Note: A hub is allowed and is often right. `build/__init__.py` imports fifteen siblings and
+is a facade holding no logic; `cli/__init__.py` imports every command module because that is
+what REGISTERS them. Both pass, because both are thin.
+Territory: tests/_modularity.py, tests/test_modularity.py, src/haru_pack/, tools/

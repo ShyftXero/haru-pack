@@ -19,6 +19,27 @@ from pathlib import Path
 
 import pytest
 
+from _source import harness_source
+
+
+def _compose_family(bb):
+    """`compose_sweep` plus the helpers it was broken into on 2026-09-13.
+
+    The assertions below are about the composed sweep's RULES — the FATAL floor, the
+    reproduction line, what the fingerprint keys on — and those rules now live in
+    `_stack_record` / `_finish_compose` / `_compose_combos` rather than in one function
+    body. Reading the whole family keeps the assertion pointed at the rule instead of at
+    a line number.
+    """
+    import ast
+    import inspect
+
+    from busybody_sweep import (_announce_compose, _compose_combos, _finish_compose,
+                                _run_one_stack, _stack_record, compose_sweep)
+    return "\n".join(ast.unparse(ast.parse(inspect.getsource(fn)))
+                     for fn in (compose_sweep, _compose_combos, _announce_compose,
+                                _stack_record, _run_one_stack, _finish_compose))
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
@@ -178,7 +199,7 @@ def test_the_baseline_pass_forces_every_trait_to_fire():
     fallible = next(n for n, t in bc.TRAITS.items() if t["fires"] < 1.0)
     assert bc.realize((fallible,), 1, 0, force=True) == (fallible,)
     # and the runner turns it on for exactly the two passes that need it
-    src = (REPO / "tools" / "busybody.py").read_text()
+    src = harness_source()
     assert "force = bool(a.compose_only) or a.compose == 1" in src, (
         "the baseline and --compose-only must disable fallibility"
     )
@@ -206,7 +227,7 @@ def test_a_stack_is_only_a_finding_if_it_hit_the_fatal_floor():
     overclaim of exactly the kind INVARIANTS.md exists to prevent. The floor is the claim:
     it works, or it refuses intelligibly."""
     bb = _busybody()
-    src = ast.unparse(ast.parse(inspect.getsource(bb.compose_sweep)))
+    src = _compose_family(bb)
     assert "ok = r['outcome'] not in FATAL" in src, (
         "a composed stack must be judged against the FATAL floor and nothing narrower"
     )
@@ -227,7 +248,7 @@ def test_every_finding_prints_its_own_reproduction_line():
     """A finding nobody can reproduce is an anecdote. The remedy field carries the exact
     command, seed included."""
     bb = _busybody()
-    src = ast.unparse(ast.parse(inspect.getsource(bb.compose_sweep)))
+    src = _compose_family(bb)
     assert "--compose-only" in src and "--compose-seed" in src, (
         "a composed finding must print the command that reproduces it"
     )
@@ -239,7 +260,7 @@ def test_the_fired_set_identifies_the_run_not_the_selected_set():
     """Fingerprinting on the selected set would group two genuinely different runs — one
     where three traits acted and one where one did — under a single root cause."""
     bb = _busybody()
-    src = ast.unparse(ast.parse(inspect.getsource(bb.compose_sweep)))
+    src = _compose_family(bb)
     assert "sorted(fired)" in src, "the fingerprint must key on what actually fired"
     assert "'selected': list(combo)" in ast.unparse(
         ast.parse(inspect.getsource(bb.run_stack))), "both sets must be recorded"

@@ -151,7 +151,7 @@ stage earlier.
 
 **Which to reach for.** If the complaint is about a binary that will not make progress at
 runtime, that is `herd` / `STALLED`. If it is about a declaration that cannot be honoured as
-written, that is the `wedge` persona. Both live in `tools/busybody.py`; see
+written, that is the `wedge` persona. Both live under `tools/busybody_cases_*.py`; see
 `docs/BUSYBODY.md`. When it is genuinely ambiguous, the runtime sense is the likelier ask —
 and a stall can only be *observed*, never injected, so "create a wedge" almost always means
 sense 1, which is a file you can write.

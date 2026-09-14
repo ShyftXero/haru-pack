@@ -361,7 +361,7 @@ spelling walked through it. `INV-TRUST-04`.
 that matter most.
 
 A `[[bundle]]` step's argv comes from a `haru_pack.toml` inside the packed tree and runs at
-build time with the operator's environment. `build.py` runs the steps in a bare
+build time with the operator's environment. `build/thick.py` runs the steps in a bare
 `for step in steps: run_bundle_step(...)` with nothing printed first, so cloning a repository
 and running `haru-pack build .` is code execution by that repository's author, silently.
 `INV-TRUST-01`. The fix asked for is **visibility, not refusal**: bundle steps are a feature
@@ -387,7 +387,7 @@ redirect itself stays unconfirmed until uv's output is surfaced, and that is rec
 Both were caught by the results looking too clean, which is the only reliable tell.
 
 **A single-script project never reaches `copytree`.** `discover()` returns
-`source=<the .py file>` for a directory holding one script, and `build.py` then takes the
+`source=<the .py file>` for a directory holding one script, and `build/tree.py` then takes the
 `source.is_file()` branch — a `copy2` of that one file. The rest of the tree is never
 copied, so a symlink, a device node and a backslash filename are all invisible. Six cases
 reported `CONTAINED` for attacks that had not been attempted. Every plant is a project now,
@@ -443,9 +443,9 @@ word "symlink" hides it:
 | when | run time, on the customer's machine | build time, on the operator's machine |
 | who | whoever sets `HARU_BASE_PATH` | whoever wrote the packed tree |
 | what | a staging root that resolves to `/` or `$HOME` | `assets/logo.png` that resolves to `~/.ssh/id_rsa` |
-| where | `stage.nim`, `refuseUnsafeRoot` | `build.py`, `shutil.copytree(..., ignore=_IGNORE)` |
+| where | `stage.nim`, `refuseUnsafeRoot` | `build/tree.py`, `shutil.copytree(..., ignore=_IGNORE)` |
 
-Checked rather than assumed: `build.py` on `origin/main` still reads
+Checked rather than assumed: `build/tree.py` on `origin/main` still reads
 `shutil.copytree(source, app, ignore=_IGNORE)` with no symlink handling, and
 `payload.py` still selects members with `p.is_file()`, which is true for a symlink to a
 file. Every branch in the repo was searched for a payload-copy change; there is none.

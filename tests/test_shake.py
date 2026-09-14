@@ -481,10 +481,16 @@ def test_the_guards_run_before_anything_is_downloaded():
     """Discovering a shake was impossible after staging a 90 MB interpreter wastes the
     operator's time — and the tempting fix at that point is to carry on and emit an
     unshaken binary."""
+    from haru_pack.build import assemble as assemble_mod
+
     src = inspect.getsource(build_mod.assemble_payload)
     head = src.split("payload = workdir")[0]
-    assert "--shake needs --thick" in head, (
+    assert "_check_shake_preconditions(" in head, (
         "the --shake preconditions are checked after the payload staging begins"
+    )
+    assert "--shake needs --thick" in inspect.getsource(
+        assemble_mod._check_shake_preconditions), (
+        "_check_shake_preconditions no longer refuses a non-thick shake"
     )
 
 
@@ -501,7 +507,9 @@ def test_the_shake_declaration_does_not_reach_the_launcher():
 def test_the_observation_env_is_the_one_built_from_the_bundled_cache():
     """Tracing a project's own `.venv` would observe a different resolution against a
     different interpreter, and produce a keep set for a payload that does not exist."""
-    src = inspect.getsource(build_mod.assemble_payload)
+    from haru_pack.build import thick as thick_mod
+
+    src = inspect.getsource(thick_mod._warm_on_host)
     call = src.split("shake_mod.shake(")[1]
     assert "tmp_env" in call.split(")")[0], (
         "the shake no longer observes the env uv built from the bundled cache"

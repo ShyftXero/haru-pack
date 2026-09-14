@@ -33,6 +33,8 @@ from pathlib import Path
 
 import pytest
 
+from _source import harness_modules
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
@@ -63,9 +65,13 @@ def _drive_main(bb, monkeypatch, tmp_path, argv) -> tuple:
     tdir.mkdir(exist_ok=True)
     monkeypatch.setenv("HARUPACK_BUSYBODY_LEDGER", str(tmp_path / "findings.jsonl"))
     monkeypatch.setattr(tempfile, "tempdir", str(tdir))
-    monkeypatch.setattr(bb, "REPO", tmp_path)
-    monkeypatch.setattr(bb, "OUT", tmp_path / "out")
-    monkeypatch.setattr(bb, "RUNS", tmp_path / "out" / "runs")
+    # Patched on busybody_config, not on the `busybody` facade. Every module reads these
+    # as `cfg.NAME` precisely so one assignment is seen everywhere; rebinding the facade's
+    # copy would leave the modules that do the work looking at the real repo.
+    import busybody_config as cfg
+    monkeypatch.setattr(cfg, "REPO", tmp_path)
+    monkeypatch.setattr(cfg, "OUT", tmp_path / "out")
+    monkeypatch.setattr(cfg, "RUNS", tmp_path / "out" / "runs")
     monkeypatch.setattr(sys, "argv", ["busybody.py", *argv])
     rc = bb.main()
     runs = sorted((tmp_path / "out" / "runs").iterdir())
@@ -165,7 +171,12 @@ def test_a_declared_stall_is_a_finding_whatever_the_case_expected(tmp_path, monk
     # tests/test_busybody_ledger.py; what this one reads is the verdict, the exit code and
     # the report a human is handed.
     bb = _load_busybody()
-    bb.CASES.clear()
+    # `CASES` is a single list shared by every busybody module since the 2026-09-13 split,
+    # so clearing it in place would empty the catalogue for the rest of the session — the
+    # reverse_engineer and examiner suites went red exactly that way. Swap in a private
+    # list and let monkeypatch put the real one back.
+    import busybody_config as cfg
+    monkeypatch.setattr(cfg, "CASES", [])
 
     @bb.case("herd", ("RAN", "STALLED"), "a case that tolerates a stall in its expect set")
     def tolerant_of_a_stall(exe: Path, work: Path) -> dict:
@@ -269,9 +280,10 @@ def test_every_case_journals_its_fault_before_performing_it():
     below, and neither is sufficient alone.
     """
     faults = ("send_signal", ".kill", "os.kill", ".terminate")
-    tree = ast.parse((REPO / "tools" / "busybody.py").read_text())
+    trees = [ast.parse(p.read_text()) for p in harness_modules()]
     checked = []
-    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+    for fn in [n for tree in trees for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)]:
         calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)]
         announced = [c for c in calls if "Ctx.perturb" in ast.unparse(c.func)]
         if not announced:
@@ -303,11 +315,16 @@ import importlib.util, os, signal, sys
 from pathlib import Path
 
 REPO, SANDBOX = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(REPO / "tools"))
 spec = importlib.util.spec_from_file_location("busybody", REPO / "tools" / "busybody.py")
 bb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bb)
-bb.REPO, bb.OUT, bb.RUNS = SANDBOX, SANDBOX / "out", SANDBOX / "out" / "runs"
-bb.CASES.clear()
+# Redirected on busybody_config, not on the facade. The facade FORWARDS these for reading
+# (module __getattr__), but assigning `bb.REPO` would just create a shadowing attribute
+# nothing reads, and this run would write into the real repository.
+import busybody_config as cfg
+cfg.REPO, cfg.OUT, cfg.RUNS = SANDBOX, SANDBOX / "out", SANDBOX / "out" / "runs"
+cfg.CASES = []
 
 
 @bb.case("herd", ("RAN",), "journals a fault, performs it, and lives to be recorded")

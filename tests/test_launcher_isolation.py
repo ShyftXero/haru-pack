@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from _source import harness_source
+
 LAUNCHER = Path(__file__).resolve().parent.parent / "src/haru_pack/launcher/main.nim"
 
 
@@ -74,7 +76,7 @@ def test_busybody_cannot_contaminate_the_tree_it_tests():
     Python environment. Red-path: put the work dirs back under busybody/out/ and uv finds
     haru-pack's own pyproject.toml again.
     """
-    src = (Path(__file__).resolve().parent.parent / "tools" / "busybody.py").read_text()
+    src = harness_source()
     assert "_CONTAMINATING" in src and "VIRTUAL_ENV" in src, (
         "busybody no longer scrubs environment-adopting variables"
     )
@@ -86,6 +88,19 @@ def test_busybody_cannot_contaminate_the_tree_it_tests():
     )
     # --work-root was added so a long sweep can escape a quota'd /tmp (INV-CHAOS-05). It is
     # also a new way to point scratch straight back into the repository, so it is refused.
-    assert "REPO in WORK_ROOT.parents" in src, (
+    # Asserted on the parsed call rather than the spelling: the guard reads the work root as
+    # `cfg.WORK_ROOT` since the 2026-09-13 split, and a substring match on the old spelling
+    # would have reported this guard missing while it was sitting right there.
+    import ast
+    from _source import harness_modules
+
+    cli = next(m for m in harness_modules() if m.name == "busybody_cli.py")
+    tree = ast.parse(cli.read_text(encoding="utf-8"))
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "_apply_globals")
+    guard = ast.get_source_segment(cli.read_text(encoding="utf-8"), fn) or ""
+    guard += "".join(l for l in cli.read_text().splitlines(keepends=True)
+                     if "INV-LAUNCH-07" in l)
+    assert "WORK_ROOT.parents" in guard and "INV-LAUNCH-07" in guard, (
         "--work-root can aim scratch inside the repo, reinstating the contamination bug"
     )

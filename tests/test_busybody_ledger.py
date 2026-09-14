@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from _source import harness_modules, harness_source
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
@@ -257,12 +259,14 @@ def test_reaping_is_in_a_finally_not_on_the_success_path():
     ~490 MB across three cases.
     """
     import ast
-    src = (REPO / "tools" / "busybody.py").read_text()
+    # `_sweep` is where main()'s run body lives since the 2026-09-13 package split; the
+    # finally block moved with it, intact.
+    src = (REPO / "tools" / "busybody_run.py").read_text()
     tree = ast.parse(src)
     main = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "main")
+                if isinstance(n, ast.FunctionDef) and n.name == "_sweep")
     tries = [n for n in ast.walk(main) if isinstance(n, ast.Try) and n.finalbody]
-    assert tries, "main() has no try/finally at all"
+    assert tries, "_sweep() has no try/finally at all"
     in_finally = any(
         "reap" in ast.unparse(stmt)
         for t in tries for stmt in t.finalbody)
@@ -456,7 +460,7 @@ def test_an_interrupted_run_is_not_reported_as_a_clean_sweep(tmp_path):
 @pytest.mark.invariant("INV-CHAOS-04")
 def test_the_analysis_questions_are_reachable_from_the_command_line():
     """A tool nobody can invoke is a private one-liner with extra steps."""
-    src = (REPO / "tools" / "busybody.py").read_text()
+    src = harness_source()
     for flag in ("--analyze", "--calibrate"):
         assert f'"{flag}"' in src, f"{flag} is not wired into the CLI"
     assert "format_analysis" in src, "--analyze must use the shared formatter"
@@ -505,7 +509,7 @@ def test_analyze_is_a_gate_not_just_a_reader(tmp_path):
 @pytest.mark.invariant("INV-CHAOS-14")
 def test_analyze_exit_code_is_wired_into_the_cli():
     """The gate is only real if main() actually returns it, not just prints the report."""
-    code = _module_code(REPO / "tools" / "busybody.py")
+    code = _harness_code()
     assert "return analyze_exit_code(analysis)" in code, (
         "main()'s --analyze branch must return analyze_exit_code, or the gate is decorative"
     )
@@ -535,6 +539,15 @@ def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
     assert "fingerprints against 1 case(s)" in text, (
         "the fingerprint/outcome gap should be explained, not hidden"
     )
+
+
+def _harness_code():
+    """Every busybody module's code, comments and docstrings stripped.
+
+    See `_module_code` below for why the stripping matters; this is the same thing over
+    the whole harness rather than one file, because the harness is now twenty modules.
+    """
+    return "\n".join(_module_code(p) for p in harness_modules())
 
 
 def _module_code(path):
@@ -588,7 +601,7 @@ def test_an_environment_failure_aborts_the_sweep_and_spares_the_ledger():
     Deleting the `infra_failure_reason` guard scores the box's failure as chaos findings.
     Reverting `if bad and not aborted` to `if bad` writes them to the ledger permanently.
     """
-    src = _module_code(REPO / "tools" / "busybody.py")
+    src = _harness_code()
     assert "infra_failure_reason(rec)" in src, (
         "every record must be tested for an environment failure as it is collected"
     )
@@ -648,7 +661,7 @@ def test_release_leaves_held_directories_alone(tmp_path):
 def test_the_case_loop_releases_scratch_and_the_finally_is_only_the_backstop():
     """Deleting the per-case release call reinstates the 100 GB sweep. Nothing else catches
     it, because the totals reported at the end are identical either way."""
-    src = _module_code(REPO / "tools" / "busybody.py")
+    src = _harness_code()
     assert "free_dir(work)" in src, (
         "each completed case must free its own scratch; the run-level reap() is a backstop"
     )
@@ -730,7 +743,7 @@ def test_every_non_ran_result_names_who_failed(tmp_path):
         f"up in --analyze as a '?' bucket."
     )
 
-    src = _module_code(REPO / "tools" / "busybody.py")
+    src = _harness_code()
     assert "'blame': 'harness'" in src, (
         "a CASE-ERROR is busybody breaking; it must never read as a statement about "
         "haru-pack"
@@ -786,7 +799,7 @@ def test_the_worker_count_is_capped_not_merely_defaulted():
     bb = _load_busybody()
     assert bb.JOBS_DEFAULT == 4
     assert bb.JOBS_MAX == 8
-    src = _module_code(REPO / "tools" / "busybody.py")
+    src = _harness_code()
     assert "min(a.jobs, JOBS_MAX)" in src, "--jobs must be clamped, not trusted"
 
 
@@ -795,7 +808,7 @@ def test_one_code_path_runs_a_case_whether_parallel_or_serial():
     """The parallel pass hands work items to a pool; the serial pass calls the same function
     inline. Two implementations would drift, and the drift would show up as "it only fails
     under --jobs 8", which is the least debuggable shape available."""
-    src = _module_code(REPO / "tools" / "busybody.py")
+    src = _harness_code()
     assert src.count("def run_one(") == 1, "run_one must have exactly one definition"
     assert "run_one(fname, str(exe)" in src, "the serial pass must call run_one inline"
     assert "pool.imap(run_one, items)" in src, (
@@ -808,7 +821,7 @@ def test_one_code_path_runs_a_case_whether_parallel_or_serial():
 def test_keeping_artifacts_forces_serial():
     """--keep retains every work dir — 452 MB each, 131 GB for a top-25 sweep. Running 8
     wide makes that peak arrive 8x sooner without helping anyone read them."""
-    src = _module_code(REPO / "tools" / "busybody.py")
+    src = _harness_code()
     assert "if a.keep and jobs > 1:" in src, "--keep must downgrade to one worker"
 
 
@@ -817,7 +830,7 @@ def test_a_missing_optional_dependency_does_not_stop_a_sweep():
     """mpire is in the dev group. --jobs is a convenience for whoever is iterating on the
     harness; a missing optional package must degrade to serial, not fail at the point where
     the work would have started."""
-    src = _module_code(REPO / "tools" / "busybody.py")
+    src = _harness_code()
     assert "except ImportError" in src and "return None" in src
     assert "running serially" in src, (
         "falling back silently would make a 6x slowdown look like the machine"

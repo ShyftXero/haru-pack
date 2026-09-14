@@ -68,9 +68,12 @@ def test_build_refuses_pyc_only_source_without_traceback(tmp_path, stub_toolchai
 
 
 def test_build_creates_missing_output_parent(tmp_path, stub_toolchain, monkeypatch):
-    # stub_toolchain's bundle_uv lambda predates build.py's `sources=` kwarg; tolerate it
-    # locally so this test can drive a full default build down to the output write.
-    monkeypatch.setattr(stub_toolchain, "bundle_uv",
+    # stub_toolchain's bundle_uv lambda predates the `sources=` kwarg; tolerate it locally
+    # so this test can drive a full default build down to the output write. Patched on the
+    # module that CALLS it (`build.assemble`), not on the `build` facade: rebinding a
+    # re-export leaves the caller's own reference untouched.
+    from haru_pack.build import assemble as assemble_mod
+    monkeypatch.setattr(assemble_mod, "bundle_uv",
                         lambda target, vendor, **kw: vendor.mkdir(parents=True, exist_ok=True))
     src = tmp_path / "hello.py"
     src.write_text("print('hi')\n")
