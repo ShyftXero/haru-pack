@@ -26,7 +26,7 @@ from busybody_runner import InfraFailure, dir_bytes, infra_failure_reason, work_
 from busybody_sweep import compose_sweep, run_one, worker_pool
 
 
-def _make_fixtures(a, jr, run_dir: Path, reaper) -> list:
+def _make_fixtures(a, jr, run_dir: Path, reaper, paths) -> list:
     """The binaries the cases attack. Raises SystemExit(2) on a SETUP FAILURE.
 
     lotek calls it that: the harness never reached the starting line, so there are no
@@ -50,7 +50,7 @@ def _make_fixtures(a, jr, run_dir: Path, reaper) -> list:
     except SystemExit as e:
         jr.write("setup_failure", detail=str(e)[:400])
         print(f"SETUP FAILURE: {e}", file=sys.stderr)
-        print(f"no cases ran; journal at {run_dir.relative_to(cfg.REPO)}", file=sys.stderr)
+        print(f"no cases ran; journal at {paths.relative(run_dir)}", file=sys.stderr)
         raise
 
 
@@ -165,7 +165,7 @@ def _report_abort(e: InfraFailure, jr, results: list) -> None:
 
 
 def _finalize(a, jr, reaper, bb_reg: Path, run_dir: Path, run_id: str, results: list,
-              interrupted: bool, aborted: bool, peak_scratch: int) -> None:
+              interrupted: bool, aborted: bool, peak_scratch: int, paths) -> None:
     """Everything that must happen whether the sweep succeeded, raised, or was killed.
 
     Reaping is not conditional on success: a chaos harness is the program most likely to be
@@ -192,14 +192,14 @@ def _finalize(a, jr, reaper, bb_reg: Path, run_dir: Path, run_id: str, results: 
     # Unconditional. This is the line the whole finally block exists for.
     print()
     reaper.reap()
-    prune_runs(cfg.RUNS, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
+    prune_runs(paths.runs, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
     # Release the single-instance registry (INV-CHAOS-13) so the next sweep can start. A
     # crash that skips this leaves a marker whose pid is now dead, which the next run reaps.
     bb_reg.unlink(missing_ok=True)
 
 
 def _summarize(run_dir: Path, results: list, interrupted: bool, aborted: bool,
-               peak_scratch: int) -> int:
+               peak_scratch: int, paths) -> int:
     """What the operator reads last, and the exit code they get.
 
     lotek's exit-code contract. An interrupt WINS over findings: a run the operator killed
@@ -217,9 +217,9 @@ def _summarize(run_dir: Path, results: list, interrupted: bool, aborted: bool,
         print(f"peak scratch per case: {human_bytes(peak_scratch)}  "
               f"(cap {cfg.SCRATCH_CAP_GB} GiB on the root)")
     if results:
-        print(f"report : {(run_dir / 'report.txt').relative_to(cfg.REPO)}   "
+        print(f"report : {paths.relative(run_dir / 'report.txt')}   "
               f"<- read this; it explains every finding")
-        print(f"journal: {(run_dir / 'journal.jsonl').relative_to(cfg.REPO)}")
+        print(f"journal: {paths.relative(run_dir / 'journal.jsonl')}")
     if bad:
         print(f"ledger : {ledger_path()}   (--triage to group by fingerprint)")
         print(f"\n{len(bad)} finding(s):")
@@ -231,12 +231,21 @@ def _summarize(run_dir: Path, results: list, interrupted: bool, aborted: bool,
     return 1 if bad else 0
 
 
-def _sweep(a, picked: list, jobs: int) -> int:
-    """One whole run: guard, fixtures, passes, report."""
+def _sweep(a, picked: list, jobs: int, paths=None) -> int:
+    """One whole run: guard, fixtures, passes, report.
+
+    `paths` is built ONCE here, at the top of the run, and handed to everything below it.
+    Nothing under this function asks the module where the repo is (INV-MODULARITY-04's
+    sibling concern): a run's layout does not change while it is running, so it is a frozen
+    value, and making it an argument is what an extraction would otherwise have to do by
+    hand across a dozen call sites. It defaults to the module shim so `_sweep(a, picked,
+    jobs)` keeps working for callers that have not been converted.
+    """
+    paths = paths if paths is not None else cfg.paths()
     # A run id from the wall clock, so run directories sort chronologically and a human
     # can say "the 14:05 run" without consulting anything.
     run_id = "bb" + time.strftime("%Y%m%d-%H%M%S")
-    run_dir = cfg.RUNS / run_id
+    run_dir = paths.runs / run_id
     # Single-instance guard (INV-CHAOS-13): refuse to start (exit 3) while another sweep is
     # live; reap a dead run's stale registry. Done BEFORE creating the journal dir so a
     # refusal litters nothing. Released in the finally below.
@@ -248,9 +257,9 @@ def _sweep(a, picked: list, jobs: int) -> int:
     results, interrupted, aborted = [], False, False
     record, fixtures = None, []
     try:
-        reap_orphans(cfg.RUNS, log=lambda m: print(f"  {m}"))
+        reap_orphans(paths.runs, log=lambda m: print(f"  {m}"))
         try:
-            fixtures = _make_fixtures(a, jr, run_dir, reaper)
+            fixtures = _make_fixtures(a, jr, run_dir, reaper, paths)
         except SystemExit:
             return 2
 
@@ -276,7 +285,8 @@ def _sweep(a, picked: list, jobs: int) -> int:
 
         record = _Recorder(jr, results, fixtures)
         if a.compose is not None or a.compose_only:
-            return compose_sweep(a, fixtures, jr, run_dir, run_id, reaper, results)
+            return compose_sweep(a, fixtures, jr, run_dir, run_id, reaper, results,
+                                 paths)
         _run_passes(a, per_fixture, fixture_free, fixtures, jobs, run_dir, record)
     except InfraFailure as e:
         aborted = True
@@ -292,7 +302,7 @@ def _sweep(a, picked: list, jobs: int) -> int:
     finally:
         peak = record.peak_scratch if record is not None else 0
         _finalize(a, jr, reaper, bb_reg, run_dir, run_id, results, interrupted, aborted,
-                  peak)
+                  peak, paths)
 
     return _summarize(run_dir, results, interrupted, aborted,
-                      record.peak_scratch if record is not None else 0)
+                      record.peak_scratch if record is not None else 0, paths)

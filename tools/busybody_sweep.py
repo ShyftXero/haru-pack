@@ -213,7 +213,7 @@ def _run_one_stack(a, exe, combo: tuple, i: int, n_combos: int, seed: int, force
 
 
 def _finish_compose(a, results: list, run_dir: Path, run_id: str, peak: int, jr,
-                    reaper) -> int:
+                    reaper, paths) -> int:
     """Ledger, report, reap \u2014 and the exit code."""
     bad = [r for r in results if not r["ok"]]
     if bad:
@@ -230,12 +230,12 @@ def _finish_compose(a, results: list, run_dir: Path, run_id: str, peak: int, jr,
              peak_scratch_bytes=peak)
     jr.close()
     reaper.reap()
-    prune_runs(cfg.RUNS, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
+    prune_runs(paths.runs, keep=a.keep_runs, log=lambda m: print(f"  {m}"))
 
     print(f"\n{len(results) - len(bad)}/{len(results)} stack(s) stayed out of "
           f"{'/'.join(FATAL)}")
     print(f"peak scratch per stack: {human_bytes(peak)}")
-    print(f"report : {(run_dir / 'report.txt').relative_to(cfg.REPO)}")
+    print(f"report : {paths.relative(run_dir / 'report.txt')}")
     if bad:
         print(f"\n{len(bad)} finding(s) \u2014 each with a --compose-only line to reproduce it:")
         for r in bad:
@@ -245,12 +245,14 @@ def _finish_compose(a, results: list, run_dir: Path, run_id: str, peak: int, jr,
     return 0
 
 
-def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: list) -> int:
+def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: list,
+                  paths=None) -> int:
     """Stack traits and run them. Returns an exit code.
 
     Kept separate from the case sweep because the two answer different questions and share
     only the journal: a case has an expectation, a stack has only the FATAL floor.
     """
+    paths = paths if paths is not None else cfg.paths()
     seed = a.compose_seed if a.compose_seed is not None else int(run_id[2:].replace("-", ""))
     exe = fixtures[0][1] if fixtures else None
 
@@ -270,7 +272,7 @@ def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: 
     for i, combo in enumerate(combos):
         peak = max(peak, _run_one_stack(a, exe, combo, i, len(combos), seed, force, jr,
                                         run_dir, results))
-    return _finish_compose(a, results, run_dir, run_id, peak, jr, reaper)
+    return _finish_compose(a, results, run_dir, run_id, peak, jr, reaper, paths)
 
 
 # ── Single-instance run control (INV-CHAOS-13, adopted from lotek BusyBody #738) ──

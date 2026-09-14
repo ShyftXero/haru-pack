@@ -20,8 +20,8 @@ from busybody_ledger import (ledger_path, ledger_rollup,
 
 
 
-def print_history() -> int:
-    runs = scan_runs(cfg.RUNS)
+def print_history(paths=None) -> int:
+    runs = scan_runs((paths or cfg.paths()).runs)
     if not runs:
         print("no runs yet")
         return 0

@@ -64,22 +64,23 @@ def _apply_globals(a) -> int:
     return jobs
 
 
-def _early_exit(a) -> int | None:
+def _early_exit(a, paths) -> int | None:
     """The read-only questions. Returns an exit code, or None to carry on and run."""
     if a.list_traits:
         print(describe_traits())
         return 0
     if a.history:
-        return print_history()
+        return print_history(paths)
     if a.triage:
         return print_triage()
     if a.analyze is None:
         return None
-    runs = sorted(d for d in (cfg.RUNS.iterdir() if cfg.RUNS.is_dir() else []) if d.is_dir())
+    runs = sorted(d for d in (paths.runs.iterdir() if paths.runs.is_dir() else [])
+                  if d.is_dir())
     if not runs:
         print("no runs to analyse", file=sys.stderr)
         return 1
-    target = runs[-1] if a.analyze == "latest" else cfg.RUNS / a.analyze
+    target = runs[-1] if a.analyze == "latest" else paths.runs / a.analyze
     if not (target / "journal.jsonl").exists():
         print(f"no journal in {target}", file=sys.stderr)
         return 1
@@ -139,11 +140,15 @@ def _print_listing(picked: list) -> int:
 def main(doc: str = "") -> int:
     a = _parser(doc).parse_args()
     jobs = _apply_globals(a)
-    if (rc := _early_exit(a)) is not None:
+    # Built ONCE, here, after the flags have been applied and before anything reads a path.
+    # Everything below takes it as an argument rather than asking the module where the repo
+    # is; see busybody_config.Paths.
+    paths = cfg.paths()
+    if (rc := _early_exit(a, paths)) is not None:
         return rc
     picked = _select(a)
     if isinstance(picked, int):
         return picked
     if a.list:
         return _print_listing(picked)
-    return _sweep(a, picked, jobs)
+    return _sweep(a, picked, jobs, paths)

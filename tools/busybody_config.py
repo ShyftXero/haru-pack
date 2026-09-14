@@ -20,6 +20,7 @@ Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Values unchanged.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -34,6 +35,78 @@ WORK_ROOT: Path | None = None
 # had written 470 bogus findings.
 SCRATCH_CAP_GB = 8.0
 RUNS = OUT / "runs"
+
+# ── where things live ─────────────────────────────────────────────────────────────────
+#
+# `REPO`, `OUT` and `RUNS` below are a DEPRECATED SHIM, kept because rebinding them is how
+# every existing reader and every test redirects the harness. New engine code should take a
+# `Paths` and read it, not reach for a module global.
+#
+# The distinction matters for exactly one reason. A global is a fact about THIS checkout: it
+# is computed from `__file__`, it is haru-pack's repo root, and it is correct precisely
+# while the harness lives inside haru-pack. The moment the engine runs against anything
+# else, "where things live" stops being a fact and becomes an argument — and the tell that
+# it was always an argument is already in the suite, where a test has to monkeypatch three
+# module attributes to move the harness somewhere writable.
+#
+# So: one frozen value, constructed once at startup, passed down. `paths()` builds it from
+# the shim, which is what keeps `monkeypatch.setattr(cfg, "RUNS", tmp)` reaching code that
+# has already been converted. When an extraction happens, the body of `paths()` is the only
+# thing that changes; every call site is already taking the value.
+
+
+@dataclass(frozen=True)
+class Paths:
+    """Where one run of the harness reads and writes. Frozen: a run does not move.
+
+    `repo`  the tree the harness is reporting on. Used for `relative_to` in operator-facing
+            output, and to locate `.venv/bin/haru-pack` and `flex/packages.toml`.
+    `out`   scratch and artifacts that belong to the harness itself.
+    `runs`  one directory per run: journal, heartbeat, report, preserved findings.
+    """
+
+    repo: Path
+    out: Path
+    runs: Path
+
+    @classmethod
+    def rooted_at(cls, repo: Path) -> "Paths":
+        """The conventional layout under a repo root. One place computes it."""
+        out = Path(repo) / "busybody" / "out"
+        return cls(repo=Path(repo), out=out, runs=out / "runs")
+
+    def relative(self, p: Path) -> str:
+        """`p` relative to the repo, or absolute if it is outside it.
+
+        `Path.relative_to` raises on a path outside the tree, and the harness prints these
+        in its closing summary — so a work root moved outside the repo (the documented fix
+        for a quota'd scratch filesystem) would turn the last line of a successful run into
+        a traceback.
+        """
+        try:
+            return str(Path(p).relative_to(self.repo))
+        except ValueError:
+            return str(p)
+
+
+def paths() -> Paths:
+    """The active layout, read through the deprecated module-level names.
+
+    Built per call rather than cached, and that is deliberate: `main()` rewrites the shim
+    from the command line after every module has been imported, and the tests rebind it. A
+    cached value would be the same stale-copy bug the docstring at the top of this module
+    exists to warn about, one level up.
+    """
+    return Paths(repo=REPO, out=OUT, runs=RUNS)
+
+
+def set_paths(p: Paths) -> None:
+    """Point the harness at a different layout, shim included. For tests and for a caller
+    that is not haru-pack's own checkout."""
+    global REPO, OUT, RUNS
+    REPO, OUT, RUNS = p.repo, p.out, p.runs
+
+
 MARKER = "BUSYBODY_OK"
 
 # Never acceptable, in any case, whatever it declared.
