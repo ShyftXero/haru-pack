@@ -250,6 +250,63 @@ def _offline_env(cold: Path) -> dict:
     return env
 
 
+def print_summary(results: list) -> int:
+    """The table, and the process exit code. Non-zero if anything came out unexpected."""
+    print(f"\n{'package':22} {'list':13} {'tier':8} {'verdict':7} {'size':>9} "
+          f"{'build':>7} {'run':>6} {'offline':>8}")
+    print("-" * 88)
+    for r in results:
+        size = f"{r['bytes'] / 1e6:.1f}MB" if r["bytes"] else "-"
+        # `carried*` is not decoration. The host path cannot create a network namespace, so
+        # its offline result is weaker evidence than the container path's, and printing both
+        # in one column without a mark is how the weaker one gets read as the stronger one.
+        carried = "carried" if r.get("offline_is_real", True) else "carried*"
+        off = {True: carried, False: "FETCHED", None: "-"}[r.get("offline_ok")]
+        print(f"{r['name']:22} {(r['list'] or ''):13} {(r['tier'] or ''):8} {verdict(r):7} "
+              f"{size:>9} {r['build_s']:>6}s {r['run_s']:>5}s {off:>8}")
+
+    if any(not r.get("offline_is_real", True) for r in results):
+        print("\n  * approximate: produced with --no-docker, which cannot create a network "
+              "namespace.\n    uv was forced offline and the proxy variables pointed at a "
+              "dead port; a package\n    could still have reached the network by other means.")
+
+    bad = [r for r in results if verdict(r) in ("FAIL", "XPASS")]
+    print(f"\n{len(results) - len(bad)}/{len(results)} as expected; "
+          f"results in {(OUT / 'results.json').relative_to(REPO)}")
+    if bad:
+        print("\nnot as expected:")
+        for r in bad:
+            print(f"  {verdict(r)} {r['name']}: {r['error'][:300]}")
+    return 1 if bad else 0
+
+
+def choose_runner(a, count: int) -> tuple:
+    """(runner, description), or (None, "") after printing why it cannot run.
+
+    The sandbox decision, made once and before anything is downloaded or executed. Its own
+    function because it is the security-relevant branch in this file and should be readable
+    without scrolling through argument parsing (INV-SANDBOX-01).
+    """
+    if a.no_docker:
+        # Not a log line among log lines: this is the one moment the operator can still
+        # decide they did not mean it.
+        print(sandbox.host_warning(count, "third-party package(s)"), file=sys.stderr)
+        haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
+        if not Path(haru).exists() and not shutil.which("haru-pack"):
+            print("haru-pack not found on PATH", file=sys.stderr)
+            return None, ""
+        return HostRunner(haru), f"ON THIS HOST (--no-docker), haru-pack at {haru}"
+
+    try:
+        image = sandbox.preflight(require_rootless=a.require_rootless,
+                                  log=lambda m: print(m, file=sys.stderr))
+    except sandbox.SandboxUnavailable as e:
+        # Never a fallback to the host: that is how the safe default stops being the default.
+        print(f"\nflex: {e}", file=sys.stderr)
+        return None, ""
+    return DockerRunner(image, os.getuid(), os.getgid()), f"in containers ({image})"
+
+
 def run_one(pkg: dict, runner, timeout: int, keep: bool, offline_check: bool) -> dict:
     name = pkg["name"]
     tier = pkg.get("tier", "default")
@@ -353,26 +410,9 @@ def main() -> int:
         print(f"\n{len(pkgs)} package(s); nothing was run.")
         return 0
 
-    # The sandbox decision, before anything is downloaded or executed.
-    if a.no_docker:
-        # Not a log line among log lines: this is the one moment the operator can still
-        # decide they did not mean it.
-        print(sandbox.host_warning(len(pkgs), "third-party package(s)"), file=sys.stderr)
-        haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
-        if not Path(haru).exists() and not shutil.which("haru-pack"):
-            print("haru-pack not found on PATH", file=sys.stderr)
-            return 1
-        runner = HostRunner(haru)
-        where = f"ON THIS HOST (--no-docker), haru-pack at {haru}"
-    else:
-        try:
-            image = sandbox.preflight(require_rootless=a.require_rootless,
-                                      log=lambda m: print(m, file=sys.stderr))
-        except sandbox.SandboxUnavailable as e:
-            print(f"\nflex: {e}", file=sys.stderr)
-            return 1
-        runner = DockerRunner(image, os.getuid(), os.getgid())
-        where = f"in containers ({image})"
+    runner, where = choose_runner(a, len(pkgs))
+    if runner is None:
+        return 1
 
     OUT.mkdir(parents=True, exist_ok=True)
     print(f"flex: {len(pkgs)} package(s), {a.jobs} job(s), {where}\n")
@@ -394,28 +434,7 @@ def main() -> int:
 
     results.sort(key=lambda r: (r["list"] or "", r["name"]))
     (OUT / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-
-    print(f"\n{'package':22} {'list':13} {'tier':8} {'verdict':7} {'size':>9} "
-          f"{'build':>7} {'run':>6} {'offline':>8}")
-    print("-" * 88)
-    for r in results:
-        size = f"{r['bytes'] / 1e6:.1f}MB" if r["bytes"] else "-"
-        # `carried*` is not decoration. The host path cannot create a network namespace, so
-        # its offline result is weaker evidence than the container path's, and printing both
-        # in one column without a mark is how the weaker one gets read as the stronger one.
-        carried = "carried" if r.get("offline_is_real", True) else "carried*"
-        off = {True: carried, False: "FETCHED", None: "-"}[r.get("offline_ok")]
-        print(f"{r['name']:22} {(r['list'] or ''):13} {(r['tier'] or ''):8} {verdict(r):7} "
-              f"{size:>9} {r['build_s']:>6}s {r['run_s']:>5}s {off:>8}")
-
-    bad = [r for r in results if verdict(r) in ("FAIL", "XPASS")]
-    print(f"\n{len(results) - len(bad)}/{len(results)} as expected; "
-          f"results in {(OUT / 'results.json').relative_to(REPO)}")
-    if bad:
-        print("\nnot as expected:")
-        for r in bad:
-            print(f"  {verdict(r)} {r['name']}: {r['error'][:300]}")
-    return 1 if bad else 0
+    return print_summary(results)
 
 
 if __name__ == "__main__":
