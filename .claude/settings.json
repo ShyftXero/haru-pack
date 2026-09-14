@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gate.py\""
+            "command": "sh -c 'for d in \"$CLAUDE_PROJECT_DIR\" \"$PWD\"; do f=\"$d/.claude/hooks/gate.py\"; [ -f \"$f\" ] && exec python3 \"$f\"; done; exit 0'"
           }
         ]
       }
