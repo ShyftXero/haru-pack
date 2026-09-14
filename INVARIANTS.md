@@ -3066,3 +3066,87 @@ the valuable half and it is cheap; packaging is a bigger change and belongs with
 decision that has not been made (docs/BUSYBODY-PROTOCOLS.md is the input to it).
 Territory: tests/_modularity.py, tests/test_modularity.py, tools/
 
+
+## SANDBOX — the harnesses run stranger code in a box, not on the maintainer's workstation
+
+haru-pack's own test harnesses download code written by strangers — chosen by PyPI download
+rank, not by audit — and execute it. flex builds a project that depends on each package and
+runs the resulting binary; exam goes further and runs the package's **own test suite**. Both
+of those sit downstream of `uv sync`, which builds sdists, which executes arbitrary PEP 517
+backends.
+
+Until 2026-09-14 all of that ran on the maintainer's workstation, as the maintainer. This
+section is the containment, and `docs/adr/0005-sandboxed-flex-and-exam-harnesses.md` is the
+design. It is deliberately about **haru-pack's harnesses**, not about `haru-pack build` in an
+operator's hands — that is `INV-TRUST-02`, which is still `proposed`.
+
+### INV-SANDBOX-01
+Status: active
+Statement: The flex and exam harnesses execute third-party package code only inside a
+container. The host path exists but is opt-in behind an explicit flag, and prints — before
+anything is built or run — a warning naming what is about to execute and what is in scope.
+Docker being unavailable is an error, never a silent fallback to the host.
+Actors: the maintainer running `tools/flex-run.py` on their own machine; the author of any
+package in `flex/packages.toml`, and of every transitive dependency of it; the author of any
+sdist whose build backend runs under `uv sync`.
+Assets: the maintainer's workstation — `$HOME`, SSH keys, cloud credentials, browser
+profiles — and this repository's working tree, which is where the signing story starts. Also
+the meaning of a flex result: one package poisoning the next package's environment makes the
+whole matrix unreadable.
+Red-path: Three, each walked 2026-09-14. (1) Mount the docker socket, or drop `:ro` from the
+repository mount — `test_the_docker_socket_is_never_mounted` /
+`test_the_repository_is_mounted_read_only_or_not_at_all` /
+`test_the_only_writable_host_path_is_the_per_package_work_directory` go red. (2) Mount the
+warm cache read-write for the run phase — `test_the_cache_is_read_only_while_stranger_code_runs`
+goes red. (3) Move `subprocess.run([str(exe)], ...)` out of `HostRunner` and back into
+`run_one`, where it would run whichever runner was selected —
+`test_no_harness_executes_a_built_binary_except_through_the_sandbox` names the offending
+scope. That last check has its own guard-of-guards,
+`test_the_bypass_check_would_actually_catch_a_bypass`, because its first version was a regex
+that flagged the legitimate host path and would have been "fixed" by loosening it into
+something that matched nothing.
+Source: 2026-09-14, issue #30. Not from a discovered compromise — from noticing that the
+harness's entire job is to download and run strangers' code, and that nothing was standing
+between that and the maintainer's `$HOME`. The threat is ordinary: a compromised release of
+any top-25 package, or of anything one of them depends on.
+Note: The **build** phase needs the uv cache read-write, and that cache is shared across
+packages so a 25-package run does not fetch a toolchain 25 times. A malicious sdist build
+backend can therefore write into a cache a later package reads. That is a real residual risk,
+stated rather than papered over; it is confined to a docker volume, never touches the host
+filesystem, and the run phase mounts it read-only.
+Note: A container is not a VM. A kernel exploit leaves the box. Rootless docker narrows the
+gap and does not close it, which is why `rootless()` warns loudly rather than claiming the
+problem is solved — and why `--require-rootless` exists for anyone who wants the stronger
+line enforced.
+Territory: tools/sandbox.py, docker/, tools/flex-run.py, tools/exam.py, tests/test_sandbox.py
+
+### INV-SANDBOX-02
+Status: active
+Statement: A thick binary's offline verification run is executed with no network interface at
+all, against a cache volume that has never been used. "The dependencies came out of the
+payload" is a claim about the absence of a fetch, so the fetch must be impossible rather than
+merely discouraged.
+Actors: whoever reads `flex/out/results.json` or `top_n_pypi_stats.md` and concludes that the
+thick tier carries what it says it carries; the author of any packaged dependency, who is not
+obliged to route their network access through uv.
+Assets: the evidentiary value of the `offline` column and of the exam page. Both are
+published claims about what haru-pack's payloads contain.
+Red-path: Change the run phase's `network=False` to `True` for the thick tier, or reuse the
+warm named cache instead of a cold anonymous volume. `test_a_thick_verification_run_has_no_network_interface`
+and `test_the_offline_check_runs_against_a_cache_that_has_never_been_used` read the argv
+`docker_argv` produces and go red. Walked 2026-09-14 by replacing the network expression with
+a constant `"bridge"`.
+Source: 2026-09-14, issue #30. `tools/flex-run.py` already documented its own weakness: the
+old check forced `UV_OFFLINE` and pointed the proxy variables at a dead port, and said in its
+docstring that this "does not stop a package from opening a raw socket of its own". The
+container path is what makes that sentence unnecessary. The honesty came first; this
+invariant is the fix catching up to it.
+Note: This is deliberately NOT "every run has no network". At the `default` and `thin` tiers
+the dependency is *supposed* to be fetched on first run, so denying the network there would
+fail every package for the wrong reason. `test_the_default_tier_run_keeps_its_network` pins
+that distinction so a later "harden everything" pass cannot quietly break the harness.
+Note: The host path (`--no-docker`) cannot create a network namespace, so it keeps the old
+approximation and every result it produces is marked `carried*` in the summary rather than
+`carried`. A weaker check reported in the same column as a stronger one is how evidence gets
+overstated.
+Territory: tools/sandbox.py, tools/flex-run.py, tools/exam.py, tests/test_sandbox.py

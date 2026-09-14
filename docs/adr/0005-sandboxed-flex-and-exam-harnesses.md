@@ -4,7 +4,7 @@
 - Date: 2026-09-14
 - Scope: `tools/flex-run.py` and `tools/exam.py` — the two harnesses that fetch real
   packages from PyPI, build them, and then execute them. Adds one shared runner
-  (`tools/_sandbox.py`), one committed image (`docker/flex.Dockerfile`), and the
+  (`tools/sandbox.py`), one committed image (`docker/flex.Dockerfile`), and the
   `INV-SANDBOX` family. Does **not** cover `tools/busybody.py`, which keeps its own
   `_docker_run` for the quotamaster persona this round (§8), nor the pytest suite itself.
 - Vocabulary: *host path* — the harness running directly on the developer's machine.
@@ -40,12 +40,13 @@ Both harnesses execute third-party code only inside a container, by default. The
 still exists behind `--no-docker`, because a harness you cannot debug is a harness people
 route around — but it announces exactly what it is about to do (§6).
 
-## 3. `tools/_sandbox.py` — one runner, and a pure function at the center
+## 3. `tools/sandbox.py` — one runner, and a pure function at the center
 
 The containment decision is made by a **pure function** that returns an argv list:
 
 ```python
-def docker_argv(image, *, cmd, work, network, cache, uid, gid, extra=()) -> list[str]
+def docker_argv(image, *, cmd, work, network, cache, uid, gid,
+                repo=None, env=None, extra=(), workdir="/w") -> list[str]
 ```
 
 This is the load-bearing design choice in the whole ADR. It means the properties that
@@ -61,12 +62,28 @@ The rest of the module is thin:
 | `available() -> str` | `""` if docker can run, else the reason |
 | `rootless() -> bool` | whether the daemon is rootless (§7) |
 | `ensure_image() -> str` | build the image if stale; return `image:tag` |
+| `preflight(...) -> str` | availability + rootless check + image; raises rather than falling back |
 | `run(...)` | `subprocess.run` over `docker_argv` |
-| `host_warning(n) -> str` | the `--no-docker` banner text |
+| `container_env() -> dict` | HOME / cache variables, defined once for both phases |
+| `host_warning(n, what) -> str` | the `--no-docker` banner text |
+| `image_tag(dockerfile, pins) -> str` | the content-derived tag (§8) |
 
-Every container gets `--rm`, `--cap-drop=ALL`, `--security-opt no-new-privileges`,
-`-u <uid>:<gid>`, and no mounts except the per-package work directory and the cache volume.
-The docker socket is never mounted; `$HOME` is never mounted.
+Every container gets `--rm`, `--cap-drop=ALL`, `--security-opt no-new-privileges` and
+`-u <uid>:<gid>`. Exactly three things are mounted: the per-package work directory
+(read-write — the only writable host path, and the only one results come back out of), the
+cache volume, and the repository at `/src` **read-only**.
+
+The repo mount is there because the harness must test the working tree rather than a copy
+baked into the image; read-only is what makes that acceptable, since a hostile sdist build
+backend runs with the repository in its filesystem namespace. The docker socket is never
+mounted, and `$HOME` is never mounted.
+
+`container_env()` exists because of a bug this ADR's first implementation shipped: the
+runners set `HOME=/cache`, which moved HOME away from the path the image was built with and
+silently orphaned the launcher's pinned nimble dependencies in `/opt/haru/.nimble`. It
+surfaced four minutes into a build as `cannot open file: nimcrypto/sha2` — a message that
+reads like a missing pin rather than a misrouted environment variable. One definition, used
+by both phases and both harnesses.
 
 ## 4. Two containers per package
 
@@ -96,11 +113,16 @@ own network decision.
 
 `--network none` plus a **cold** cache (a fresh anonymous volume, not the shared named one)
 replaces that with a real network namespace. A package can open any socket it likes and
-there is no interface for it to open one on. `_offline_env()` and its dead-proxy trick are
-deleted rather than kept as a belt: two mechanisms where one is real invites the reader to
-assume the wrong one is doing the work.
+there is no interface for it to open one on.
 
 This is the part of this ADR that makes an existing result *stronger*, not merely safer.
+
+**Correction to this ADR's first draft**, which said `_offline_env()` would be *deleted*: it
+is not, it is demoted. The host path cannot create a network namespace, so deleting it would
+have made `--no-docker --offline-check` either a no-op or a lie. It survives as the host
+runner's approximation, its docstring now says which of the two mechanisms it is, and results
+produced under it print as `carried*` rather than `carried` in the summary. Two mechanisms
+are a hazard only when the reader cannot tell which one produced the number in front of them.
 
 ## 6. Enforcement, and the escape hatch
 
@@ -119,7 +141,7 @@ host uid and the socket is not a root-equivalent handle.
 The daemon on the primary dev host is currently **rootful** (`DockerRootDir=/var/lib/docker`,
 root-owned `/var/run/docker.sock`, docker 27.3.1), measured 2026-09-14. So:
 
-- `_sandbox.rootless()` detects the mode.
+- `sandbox.rootless()` detects the mode.
 - A rootful daemon produces a loud, named warning and proceeds.
 - `--require-rootless` makes it fatal, for CI and for anyone who wants the stronger line.
 
@@ -136,8 +158,22 @@ running `haru bootstrap` **inside the image build**, rather than by a hand-writt
 A Dockerfile that curls its own toolchain is a second acquisition path, with its own
 versions and its own (absent) digest checks, sitting next to the pinned-and-verified one in
 `pins.toml` that `INV-SUPPLY-01` covers. Two paths means the audited one is not the one that
-runs. Going through `haru bootstrap` also makes the image arch-agnostic for free, which
-matters because the long-run box is arm64.
+runs.
+
+uv is the one piece that cannot come from `haru bootstrap`, because a thick build shells out
+to `uv sync` and so needs it on `PATH` before haru-pack runs at all. `docker/install-uv.py`
+reads the same `pins.toml`, verifies the digest before use, and **refuses** an artifact with
+no entry rather than downloading it — the same rule `haru_pack.pins` applies. It duplicates
+thirty lines of that logic knowingly: it runs during `docker build`, before haru-pack is
+importable, and a bootstrap step that imports the thing it is bootstrapping is the worse
+problem.
+
+**Correction to this ADR's first draft**, which claimed the bootstrap route made the image
+"arch-agnostic for free". It does not. `haru_pack.toolchain` documents that choosenim
+publishes binaries for linux x86_64, macOS x86_64/arm64 and Windows, and **nothing for linux
+aarch64**; on arm64 Nim has to be built from source. The image is therefore **linux/amd64**,
+and the Dockerfile says so. Running flex on the arm64 box needs a different (and much slower)
+image built first — that work is not in this ADR.
 
 The image tag is a hash of `flex.Dockerfile` + `pins.toml`, so bumping a pin rebuilds the
 image and a stale image cannot be silently reused.
@@ -177,4 +213,4 @@ produces and goes red on either.
 Both are claimed by `tests/test_sandbox.py`, which asserts over `docker_argv()` output and
 needs neither docker nor a network. A call-site test in the style of
 `tests/test_stage_callsites.py` additionally asserts that no harness file executes a built
-binary except through `_sandbox`.
+binary except through `sandbox`.

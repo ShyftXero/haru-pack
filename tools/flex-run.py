@@ -25,15 +25,25 @@ At the default tier the dependency is fetched on FIRST RUN, so a green result pr
 packaging path and nothing about what the binary carries. At `--thick` the payload is
 supposed to carry uv, the interpreter and every dependency.
 
-`--offline-check` proves it: run the thick binary again with a PRISTINE cache directory and
-uv forced offline. Pristine matters — with a warm ~/.cache/haru-pack the run succeeds from
-cache and the test is vacuous. If it still prints FLEX_OK, the dependencies came out of the
-payload.
+`--offline-check` proves it: run the thick binary again in a container with NO NETWORK
+INTERFACE and a cache volume that has never been used. Pristine matters — with a warm cache
+the staged tree is reused and the run proves nothing about the payload. If it still prints
+FLEX_OK, the dependencies came out of the payload.
 
-Note this is not a network namespace (this box cannot create one). It forces uv offline and
-points the proxy variables at a dead port, which blocks the fetch path that matters; it does
-not stop a package from opening a raw socket of its own. Stated so the result is not read as
-stronger than it is.
+This is a real network namespace. It used to force uv offline and point the proxy variables
+at a dead port, and said so: that blocked the fetch path that matters but did not stop a
+package opening a raw socket of its own. `--network none` does (INV-SANDBOX-02).
+
+EVERYTHING RUNS IN A CONTAINER, BY DEFAULT
+
+This harness downloads code written by strangers, chosen by download rank rather than by
+audit, and executes it — at three points: sdist build backends under `uv sync`, the binary
+the build produces, and any [[bundle]]/[[post_install]] step in the manifest. Each package
+gets its own throwaway containers, so a poisoned one cannot reach $HOME, your keys, or the
+next package's result (INV-SANDBOX-01, docs/adr/0005).
+
+`--no-docker` runs it on this host instead, after printing what that means. There is no
+silent fallback: if docker is missing and you did not pass the flag, this stops.
 
 A thick *script* build would not prove this: assemble_payload only warms the dependency
 cache for `kind == "project"`, so the harness builds projects, not PEP 723 scripts.
@@ -67,7 +77,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "tools"))
 
+import sandbox  # noqa: E402
 from haru_pack import tomlio  # noqa: E402
 
 MANIFEST = REPO / "flex" / "packages.toml"
@@ -127,29 +139,105 @@ def make_project(pkg: dict, root: Path) -> Path:
     return proj
 
 
-def _execute(exe: Path, work: Path, timeout: int, env=None) -> tuple:
-    """(ok, seconds, detail). ok means exit 0 AND the marker in stdout."""
-    t0 = time.monotonic()
-    try:
-        r = subprocess.run([str(exe)], capture_output=True, text=True,
-                           timeout=timeout, cwd=work, env=env)
-    except subprocess.TimeoutExpired:
-        return False, round(time.monotonic() - t0, 1), f"timed out after {timeout}s"
-    dt = round(time.monotonic() - t0, 1)
-    if r.returncode != 0:
-        return False, dt, f"exit {r.returncode}: " + (r.stderr or r.stdout).strip()[-600:]
-    if MARKER not in r.stdout:
-        return False, dt, f"no {MARKER} in output: {r.stdout.strip()[:300]!r}"
-    return True, dt, r.stdout.strip()[-200:]
+def _verdict_from_output(rc, stdout, stderr, timed_out, timeout, secs) -> tuple:
+    """(ok, seconds, detail) from one execution, whoever ran it.
+
+    Shared by both runners so that "what counts as a pass" is decided in exactly one place.
+    A container and a host process disagreeing about that would be a very annoying bug.
+    """
+    if timed_out:
+        return False, secs, f"timed out after {timeout}s"
+    if rc != 0:
+        return False, secs, f"exit {rc}: " + (stderr or stdout).strip()[-600:]
+    if MARKER not in stdout:
+        return False, secs, f"no {MARKER} in output: {stdout.strip()[:300]!r}"
+    return True, secs, stdout.strip()[-200:]
+
+
+class HostRunner:
+    """Build and run directly on this machine. Opt-in via --no-docker; see host_warning()."""
+
+    kind = "host"
+    #: The host cannot create a network namespace, so its offline check is an
+    #: APPROXIMATION and every result it produces is labelled as one.
+    offline_is_real = False
+
+    def __init__(self, haru: str):
+        self.haru = haru
+
+    def build(self, work: Path, proj: Path, exe: Path, tier: str, timeout: int) -> tuple:
+        b = subprocess.run([self.haru, "build", str(proj), "-o", str(exe), "--tier", tier],
+                           capture_output=True, text=True, timeout=timeout)
+        return b.returncode, (b.stderr or b.stdout)
+
+    def execute(self, work: Path, exe: Path, timeout: int, *, offline: bool) -> tuple:
+        env = _offline_env(work / "cold-cache") if offline else None
+        t0 = time.monotonic()
+        try:
+            r = subprocess.run([str(exe)], capture_output=True, text=True,
+                               timeout=timeout, cwd=work, env=env)
+            rc, out, err, to = r.returncode, r.stdout, r.stderr, False
+        except subprocess.TimeoutExpired:
+            rc, out, err, to = None, "", "", True
+        return _verdict_from_output(rc, out, err, to, timeout,
+                                    round(time.monotonic() - t0, 1))
+
+
+class DockerRunner:
+    """Build and run each package in its own throwaway containers (INV-SANDBOX-01).
+
+    Two per package: the build gets the network and a writable cache, the run gets a
+    read-only cache and — at thick — no network interface at all.
+    """
+
+    kind = "docker"
+    offline_is_real = True
+
+    def __init__(self, image: str, uid: int, gid: int):
+        self.image, self.uid, self.gid = image, uid, gid
+
+    def _env(self) -> dict:
+        return sandbox.container_env()
+
+    def build(self, work: Path, proj: Path, exe: Path, tier: str, timeout: int) -> tuple:
+        r = sandbox.run(
+            self.image,
+            cmd=["haru-pack", "build", f"{sandbox.WORKDIR}/{proj.name}",
+                 "-o", f"{sandbox.WORKDIR}/{exe.name}", "--tier", tier],
+            work=work, network=True, cache=sandbox.CACHE_RW,
+            uid=self.uid, gid=self.gid, repo=REPO, env=self._env(), timeout=timeout)
+        if r["infra"]:
+            return 125, f"the sandbox could not start this build: {r['stderr'].strip()[-300:]}"
+        return (r["rc"] if r["rc"] is not None else 124), (r["stderr"] or r["stdout"])
+
+    def execute(self, work: Path, exe: Path, timeout: int, *, offline: bool) -> tuple:
+        r = sandbox.run(
+            self.image, cmd=[f"{sandbox.WORKDIR}/{exe.name}"], work=work,
+            # A real network namespace, which is what makes the offline check mean
+            # something. At other tiers the dependency is SUPPOSED to be fetched on first
+            # run, so the network stays on.
+            network=not offline,
+            cache=sandbox.CACHE_COLD if offline else sandbox.CACHE_RO,
+            uid=self.uid, gid=self.gid, env=self._env(), timeout=timeout)
+        return _verdict_from_output(r["rc"], r["stdout"], r["stderr"], r["timed_out"],
+                                    timeout, r["seconds"])
 
 
 def _offline_env(cold: Path) -> dict:
-    """Environment for the offline check: a cache that has never been used, and uv barred
-    from the network.
+    """The HOST path's approximation of offline. Not used by the container path.
 
-    The pristine cache is the load-bearing part. With a warm ~/.cache/haru-pack the staged
-    tree is reused and the run proves nothing about the payload.
+    A container gets `--network none` — a real namespace, with no interface for a package to
+    open a socket on. This function is what is left when the harness is run with
+    --no-docker: it forces uv offline and points the proxy variables at a dead port, which
+    blocks the fetch path that matters but does NOT stop a package reaching the network by
+    other means. Results produced this way are marked approximate in the summary, because a
+    weaker check reported in the same column as a stronger one is how evidence gets
+    overstated.
+
+    The pristine cache is the load-bearing part either way. With a warm ~/.cache/haru-pack
+    the staged tree is reused and the run proves nothing about the payload.
     """
+    cold.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["XDG_CACHE_HOME"] = str(cold)
     env["UV_OFFLINE"] = "1"
@@ -162,7 +250,7 @@ def _offline_env(cold: Path) -> dict:
     return env
 
 
-def run_one(pkg: dict, haru: str, timeout: int, keep: bool, offline_check: bool) -> dict:
+def run_one(pkg: dict, runner, timeout: int, keep: bool, offline_check: bool) -> dict:
     name = pkg["name"]
     tier = pkg.get("tier", "default")
     work = OUT / name
@@ -175,19 +263,19 @@ def run_one(pkg: dict, haru: str, timeout: int, keep: bool, offline_check: bool)
     res = {"name": name, "list": pkg.get("list"), "tier": tier,
            "expect_failure": bool(pkg.get("expect_failure")),
            "build_ok": False, "run_ok": False, "offline_ok": None, "bytes": 0,
-           "build_s": 0.0, "run_s": 0.0, "offline_s": 0.0, "error": "", "stdout": ""}
+           "build_s": 0.0, "run_s": 0.0, "offline_s": 0.0, "error": "", "stdout": "",
+           "sandbox": runner.kind, "offline_is_real": runner.offline_is_real}
 
     t0 = time.monotonic()
-    b = subprocess.run([haru, "build", str(proj), "-o", str(exe), "--tier", tier],
-                       capture_output=True, text=True, timeout=timeout)
+    rc, output = runner.build(work, proj, exe, tier, timeout)
     res["build_s"] = round(time.monotonic() - t0, 1)
-    if b.returncode != 0 or not exe.exists():
-        res["error"] = "build: " + (b.stderr or b.stdout).strip()[-600:]
+    if rc != 0 or not exe.exists():
+        res["error"] = "build: " + output.strip()[-600:]
         return res
     res["build_ok"] = True
     res["bytes"] = exe.stat().st_size
 
-    ok, dt, detail = _execute(exe, work, timeout)
+    ok, dt, detail = runner.execute(work, exe, timeout, offline=False)
     res["run_s"], res["run_ok"] = dt, ok
     if not ok:
         res["error"] = "run: " + detail
@@ -197,9 +285,7 @@ def run_one(pkg: dict, haru: str, timeout: int, keep: bool, offline_check: bool)
     # The payload check. Only meaningful at thick: at other tiers the dependency is SUPPOSED
     # to be fetched at first run, so failing offline is correct behaviour, not a defect.
     if offline_check and tier == "thick":
-        cold = work / "cold-cache"
-        cold.mkdir(exist_ok=True)
-        ok2, dt2, detail2 = _execute(exe, work, timeout, env=_offline_env(cold))
+        ok2, dt2, detail2 = runner.execute(work, exe, timeout, offline=True)
         res["offline_ok"], res["offline_s"] = ok2, dt2
         if not ok2:
             res["error"] = ("offline: the thick payload did not carry its dependencies — "
@@ -228,7 +314,12 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="keep work dirs for passing builds")
     ap.add_argument("--tier", default="", help="override the tier for every package")
     ap.add_argument("--offline-check", action="store_true",
-                    help="for thick builds, re-run with a pristine cache and uv offline")
+                    help="for thick builds, re-run with a pristine cache and no network")
+    ap.add_argument("--no-docker", action="store_true",
+                    help="run the packages' code DIRECTLY ON THIS HOST instead of in a "
+                         "container. Prints what that puts at risk before it starts.")
+    ap.add_argument("--require-rootless", action="store_true",
+                    help="refuse to run against a rootful docker daemon")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -255,11 +346,6 @@ def main() -> int:
         print("note: --offline-check only applies to thick builds; none selected",
               file=sys.stderr)
 
-    haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
-    if not Path(haru).exists() and not shutil.which("haru-pack"):
-        print("haru-pack not found on PATH", file=sys.stderr)
-        return 1
-
     if a.dry_run:
         for p in pkgs:
             print(f"{p['name']:24} {p.get('list'):13} tier={p.get('tier')}"
@@ -267,13 +353,34 @@ def main() -> int:
         print(f"\n{len(pkgs)} package(s); nothing was run.")
         return 0
 
+    # The sandbox decision, before anything is downloaded or executed.
+    if a.no_docker:
+        # Not a log line among log lines: this is the one moment the operator can still
+        # decide they did not mean it.
+        print(sandbox.host_warning(len(pkgs), "third-party package(s)"), file=sys.stderr)
+        haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
+        if not Path(haru).exists() and not shutil.which("haru-pack"):
+            print("haru-pack not found on PATH", file=sys.stderr)
+            return 1
+        runner = HostRunner(haru)
+        where = f"ON THIS HOST (--no-docker), haru-pack at {haru}"
+    else:
+        try:
+            image = sandbox.preflight(require_rootless=a.require_rootless,
+                                      log=lambda m: print(m, file=sys.stderr))
+        except sandbox.SandboxUnavailable as e:
+            print(f"\nflex: {e}", file=sys.stderr)
+            return 1
+        runner = DockerRunner(image, os.getuid(), os.getgid())
+        where = f"in containers ({image})"
+
     OUT.mkdir(parents=True, exist_ok=True)
-    print(f"flex: {len(pkgs)} package(s), {a.jobs} job(s), haru-pack at {haru}\n")
+    print(f"flex: {len(pkgs)} package(s), {a.jobs} job(s), {where}\n")
 
     results = []
     if a.jobs > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-            futs = {ex.submit(run_one, p, haru, a.timeout, a.keep, a.offline_check): p
+            futs = {ex.submit(run_one, p, runner, a.timeout, a.keep, a.offline_check): p
                     for p in pkgs}
             for f in concurrent.futures.as_completed(futs):
                 r = f.result()
@@ -281,7 +388,7 @@ def main() -> int:
                 print(f"  {verdict(r):5} {r['name']}")
     else:
         for p in pkgs:
-            r = run_one(p, haru, a.timeout, a.keep, a.offline_check)
+            r = run_one(p, runner, a.timeout, a.keep, a.offline_check)
             results.append(r)
             print(f"  {verdict(r):5} {r['name']}")
 
@@ -293,7 +400,11 @@ def main() -> int:
     print("-" * 88)
     for r in results:
         size = f"{r['bytes'] / 1e6:.1f}MB" if r["bytes"] else "-"
-        off = {True: "carried", False: "FETCHED", None: "-"}[r.get("offline_ok")]
+        # `carried*` is not decoration. The host path cannot create a network namespace, so
+        # its offline result is weaker evidence than the container path's, and printing both
+        # in one column without a mark is how the weaker one gets read as the stronger one.
+        carried = "carried" if r.get("offline_is_real", True) else "carried*"
+        off = {True: carried, False: "FETCHED", None: "-"}[r.get("offline_ok")]
         print(f"{r['name']:22} {(r['list'] or ''):13} {(r['tier'] or ''):8} {verdict(r):7} "
               f"{size:>9} {r['build_s']:>6}s {r['run_s']:>5}s {off:>8}")
 
