@@ -16,6 +16,15 @@ no.
 
 Exit 0 = allow. Exit 2 = block, with the reason on stderr.
 
+FAILING OPEN IS DELIBERATE. `settings.json` locates this file by trying `$CLAUDE_PROJECT_DIR`
+and then `$PWD`, and exits 0 if neither has it. That is not laziness about enforcement — it is
+the only safe shape for a hook that runs before EVERY Bash call. When the path did not resolve
+(a worktree session whose `$CLAUDE_PROJECT_DIR` pointed at a main checkout that had not pulled
+these files yet), the hook errored and every single Bash call in that session was refused,
+including the ones needed to fix it. A gate that can brick a session is worse than the
+behaviour it prevents, and neither of these two rules is a security control: bulk staging is
+hygiene, and the real release gate is `cut-release.sh` plus CI on the tag.
+
 KNOWN LIMITATION, stated rather than papered over: these match the command TEXT, so
 `grep -n "git add -A" README.md` is blocked even though it stages nothing. That is the
 correct trade for a gate that must never be wrong in the permissive direction — the failure
