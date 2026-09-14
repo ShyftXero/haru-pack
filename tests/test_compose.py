@@ -1,4 +1,5 @@
-"""INV-CHAOS-08 — composition, fallibility, and the determinism that makes both usable.
+"""INV-CHAOS-08 — composition, per-action perturbation probability, and the determinism
+that makes both usable.
 
 A persona that runs alone asks a closed question. "Does staging cope with umask 077?" has
 the same answer forever, and answering it is integration testing. The open question — which
@@ -142,7 +143,7 @@ def test_sampling_does_not_blow_up_on_the_real_catalogue():
     assert time.monotonic() - t0 < 5.0, "sampling the real catalogue should be instant"
 
 
-# ---------------------------------------------------------------- fallibility
+# ------------------------------------------ per-action perturbation probability
 
 @pytest.mark.invariant("INV-CHAOS-08")
 def test_a_fallible_trait_sometimes_declines_to_act():
@@ -150,7 +151,8 @@ def test_a_fallible_trait_sometimes_declines_to_act():
     left a .env behind" is the only thing ever tested, and "greenhorn got it right, auditor
     still left the .env" is a different code path that never runs."""
     fallible = [n for n, t in bc.TRAITS.items() if t["fires"] < 1.0]
-    assert fallible, "no trait is fallible, so every persona is a fixture"
+    assert fallible, ("every trait has probability 1, so every persona is a fixture "
+                      "rather than a person")
 
     combo = tuple(fallible[:3])
     seen = {bc.realize(combo, 99, i) for i in range(60)}
@@ -201,7 +203,7 @@ def test_the_baseline_pass_forces_every_trait_to_fire():
     # and the runner turns it on for exactly the two passes that need it
     src = harness_source()
     assert "force = bool(a.compose_only) or a.compose == 1" in src, (
-        "the baseline and --compose-only must disable fallibility"
+        "the baseline and --compose-only must force every probability to 1"
     )
 
 

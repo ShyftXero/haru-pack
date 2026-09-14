@@ -74,7 +74,14 @@ class Ctx:
 
     @classmethod
     def perturb(cls, action: str, **fields) -> None:
-        """Announce a fault BEFORE performing it, never after.
+        """Announce a NEMESIS action BEFORE performing it, never after.
+
+        `nemesis` is Jepsen's word for deliberate fault injection — the process that
+        partitions the network, pauses a node, skews a clock. It is the right word for what
+        this records: a fault the harness CHOSE, as opposed to the probabilistic kind
+        (FoundationDB calls that **buggification**), which is what a trait's firing
+        probability produces. Both end up in this file; the distinction is whether a human
+        named the fault or a draw did.
 
         A fault whose moment was chosen from a seed is unattributable if it is recorded
         after the fact: a kill at 0.4s and a kill at 4.0s leave the same case name with

@@ -146,9 +146,10 @@ def _announce_compose(a, combos: list, fixtures: list, run_id: str, seed: int,
     print(f"\nbusybody compose: {len(combos)} stack(s) of "
           f"{a.compose if a.compose else len(combos[0])} trait(s)   run {run_id}")
     print(f"seed: {seed}   (reproduce a stack with --compose-only a,b,c)")
-    print("fallibility: " + ("OFF \u2014 every selected trait fires, because this pass is the "
-                             "attribution baseline" if force else
-                             "ON \u2014 a trait may decline to act; the FIRED set is what counts"))
+    print("perturbation probability: "
+          + ("FORCED TO 1 \u2014 every selected trait fires, because this pass is the "
+             "attribution baseline" if force else
+             "AS DECLARED \u2014 a trait may decline to act; the FIRED set is what counts"))
     for ln in work_root_report(cfg.WORK_ROOT or Path(tempfile.gettempdir())):
         print(ln)
     print(f"\n  acceptable: RAN / REFUSED / APP-CRASHED.  never: {', '.join(FATAL)}\n")
@@ -256,7 +257,8 @@ def compose_sweep(a, fixtures, jr, run_dir: Path, run_id: str, reaper, results: 
     seed = a.compose_seed if a.compose_seed is not None else int(run_id[2:].replace("-", ""))
     exe = fixtures[0][1] if fixtures else None
 
-    # Fallibility off for the baseline and for an explicitly-named stack; see realize().
+    # Perturbation probabilities forced to 1 for the baseline and for an explicitly-named
+    # stack; see realize().
     force = bool(a.compose_only) or a.compose == 1
 
     combos = _compose_combos(a, seed)

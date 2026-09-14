@@ -26,12 +26,17 @@ caught by `git stash`, by worktree switches, and by branch changes — losing hi
 when you are moving between branches to investigate something. haru-pack is developed in
 git worktrees, so this applies with force.
 
-## Why fingerprints
+## Why fingerprints — bucketing by signature
 
-Three cases failing for one reason should read as one problem. A fingerprint normalises the
-volatile parts of a message — paths, timestamps, hex, ports, numbers — and hashes what is
-left, so repeats collapse into a group with a count and a first-seen date. Without it every
-run looks like a fresh set of unrelated failures.
+Three cases failing for one reason should read as one problem. **Bucketing by signature** is
+the universal fuzzing term for this, and `fingerprint` is the field that carries it: the
+volatile parts of a message — paths, timestamps, hex, ports, numbers — are replaced with
+placeholders (**signature normalization**) and what is left is hashed, so repeats collapse
+into a group with a count and a first-seen date. Without it every run looks like a fresh set
+of unrelated failures.
+
+The field name stays `fingerprint`, because it is written into every row on disk and into
+lotek's; only the description adopts the standard vocabulary.
 """
 from __future__ import annotations
 
@@ -72,8 +77,9 @@ SEVERITIES = ("critical", "warning", "note")
 
 HEARTBEAT_STALE_S = 120          # older than this and the run is not live
 
-# Volatile substrings, stripped before fingerprinting. Straight from lotek's ledger.py:
-# without these, one root cause splits into as many groups as there are runs.
+# SIGNATURE NORMALIZATION: the volatile substrings replaced before hashing. Straight from
+# lotek's ledger.py — without these, one root cause splits into as many groups as there are
+# runs, because a path or a pid makes every occurrence look unique.
 _VOLATILE = [
     (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I), "<uuid>"),
     (re.compile(r"\b[0-9a-f]{16,}\b", re.I), "<hex>"),
@@ -94,7 +100,11 @@ def normalize(text: str) -> str:
 
 
 def fingerprint(persona: str, case: str, outcome: str, message: str) -> str:
-    """A stable 16-hex identity for one failure mode.
+    """A stable 16-hex identity for one failure mode: the bucketing signature.
+
+    "Bucketing by signature" is the standard fuzzing term for what this does — collapsing
+    many crashes into the distinct faults behind them. The identifier stays `fingerprint`
+    because it is a field name on every row ever written, here and in lotek.
 
     Keyed on the case as well as the message: the same underlying fault reached through a
     different persona is worth seeing separately, because the route matters when you are
@@ -278,6 +288,9 @@ def ledger_rollup(path: Path | None = None) -> list:
     """One row per (fingerprint, cascade?): count, first_seen, last_seen, runs, cases.
 
     WHY THE CASCADE FLAG IS PART OF THE GROUPING KEY AND NOT OF THE FINGERPRINT
+
+    This is cascade suppression, and its stated intent is FIRST-FAILURE ATTRIBUTION — the
+    SRE term for reporting the fault that started it rather than the N faults it caused.
 
     When the herd persona declares a stall, every child that resolves afterwards fails too,
     and it fails for the stall rather than for itself. Sixteen of those share a persona, a

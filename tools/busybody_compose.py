@@ -36,13 +36,18 @@ Combinations are sampled from a seed, and the seed is recorded in the journal an
 the report. A finding that cannot be reproduced is an anecdote. `--compose-only a,b,c` re-runs
 one exact stack.
 
-## Fallibility
+## Per-action perturbation probability
 
-A persona that always misbehaves is not a person, it is a fixture. Some days the new
-developer reads the flag correctly. `fires` is the probability a trait acts on a given run,
-so the stack "greenhorn fumbled AND auditor left a .env" is not the only thing ever tested —
-"greenhorn got it right, auditor still left the .env" is a different code path and it gets
-its turn.
+`fires` is the probability that a trait acts on a given run — a **per-action perturbation
+probability**, cf. human error probability in the human-reliability literature. This is the
+same mechanism FoundationDB calls buggification, where `BUGGIFY` fires at a 25% base rate
+and `BUGGIFY_WITH_PROB(p)` sets it per site; they split frequency from magnitude into
+separate mechanisms for the same reason the rate is per-trait here rather than global.
+
+Why it exists: a persona that always misbehaves is not a person, it is a fixture. Some days
+the new developer reads the flag correctly. So the stack "greenhorn fumbled AND auditor left
+a .env" is not the only thing ever tested — "greenhorn got it right, auditor still left the
+.env" is a different code path and it gets its turn.
 
 Selection and firing are recorded separately, and a run's identity is the set that FIRED. A
 run where nothing fired is a control, kept rather than resampled: if the baseline is broken,
@@ -94,12 +99,14 @@ def trait(name: str, phase: str, layer: str, why: str, *, conflicts=(), inv: str
     `no_run`    after this trait the artifact cannot be executed here (a foreign target).
                 The pipeline stops after the build and runs static checks instead.
     `needs`     external requirements ("docker", "wine"). Skipped, loudly, when absent.
-    `fires`     probability this trait actually acts on a given run. THE POINT: a persona
-                that always misbehaves is not a person, it is a fixture. Some days the new
-                developer reads the flag correctly. If greenhorn always fumbles, the stack
-                "greenhorn fumbled AND auditor left a .env lying around" is the only thing
-                ever tested, and "greenhorn got it right, auditor still left the .env" — a
-                different code path — never runs at all.
+    `fires`     the PER-ACTION PERTURBATION PROBABILITY: how often this trait actually
+                acts. (cf. human error probability; the identifier stays `fires` because
+                that is what it does, not what it models.) THE POINT: a persona that always
+                misbehaves is not a person, it is a fixture. Some days the new developer
+                reads the flag correctly. If greenhorn always fumbles, the stack "greenhorn
+                fumbled AND auditor left a .env lying around" is the only thing ever tested,
+                and "greenhorn got it right, auditor still left the .env" — a different code
+                path — never runs at all.
 
                 Set below 1.0 only where real-world presence is genuinely intermittent: a
                 developer's mistake, a stale cache that may or may not be there. A CI
@@ -224,7 +231,8 @@ def realize(combo, seed: int, run_index: int, force: bool = False) -> tuple:
     worth more than one bolted on beside it — if the baseline is broken, this is where it
     shows.
 
-    `force` disables fallibility, and there are exactly two callers that need it:
+    `force` sets every per-action perturbation probability to 1, and there are exactly two
+    callers that need it:
 
       * the k=1 pass, which IS the attribution baseline. "Does trait A fail alone?" cannot
         be answered by a run where A did not fire, and a baseline with holes in it makes
@@ -232,7 +240,7 @@ def realize(combo, seed: int, run_index: int, force: bool = False) -> tuple:
       * --compose-only, where someone asked for one specific stack. Handing them a control
         run instead would be answering a different question than the one they typed.
 
-    Everywhere else fallibility is the point, so it stays on.
+    Everywhere else the probability IS the point, so it stays as declared.
     """
     if force:
         return tuple(combo)

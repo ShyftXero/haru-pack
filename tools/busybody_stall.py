@@ -1,8 +1,20 @@
-"""The stall watchdog: several processes alive, and none of them making progress.
+"""An EXTERNAL WATCHDOG detecting violation of a LIVENESS (progress) property.
 
-Only an observer OUTSIDE every one of them can say this, which is why STALLED is not a
-value `classify()` can return. The three signals are alive + CPU stable + no I/O, and they
-must ALL hold continuously for `cfg.STALL_QUIET_S`.
+That is the standard description, and all three words carry weight. The property is
+liveness — "the system eventually makes progress" — as distinct from a safety property,
+which says something bad never happens; a safety violation can be caught by anyone, a
+liveness violation can only be caught by waiting. The watchdog is external because only an
+observer OUTSIDE every one of the processes can say it: from inside a child the only
+available fact is "I am waiting", and waiting is also what a healthy child does while
+another one stages. That is why STALLED is not a value `classify()` can return.
+
+The same shape appears as syzkaller's hung-task detection, the Linux kernel's own
+`hung_task` watchdog, and a TLA+ liveness property. The identifiers here stay `StallWatch`
+and `--wedge`, because the words "stall" and "wedge" are what the operators of this project
+actually say.
+
+The three signals are alive + CPU stable + no I/O, and they must ALL hold continuously for
+`cfg.STALL_QUIET_S`.
 
 Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Unchanged otherwise.
 """

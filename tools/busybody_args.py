@@ -55,8 +55,9 @@ def _parser(doc: str) -> argparse.ArgumentParser:
     ap.add_argument("--compose-runs", type=int, default=120, metavar="N",
                     help="how many stacks to sample (default 120)")
     ap.add_argument("--compose-seed", type=int, default=None, metavar="S",
-                    help="seed for stack selection and for trait fallibility "
-                         "(default: derived from the run id, and always recorded)")
+                    help="seed for stack selection and for each trait's per-action "
+                         "perturbation probability (default: derived from the run id, and "
+                         "always recorded)")
     ap.add_argument("--compose-only", metavar="A,B,C", default="",
                     help="run exactly this stack, repeatedly if --compose-runs > 1; "
                          "the way to reproduce a finding")
