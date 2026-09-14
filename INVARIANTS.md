@@ -3024,3 +3024,44 @@ Note: A hub is allowed and is often right. `build/__init__.py` imports fifteen s
 is a facade holding no logic; `cli/__init__.py` imports every command module because that is
 what REGISTERS them. Both pass, because both are thin.
 Territory: tests/_modularity.py, tests/test_modularity.py, src/haru_pack/, tools/
+
+### INV-MODULARITY-04
+Status: active
+Statement: No module in busybody's ENGINE imports a module in busybody's CATALOGUE. The
+engine is what runs a sweep, classifies an outcome, journals it and reports it; the
+catalogue is the declared faults and the fixtures they are thrown at. The dependency runs
+one way only — catalogue on engine — and the partition is declared explicitly in
+`tests/_modularity.py`, not inferred from filenames.
+Actors: not an attacker. Whoever needs the sweep machinery without haru-pack's specific
+list of ways to break haru-pack — a second project, or this one after an extraction — and
+the ordinary afternoon in which an engine module grows one convenient import and nobody
+notices that the seam closed.
+Assets: the separation the 2026-09-13 split created. It landed on roughly the seam an
+extraction would want, and nothing held it open: `tools/` is a flat directory of siblings on
+`sys.path`, there is no package, and no budget can express direction. `busybody_run`
+importing `busybody_fixtures` broke no budget — both files are small, neither is central —
+and still meant the sweep driver held a hard reference into the catalogue. A size budget
+measures how much a module holds; only this one says which way it points.
+Red-path: add `import busybody_cases_stage` to `tools/busybody_runner.py` and run
+`pytest tests/test_modularity.py`. `test_the_engine_does_not_import_the_catalogue` goes red
+naming the pair. Walked 2026-09-13, and walked the other way too: before the registry below
+existed the check named `busybody_run -> busybody_fixtures` unprompted, which is the
+violation that was actually there.
+Source: 2026-09-13, from the alignment pass against lotek's independent busybody. Declaring
+it required one real fix: `busybody_run` imported `build_fixture` / `build_top25_fixtures` /
+`calibrate` by name. Those are now registered — `busybody_config.FIXTURE_SOURCES` and
+`CALIBRATOR`, filled by `busybody_fixtures` at import and read by name from the engine —
+which is the same inversion `CASES` has always used.
+Note: The fix for a violation is never "move the import inside a function". That hides the
+edge from an AST scan without removing it, and the engine stays unextractable. Invert the
+dependency instead: the catalogue registers what it offers, the engine looks it up.
+Note: The partition must stay TOTAL. `test_every_busybody_module_is_on_one_side_or_the_other`
+fails on any `busybody_*.py` in neither set, because a rule that silently stops covering new
+modules is worse than no rule — it reads as enforcement while enforcing less every month.
+`busybody.py` itself is the single exemption: it is the composition root, whose entire job is
+to import the catalogue for its decorators' side effects and hand off to the engine.
+Note: This deliberately stops short of making `tools/` a package. The import-direction rule is
+the valuable half and it is cheap; packaging is a bigger change and belongs with an extraction
+decision that has not been made (docs/BUSYBODY-PROTOCOLS.md is the input to it).
+Territory: tests/_modularity.py, tests/test_modularity.py, tools/
+

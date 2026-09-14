@@ -21,7 +21,7 @@ if str(_HERE) not in sys.path:
 from haru_pack import overlay  # noqa: E402,F401
 
 import busybody_config as cfg  # noqa: E402
-from busybody_config import (FATAL, MARKER, case)  # noqa: E402,F401
+from busybody_config import (FATAL, MARKER, case, fixture_source)  # noqa: E402,F401
 from busybody_runner import (Ctx, InfraFailure, blame, classify, clean_env,  # noqa: E402,F401
                              dir_bytes, infra_failure_reason, run_exe, stage_root,
                              warm, work_root_report)
@@ -34,6 +34,18 @@ APP = '''# /// script
 import sys
 print("BUSYBODY_OK", sys.version_info[:2])
 '''
+
+
+@fixture_source("synthetic")
+def _synthetic_source(tier: str, reaper, log=print) -> list:
+    """`--fixtures synthetic`: one two-line script, packed. The default."""
+    return [("synthetic", build_fixture(tier, log=log))]
+
+
+@fixture_source("top25")
+def _top25_source(tier: str, reaper, log=print) -> list:
+    """`--fixtures top25`: one binary per top-25 PyPI package."""
+    return build_top25_fixtures(tier, reaper, log=log)
 
 
 def build_fixture(tier: str, log=print) -> Path:
@@ -208,3 +220,9 @@ def calibrate(fixtures: list, log=print) -> int:
     return 0
 
 
+
+
+
+# The engine reads this rather than importing `calibrate` by name; see
+# busybody_config.CALIBRATOR and INV-MODULARITY-04.
+cfg.CALIBRATOR = calibrate

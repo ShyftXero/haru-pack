@@ -65,6 +65,35 @@ FATAL = ("CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "STALLED", "ESCAPED", "SMU
 
 CASES = []
 
+# The fixture catalogue, registered the same way CASES is and for the same reason.
+#
+# `--fixtures synthetic` and `--fixtures top25` name ways of PRODUCING the binaries under
+# attack, and producing them is catalogue work: it knows about tiers, about the top-25 list,
+# about flex-run. The sweep driver needs none of that — it needs "give me a list of
+# (name, exe)". While `busybody_run` imported `build_fixture` by name, the engine held a
+# hard reference into the catalogue and INV-MODULARITY-04 could not be stated, let alone
+# held. Registering here inverts it: the catalogue announces what it can build, and the
+# engine looks the name up.
+#
+# A value is `fn(tier, reaper) -> [(name, Path)]`, and may raise SystemExit for a setup
+# failure, which `_make_fixtures` already reports as one.
+FIXTURE_SOURCES: dict = {}
+
+# `fn(fixtures, log=print) -> exit code`, for --calibrate. One slot, because there is one
+# question ("where is the band between two packages?") and a second answer to it would be a
+# second question.
+CALIBRATOR = None
+
+
+def fixture_source(name: str):
+    """Register a way of producing the binaries a sweep attacks. See FIXTURE_SOURCES."""
+    def deco(fn):
+        if name in FIXTURE_SOURCES:
+            raise ValueError(f"duplicate fixture source {name!r}")
+        FIXTURE_SOURCES[name] = fn
+        return fn
+    return deco
+
 
 def case(persona: str, expect, why: str, inv: str = "", remedy: str = "",
          serial: bool = False, per_fixture: bool = True, light: bool = False):

@@ -18,7 +18,6 @@ import time
 from pathlib import Path
 
 import busybody_config as cfg
-from busybody_fixtures import build_fixture, build_top25_fixtures, calibrate
 from busybody_guard import guard_single_instance
 from busybody_ledger import (Journal, Reaper, human_bytes, ledger_append, ledger_path,
                              prune_runs, reap_orphans)
@@ -34,10 +33,16 @@ def _make_fixtures(a, jr, run_dir: Path, reaper) -> list:
     results, and reporting zero findings would be a lie.
     """
     try:
-        if a.fixtures == "synthetic":
-            return [("synthetic", build_fixture(a.tier))]
-        if a.fixtures == "top25":
-            return build_top25_fixtures(a.tier, reaper)
+        # Looked up in the registry rather than imported by name (INV-MODULARITY-04): a
+        # fixture source knows about tiers, the top-25 list and flex-run, and none of that
+        # is the sweep driver's business. `busybody.py` imports the catalogue, which is what
+        # fills this in; an empty registry here means somebody reached `_sweep` without it.
+        if source := cfg.FIXTURE_SOURCES.get(a.fixtures):
+            return source(a.tier, reaper)
+        if not cfg.FIXTURE_SOURCES and a.fixtures != "synthetic":
+            raise SystemExit(
+                f"no fixture sources are registered, so {a.fixtures!r} cannot be resolved. "
+                f"Import the catalogue (`import busybody`) before running a sweep.")
         exe = Path(a.fixtures).expanduser().resolve()
         if not exe.exists():
             raise SystemExit(f"no such binary: {exe}")
@@ -250,7 +255,11 @@ def _sweep(a, picked: list, jobs: int) -> int:
             return 2
 
         if a.calibrate:
-            return calibrate(fixtures)
+            if cfg.CALIBRATOR is None:
+                print("--calibrate: no calibrator is registered; import the catalogue "
+                      "(`import busybody`) first.", file=sys.stderr)
+                return 2
+            return cfg.CALIBRATOR(fixtures)
 
         # fixture-free cases run once; everything else once per fixture
         fixture_free = [c for c in picked if not c.get("per_fixture", True)]

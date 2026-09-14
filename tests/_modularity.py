@@ -159,3 +159,87 @@ def collect_modules() -> list[Module]:
             if mod is not None:
                 out.append(mod)
     return sorted(out, key=lambda m: -m.code)
+
+
+# ── INV-MODULARITY-04: the engine may not import the catalogue ────────────────────────
+#
+# The 2026-09-13 split separated busybody's ENGINE — the machinery that runs a sweep,
+# classifies an outcome, journals it and reports it — from its CATALOGUE, the declared
+# faults and the fixtures they are thrown at. That separation is real and it landed on
+# roughly the seam an extraction would want, but nothing HOLDS it open: `tools/` is a flat
+# directory of siblings on sys.path, there is no package, and no rule stopped an engine
+# module importing a catalogue one the next afternoon.
+#
+# The direction is the whole content of the rule. The catalogue depends on the engine
+# freely and must — a case calls `run_exe`, a trait registers through `@trait`. The engine
+# depending on the catalogue is what makes the engine unextractable, because it means "the
+# part that runs a sweep" cannot be lifted without also lifting haru-pack's specific list
+# of ways to break haru-pack.
+#
+# The partition is DECLARED here rather than inferred from filenames. Inferring it would be
+# self-fulfilling: a new engine module named `busybody_cases_thing` would classify itself
+# out of the rule, and the check would pass by not looking.
+BUSYBODY_ENGINE = frozenset({
+    "busybody_config",       # shared settings, and the registries the engine reads
+    "busybody_runner",       # run a binary, classify the outcome
+    "busybody_ledger",       # journal, heartbeat, fingerprint, findings ledger
+    "busybody_history",      # --history and --triage over past runs
+    "busybody_report",       # one run's report, severity, artifact preservation
+    "busybody_analyze",      # --analyze over a run's journal
+    "busybody_run",          # one whole sweep
+    "busybody_sweep",        # run_one, the worker pool, the compose sweep
+    "busybody_compose",      # trait registration and combination sampling
+    "busybody_compose_run",  # build and run one composed stack
+    "busybody_guard",        # single-instance run control
+    "busybody_stall",        # the external watchdog
+    "busybody_cli",          # dispatch
+    "busybody_args",         # flags
+})
+
+BUSYBODY_CATALOGUE = frozenset({
+    "busybody_cases_app", "busybody_cases_config", "busybody_cases_directives",
+    "busybody_cases_exam", "busybody_cases_io", "busybody_cases_launch",
+    "busybody_cases_repro", "busybody_cases_reveng", "busybody_cases_stage",
+    "busybody_cases_trojan",
+    "busybody_traits", "busybody_traits_app", "busybody_traits_dev",
+    "busybody_traits_supply",
+    "busybody_fixtures",     # what the cases are thrown at, and how it is built
+    "busybody_herd",         # the herd persona's cases and their shared machinery
+    "busybody_wedge",        # the wedge persona's build-a-contradiction helpers
+    "busybody_docker",       # the container personas' cases
+    "busybody_hostile", "busybody_hostile_attacks", "busybody_hostile_kit",
+})
+
+# `busybody.py` is the composition root: its whole job is to import every catalogue module
+# for the side effect of its decorators and then hand off to the engine. It is exempt by
+# definition, and it is the ONLY exemption — see the totality check in test_modularity.py.
+BUSYBODY_ROOT = frozenset({"busybody"})
+
+
+def busybody_layer_violations() -> list[tuple[str, str]]:
+    """Every (engine module, catalogue module) import that crosses the seam backwards.
+
+    Pairs rather than a bool, so the failure can name what to fix. Uses the same
+    `_scan_file` fan-out the size budgets use, so an import it cannot see is one none of
+    these invariants can see — that is one thing to fix rather than two.
+    """
+    base = REPO / "tools"
+    peers = {p.stem for p in base.rglob("*.py")}
+    out: list[tuple[str, str]] = []
+    for path in sorted(base.rglob("*.py")):
+        if path.stem not in BUSYBODY_ENGINE:
+            continue
+        mod = _scan_file(path, peers)
+        if mod is None:
+            continue
+        for imported in mod.imports:
+            if imported in BUSYBODY_CATALOGUE:
+                out.append((path.stem, imported))
+    return sorted(out)
+
+
+def busybody_unclassified() -> list[str]:
+    """busybody modules in neither set. A new one has to be placed deliberately."""
+    known = BUSYBODY_ENGINE | BUSYBODY_CATALOGUE | BUSYBODY_ROOT
+    return sorted(p.stem for p in (REPO / "tools").rglob("busybody*.py")
+                  if p.stem not in known)
