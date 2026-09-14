@@ -4,37 +4,31 @@ Goal: `pip install haru-pack && haru-pack bootstrap`, then pack projects. No sys
 install guide, and **at most one sudo prompt** — for the C compiler, the only thing that has
 to come from the system.
 
-**choosenim is the only way haru-pack installs Nim.** It is the official toolchain manager,
-it is what upstream recommends, and one path means one thing to test, document and debug.
-There is deliberately no "download the prebuilt archive" path and no "build from source"
-fallback: each would be a second and third way for this to behave differently on someone
-else's machine, which is exactly the failure mode this project keeps finding in itself.
+**haru-pack installs Nim by ONE code path, with two implementations chosen by the host, not
+by a flag.** Where choosenim publishes a binary (linux x86_64, macOS x86_64/arm64, Windows
+x86_64), that is used — the official toolchain manager, digest-pinned. Where it does not —
+notably **linux aarch64, a Raspberry Pi you build ON** — haru-pack builds Nim **from source
+using its own managed `zig cc`** as the C compiler. `install_nim` picks the implementation
+from `choosenim_asset()`; the caller does not choose and cannot get it wrong.
 
-Nim goes into haru-pack's own data directory, with `CHOOSENIM_DIR` and `NIMBLE_DIR` pointed
-there too. The system's Nim is ignored, and the user's `~/.nimble` is left alone: a
-packaging tool should not quietly take over a global toolchain, and it should not behave
-differently depending on what the host happens to have lying around.
+This deliberately reverses an earlier "choosenim only, no source build" stance. The reason
+it is safe now is the same reason zig exists in this project: one pinned zig replaces every
+system C compiler, so the source build needs **no `apt`, no sudo, and no host gcc** — the Pi
+becomes a first-class build host with nothing to set up. (Verified 2026-09-14 on an arm64
+Pi: `build_all.sh` bootstraps csources, `koch boot` and `koch tools` all through zig cc.)
 
-## Build hosts vs targets — these are not the same list
-
-choosenim publishes binaries for **linux x86_64, macOS x86_64, macOS arm64, and Windows
-x86_64** (checked 2026-09-09). Those are the machines you can *build on*.
-
-ARM Linux — a Raspberry Pi — is a **target**, not a build host. You do not need Nim on the
-Pi at all: build on an x86_64 machine with `--target linux-aarch64`, which needs the
-aarch64 cross-compiler and nothing else. That is one `apt install` on the build host, and it
-is why dropping the source-build fallback costs nothing: the Pi never needed it.
-
-If you genuinely must build ON an ARM Linux box, install Nim yourself (choosenim from
-source, or your distro) and haru-pack will use it — but that is your toolchain to maintain,
-not one haru-pack manages.
+Nim goes into haru-pack's own data directory (`CHOOSENIM_DIR`/`NIMBLE_DIR` for the choosenim
+path; `nim-src/<version>` for the built one). The system's Nim is ignored and `~/.nimble` is
+left alone: a packaging tool should not take over a global toolchain, nor behave differently
+depending on what the host happens to have lying around.
 
 ## What is verified, and what is delegated
 
-haru-pack verifies the **choosenim binary** against a digest pinned in `pins.toml`
-(INV-SUPPLY-01). It does **not** verify what choosenim then downloads — that is choosenim's
-business, and using a toolchain manager means trusting it to manage the toolchain. Stated
-here rather than left implied, because "we pin everything" would be an overclaim.
+haru-pack verifies the **choosenim binary** and the **zig archive** against digests pinned in
+`pins.toml` (INV-SUPPLY-01). It does **not** digest-pin Nim itself: on the choosenim path
+that is choosenim's business, and on the source path Nim is built from its upstream git tag
+`v<NIM_VERSION>`. Both trust Nim's origin rather than a haru-pack hash — stated here rather
+than left implied, because "we pin everything" would be an overclaim.
 """
 from __future__ import annotations
 
@@ -54,6 +48,7 @@ from .paths import toolchain_dir
 from .targets import Target, host_arch, host_os
 
 __all__ = ["ToolchainError", "NIM_VERSION", "CHOOSENIM_VERSION", "install_nim",
+           "build_nim_from_source",
            "choosenim_asset", "find_managed_nim", "system_packages", "sudo_command",
            "SUPPORTED_BUILD_HOSTS", "Capability", "capabilities", "select_capabilities",
            "missing_packages", "install_weight", "ZIG_VERSION", "install_zig",
@@ -61,6 +56,7 @@ __all__ = ["ToolchainError", "NIM_VERSION", "CHOOSENIM_VERSION", "install_nim",
 
 NIM_VERSION = "2.2.6"
 CHOOSENIM_VERSION = "0.8.16"
+NIM_GIT = "https://github.com/nim-lang/Nim"   # source-build fallback (hosts choosenim can't serve)
 
 # (os, arch) -> choosenim release asset. This table IS the list of supported build hosts.
 _CHOOSENIM_ASSETS = {
@@ -82,11 +78,18 @@ def choosenim_asset(os_: str | None = None, arch: str | None = None) -> str | No
 
 
 def find_managed_nim() -> Path | None:
-    """The Nim haru-pack installed, if any. Never the system's."""
+    """The Nim haru-pack installed, if any. Never the system's. Finds either the choosenim
+    toolchain OR a source build (nim-src/<version>), since both are haru-pack's own."""
     exe = "nim.exe" if host_os() == "windows" else "nim"
     root = toolchain_dir() / "choosenim" / "toolchains"
     if root.is_dir():
         for d in sorted(root.iterdir(), reverse=True):     # newest version first
+            c = d / "bin" / exe
+            if c.exists():
+                return c
+    src = toolchain_dir() / "nim-src"
+    if src.is_dir():
+        for d in sorted(src.iterdir(), reverse=True):
             c = d / "bin" / exe
             if c.exists():
                 return c
@@ -398,8 +401,80 @@ def sudo_command(packages) -> list:
 
 # ---------------------------------------------------------------- installation
 
+def _host_zig_cc_shim(zig: str, dest_dir: Path) -> Path:
+    """A directory of `cc`/`gcc` shims that run the managed zig as the HOST C compiler, with the
+    same GCC-only-flag translation the cross shim uses. Put it FIRST on PATH so any build that
+    reaches for `cc`/`gcc` (Nim's csources bootstrap, koch's own codegen) gets zig cc — no system
+    compiler required. Returns the directory."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    cases = "\n".join(f'    {k}) args="$args {v}" ;;' for k, v in _ZIG_FLAG_MAP.items())
+    body = ("#!/bin/sh\n"
+            "# generated by haru-pack; see toolchain._host_zig_cc_shim\n"
+            'args=""\n'
+            'for a in "$@"; do\n'
+            "  case \"$a\" in\n"
+            f"{cases}\n"
+            "    -march=*) ;;\n"
+            '    *) args="$args $a" ;;\n'
+            "  esac\n"
+            "done\n"
+            f'exec "{zig}" cc $args\n')
+    for name in ("cc", "gcc"):
+        p = dest_dir / name
+        p.write_text(body, encoding="utf-8")
+        p.chmod(0o755)
+    return dest_dir
+
+
+def build_nim_from_source(force: bool = False, log=print) -> str:
+    """Build Nim from source using haru-pack's managed `zig cc`, for a host choosenim has no
+    binary for (linux aarch64 — a Raspberry Pi you build ON). Returns the nim path.
+
+    This is not a separate command: `install_nim` calls it automatically where `choosenim_asset()`
+    is None. Pinned to `NIM_VERSION` via the git tag `v<NIM_VERSION>` (not a haru-pack digest —
+    see the module docstring). Needs `git` and network once; ~10-20 min on an arm board."""
+    dest = toolchain_dir() / "nim-src" / NIM_VERSION
+    exe = "nim.exe" if host_os() == "windows" else "nim"
+    nim_bin = dest / "bin" / exe
+    if nim_bin.exists() and not force:
+        return str(nim_bin)
+    if host_os() == "windows":
+        raise ToolchainError("the zig source-build fallback is for unix hosts (arm Linux); "
+                             "on Windows use a choosenim-supported host.")
+    if not shutil.which("git"):
+        raise ToolchainError("building Nim from source needs `git` on PATH.")
+    zig = find_managed_zig() or install_zig(log=log)
+    shim = _host_zig_cc_shim(zig, toolchain_dir() / "nim-src" / "zigshim")
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Nim {NIM_VERSION}: choosenim has no binary for {host_os()}-{host_arch()} — building "
+        f"from source with zig cc (once, ~10-20 min) …")
+    tag = f"v{NIM_VERSION}"
+    r = subprocess.run(["git", "clone", "--depth", "1", "--branch", tag, NIM_GIT, str(dest)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ToolchainError(f"git clone Nim {tag} failed:\n" + (r.stderr or r.stdout)[-800:])
+    env = dict(os.environ)
+    env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+    env["CC"] = str(shim / "cc")
+    env["CXX"] = str(shim / "cc")
+    log("  csources bootstrap + koch boot + koch tools, via zig cc …")
+    r = subprocess.run(["sh", "build_all.sh"], cwd=dest, env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ToolchainError("Nim build_all.sh (zig cc) failed:\n" + (r.stderr or r.stdout)[-1500:])
+    if not nim_bin.exists():
+        raise ToolchainError(f"Nim build reported success but {nim_bin} is missing")
+    if host_os() != "windows":
+        nim_bin.chmod(nim_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    log(f"Nim ready (built from source with zig): {nim_bin}")
+    return str(nim_bin)
+
+
 def install_nim(force: bool = False, log=print) -> str:
-    """Ensure haru-pack has a Nim compiler; return its path. choosenim, or nothing."""
+    """Ensure haru-pack has a Nim compiler; return its path. ONE path, two implementations chosen
+    by the host: the pinned choosenim binary where upstream ships one, else a source build with
+    the managed zig cc (linux aarch64 — a Pi you build ON). The caller does not choose."""
     if not force:
         have = find_managed_nim()
         if have:
@@ -407,16 +482,9 @@ def install_nim(force: bool = False, log=print) -> str:
 
     asset = choosenim_asset()
     if not asset:
-        raise ToolchainError(
-            f"choosenim publishes no binary for this machine ({host_os()}-{host_arch()}), so "
-            f"haru-pack cannot install Nim here.\n"
-            f"Supported build hosts: {', '.join(SUPPORTED_BUILD_HOSTS)}.\n\n"
-            f"If you are trying to produce a binary FOR this machine, build it on a "
-            f"supported host instead — e.g. on linux-x86_64:\n"
-            f"    haru-pack build ./yourproject --target {host_os()}-{host_arch()}\n"
-            f"Cross-compiling needs only the target's C cross-compiler on that host; "
-            f"`haru-pack bootstrap --target {host_os()}-{host_arch()}` prints the one "
-            f"command that installs it.")
+        # No choosenim binary for this host (e.g. linux aarch64). Build from source with zig cc,
+        # automatically — the Pi is a first-class build host, nothing to set up (INV-TOOL-03).
+        return build_nim_from_source(force=force, log=log)
 
     entry = pins.choosenim_digests().get(CHOOSENIM_VERSION, {}).get(asset)
     if not entry:

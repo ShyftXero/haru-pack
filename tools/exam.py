@@ -279,7 +279,9 @@ def main() -> int:
     pr = sub.add_parser("run", help="sit the exam and update the ledger")
     pr.add_argument("--only", default="", help="comma-separated package names")
     pr.add_argument("--top-n", type=int, default=0, help="only the first N by rank")
-    pr.add_argument("-j", "--jobs", type=int, default=1)
+    pr.add_argument("-j", "--jobs", type=int, default=2,
+                    help="packages built+run in parallel (default 2). Each is a thick build, so "
+                         "keep it low on a small box")
     pr.add_argument("--timeout", type=int, default=1800, help="per-package BUILD timeout (s)")
     pr.add_argument("--run-timeout", type=int, default=420,
                     help="per-package RUN timeout (s); a suite that overruns is a FAIL")
