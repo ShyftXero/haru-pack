@@ -14,9 +14,11 @@ from pathlib import Path
 import busybody_config as cfg
 from busybody_analyze import analyze_exit_code, analyze_run, format_analysis
 from busybody_args import _parser
+from busybody_author import print_author
 from busybody_compose import describe_traits
 from busybody_config import JOBS_MAX
 from busybody_history import print_history, print_triage
+from busybody_replay import print_replay
 from busybody_run import _sweep
 
 
@@ -73,6 +75,10 @@ def _early_exit(a, paths) -> int | None:
         return print_history(paths)
     if a.triage:
         return print_triage()
+    if a.replay:
+        return print_replay(a.replay)
+    if a.author:
+        return print_author(paths)
     if a.analyze is None:
         return None
     runs = sorted(d for d in (paths.runs.iterdir() if paths.runs.is_dir() else [])

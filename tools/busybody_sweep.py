@@ -9,6 +9,7 @@ Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Unchanged otherwise.
 from __future__ import annotations
 
 from busybody_ledger import is_finding, ledger_append, prune_runs  # noqa: E402
+from busybody_markdown import write_markdown  # noqa: E402
 from busybody_report import write_report  # noqa: E402
 
 import json
@@ -313,6 +314,7 @@ def _finish_compose(a, results: list, run_dir: Path, run_id: str, peak: int, jr,
                        for r in bad])
     (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     write_report(results, "(stacks)", run_dir / "report.txt", run_id=run_id)
+    write_markdown(results, "(stacks)", run_dir / "report.md", run_id=run_id)
     jr.write("finished", cases=len(results), findings=len(bad),
              peak_scratch_bytes=peak)
     jr.close()

@@ -193,6 +193,9 @@ BUSYBODY_ENGINE = frozenset({
     "busybody_guard",        # single-instance run control
     "busybody_stall",        # the external watchdog
     "busybody_bundle",       # forensic collection at the moment of a finding
+    "busybody_markdown",     # the deterministic markdown report
+    "busybody_replay",       # --replay: reconstruct the run behind a signature
+    "busybody_author",       # --author: propose what no run has exercised
     "busybody_cli",          # dispatch
     "busybody_args",         # flags
 })

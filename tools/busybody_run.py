@@ -21,6 +21,7 @@ import busybody_config as cfg
 from busybody_guard import guard_single_instance
 from busybody_ledger import (Journal, Reaper, human_bytes, is_finding, ledger_append,
                              ledger_path, prune_runs, reap_orphans)
+from busybody_markdown import write_markdown
 from busybody_report import write_report
 from busybody_runner import InfraFailure, dir_bytes, infra_failure_reason, work_root_report
 from busybody_sweep import compose_sweep, run_one, worker_pool
@@ -182,8 +183,15 @@ def _finalize(a, jr, reaper, bb_reg: Path, run_dir: Path, run_id: str, results: 
                        for r in bad])
     if results:
         (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-        write_report(results, ", ".join(sorted({r["fixture"] for r in results})),
-                     run_dir / "report.txt", run_id=run_id, interrupted=interrupted)
+        fixtures = ", ".join(sorted({r["fixture"] for r in results}))
+        write_report(results, fixtures, run_dir / "report.txt", run_id=run_id,
+                     interrupted=interrupted)
+        # Both, not one. The text report is what an operator reads in a terminal with
+        # nothing else open; the markdown is what a diff, a PR comment and a static site
+        # can all use, and it is byte-identical across regenerations so it can be committed
+        # without generating noise.
+        write_markdown(results, fixtures, run_dir / "report.md", run_id=run_id,
+                       interrupted=interrupted)
     if not interrupted and not aborted and results:
         jr.write("finished", cases=len(results), findings=len(bad),
                  peak_scratch_bytes=peak_scratch)
@@ -229,6 +237,8 @@ def _summarize(run_dir: Path, results: list, interrupted: bool, aborted: bool,
     if results:
         print(f"report : {paths.relative(run_dir / 'report.txt')}   "
               f"<- read this; it explains every finding")
+        print(f"         {paths.relative(run_dir / 'report.md')}   "
+              f"(the same, in markdown, byte-stable between runs)")
         print(f"journal: {paths.relative(run_dir / 'journal.jsonl')}")
     if bad:
         print(f"ledger : {ledger_path()}   (--triage to group by fingerprint)")
