@@ -711,6 +711,47 @@ Note: These tests do not build anything. `tools/flex-run.py` does that, and it n
 toolchain and several minutes; the invariants here are about the LIST, not the builds.
 Territory: flex/curation.toml, src/haru_pack/scaffold.py, tests/test_flex.py
 
+### INV-FLEX-03
+Status: active
+Statement: The import name the flex harness exercises is one the INSTALLED distribution
+actually provides, discovered from its metadata rather than derived from its name. A curated
+`import_name` in `flex/curation.toml` is an assertion checked against that discovery, never an
+input to it, and the probe reports which of its three resolution routes produced the answer so
+a guess can never read as a fact.
+Actors: whoever adds a package to the matrix and has to decide what it imports as; the
+maintainer six months later reading a green run and concluding the package imports; any
+distribution that renames, splits or merges its top-level modules between releases.
+Assets: the meaning of a flex pass. "The payload carries an importable library" is the whole
+claim of the `importable` style, and it is worth nothing if the harness imported a module name
+it invented rather than the one the distribution ships.
+Red-path: Three, each walked 2026-09-14. (1) Point a curated `import_name` at a module the
+distribution does not provide — `test_a_stale_curated_import_name_is_a_failure_that_blames_the_manifest`
+goes red, and the message must blame the MANIFEST rather than the package. (2) Generate the
+probe body from `pkg["import_name"]` —
+`test_the_probe_does_not_consult_the_curated_import_name` goes red, because a curated value
+that can steer the probe makes checking the probe against it a tautology. (3) Return the
+last-resort guess without labelling it —
+`test_the_last_resort_guess_is_labelled_as_a_guess` goes red.
+Source: 2026-09-14, issue #33. `flex/curation.toml` carried eight hand-written `import_name`
+entries — `pyyaml` -> `yaml`, `python-dateutil` -> `dateutil`, and six more. Every one was a
+human guess that could go stale silently, and `pillow` -> `PIL` is the shape that makes
+guessing structurally wrong: nothing recovers `PIL` from `pillow`. The exact answer already
+exists in the installed metadata, and the probe runs inside the binary where that metadata is.
+Note: Normalisation is PEP 503 — `typing-extensions`, `typing_extensions` and
+`Typing.Extensions` are one distribution. Comparing raw names silently resolves nothing for
+every distribution whose name contains `-` or `.`, which is most of them, and the failure mode
+is a silent fall-through to the guess rather than an error.
+Note: Three routes, best first: `packages_distributions()` (exact, 3.10+), `top_level.txt`
+(the wheel said so, works back to 3.8, absent from some wheels), then
+`name.replace("-", "_")`. The route is RETURNED and recorded in `flex/out/results.json`. That
+is the whole defence against this becoming curation again by another name.
+Note: This governs the `importable` style only. The `smoke` style still honours
+`import_name`, because a hand-written smoke body is hand-written throughout and the curated
+name is part of it — conflating the two would either break the existing bodies or make this
+check vacuous.
+Territory: tools/flex_probes.py, tools/flex-run.py, flex/curation.toml,
+tests/test_flex_probes.py
+
 ---
 
 ## BUILD — the build pipeline reports what it actually did

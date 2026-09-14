@@ -5,6 +5,57 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-14
 
+### flex: an `importable` probe style, import names that are found rather than guessed
+
+Three rungs now, cheapest first — `importable` (flex default), `smoke`
+(`--style smoke`), `suite` (`tools/exam.py`).
+
+**Why the default moved.** The smoke bodies are hand-written, one per package, in
+`flex/curation.toml`. That made each one a second thing that could break for reasons with
+nothing to do with packaging — an API moved, a keyword was removed, the package wanted a
+display — and when it did, the run said "flex failed" and somebody had to read a traceback to
+find out whether haru-pack had done anything wrong at all. `importable` has exactly one
+failure mode, and it is the one the harness exists to detect. It is a narrowing, and it costs
+something real: a default run no longer exercises the library. The stronger rungs are still
+there, and the style is recorded in `results.json` and printed in the summary header so an
+`importable` pass and a `smoke` pass are never silently compared.
+
+Each module is attempted in its own `try`/`except`/`finally`. The `except` prints the **full
+traceback** — that output is the only artefact left once the container is gone — and doing it
+per module means a package with several top-level modules says *which* one broke.
+
+**Import names are now discovered, not guessed** ([`INV-FLEX-03`](INVARIANTS.md)).
+`pip install pillow` gives you `import PIL`, and no rule recovers that from the name; it is
+why `flex/curation.toml` carried eight hand-written `import_name` entries, each a guess that
+could go stale silently. The probe inverts `importlib.metadata.packages_distributions()` from
+*inside* the binary, where the distribution actually exists, with PEP 503 normalisation so
+`typing-extensions` and `typing_extensions` are one dist. Two fallbacks behind that
+(`top_level.txt`, then the guess), and **the route is reported**, so a guess never reads as a
+fact. The curated entries become assertions the harness checks and can no longer steer the
+probe — if they could, checking the probe against them would be a tautology.
+
+**Cache control**, because a matrix run grows several caches:
+`--cache-info`, `--flush-cache sandbox|host`, `--max-cache-gb N`.
+
+Measuring first moved the design. The assumption was that the sandbox volume was the problem;
+it is not.
+
+| what | size | may the harness delete it? |
+|---|---|---|
+| `~/.cache/uv` | **18.9 GB** | no — shared with every project on the machine |
+| `haru-flex-cache` | 13.5 MB | yes — the harness's own, rebuildable |
+| `~/.cache/haru-pack` | 273 MB | no |
+| anonymous run volumes | 0 | `--rm` already reaps them |
+
+The volume stays small because `warm_cache_and_lock` points `UV_CACHE_DIR` at the payload's
+own bundled cache inside the build tree, not at ours. So `--max-cache-gb` only ever touches
+the volume; the host caches are reported, and only *pruned*, and only when you ask.
+
+One bug worth naming because of its shape: `uv cache dir` writes a **coloured** path, the
+escape codes went into the `Path`, and `du` then reported `0 B` for an 18.9 GB cache. Nothing
+raised — the number was simply wrong and looked exactly like a right one, which is the worst
+thing that can happen in a tool whose entire output is numbers. There is a regression test.
+
 ### flex and exam now run strangers' code in a container, not on your workstation
 
 The flex matrix is a list of packages picked by PyPI download rank, and running their code is
