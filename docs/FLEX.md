@@ -18,8 +18,10 @@ any `[[bundle]]`/`[[post_install]]` step in the manifest. Every package gets its
 throwaway containers, so a poisoned one cannot reach `$HOME`, your keys, or the next
 package's result (`INV-SANDBOX-01`, `docs/adr/0005-sandboxed-flex-and-exam-harnesses.md`).
 
-Two containers per package: the **build** gets the network and a writable cache, the **run**
-gets a read-only cache and — at thick — no network interface at all.
+Two containers per package: the **build** gets the network and the shared cache, the **run**
+gets a throwaway cache of its own and — at thick — no network interface at all. The run phase
+never sees the shared cache, so one package cannot leave anything behind for the next one to
+find.
 
 The image (`docker/flex.Dockerfile`) carries the toolchain and is built on first use. It is
 tagged with a hash of the Dockerfile plus `pins.toml`, so bumping a pin rebuilds it. Your

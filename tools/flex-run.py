@@ -217,7 +217,11 @@ class DockerRunner:
             # something. At other tiers the dependency is SUPPOSED to be fetched on first
             # run, so the network stays on.
             network=not offline,
-            cache=sandbox.CACHE_COLD if offline else sandbox.CACHE_RO,
+            # Always cold. The binary STAGES into $XDG_CACHE_HOME before it can run, so the
+            # run phase needs a writable cache — and giving it the shared one would let a
+            # package poison what the next build reads. A throwaway volume is both the thing
+            # that works and the stronger answer.
+            cache=sandbox.CACHE_COLD,
             uid=self.uid, gid=self.gid, env=self._env(), timeout=timeout)
         return _verdict_from_output(r["rc"], r["stdout"], r["stderr"], r["timed_out"],
                                     timeout, r["seconds"])
