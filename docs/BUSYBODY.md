@@ -36,7 +36,7 @@ clean verdict. A run that silently skipped what you asked for reads exactly like
 ```sh
 python tools/busybody.py --history     # every run; interrupted ones say so
 python tools/busybody.py --triage      # findings grouped by fingerprint, across all runs
-python tools/busybody.py --analyze     # did the last sweep buy anything? what diverged?
+python tools/busybody.py --analyze     # did the last sweep buy anything? what fixture-diverged?
 python tools/busybody.py --calibrate --fixtures top25    # find a discriminating threshold
 ```
 
@@ -50,7 +50,7 @@ machine computes in a millisecond.
 
 So the questions are the tool:
 
-**`--analyze [RUN]`** prints the fingerprint census, the divergence matrix, the outcome and
+**`--analyze [RUN]`** prints the fingerprint census, the fixture-divergence matrix, the outcome and
 blame distributions, and the slowest cases. The census is the one that matters: *N case runs
 produced M distinct results*. A 25-fixture sweep with a 25:1 ratio confirmed the same facts
 once per fixture — which is not 25× the assurance, and the report says so in those words.
@@ -525,7 +525,7 @@ asserting *"haru-pack works under any three of these"* would be an overclaim of 
 kind `INVARIANTS.md` exists to prevent. **The floor is the claim: it works, or it refuses
 intelligibly.**
 
-### Fallibility — the persona is a person, not a fixture
+### Per-action perturbation probability — the persona is a person, not a fixture
 
 A trait has a *probability* of acting. Some days the new developer reads the flag correctly.
 
@@ -719,10 +719,10 @@ distinct defects, all in one event:
    at ~145 MB each needs about 100 GB. 168 x 145 MB is 24 GiB — exactly where it died.
 2. **The failure was scored per case.** One environment failure became thirty different
    "findings" per fixture, and 470 rows went into the findings ledger.
-3. **`--analyze` called it divergence.** It reported *30 of 37 cases diverged by fixture*.
+3. **`--analyze` called it fixture-divergence.** It reported *30 of 37 cases diverged by fixture*.
    None had.
 
-What made it readable in seconds was the divergence matrix itself: the same five fixtures
+What made it readable in seconds was the fixture-divergence matrix itself: the same five fixtures
 passed every single case, and no property of a Python package produces that. Those five were
 the five built before the quota ran out. The tool found its own run invalid — which is the
 point of having it, and it should not have needed to.
@@ -736,7 +736,7 @@ point of having it, and it should not have needed to.
 | ledger | an aborted run writes **nothing** — a ledger full of one failure in thirty costumes is worse than an empty one |
 | `--work-root DIR` | put scratch on a filesystem with room |
 | `--scratch-cap-gb N` | abort on a leak at a number you chose, default 8 |
-| `--analyze` | an aborted run prints `THE BOX FAILED, NOT THE PRODUCT` and labels the fake divergence |
+| `--analyze` | an aborted run prints `THE BOX FAILED, NOT THE PRODUCT` and labels the fake fixture-divergence |
 
 ### `df` is not the ceiling
 
@@ -1068,14 +1068,14 @@ this box:
 stops diverging, recalibrate — do not nudge it.
 
 **"The launcher crashed" and "the app crashed" are different findings.** Once calibrated, the
-case diverged and then reported the divergence as `CRASHED` — a haru-pack defect — because the
+case diverged and then reported the fixture-divergence as `CRASHED` — a haru-pack defect — because the
 classifier could not tell a numpy `MemoryError` from a Nim traceback. There is now an
 `APP-CRASHED` outcome and a `blame` field (`launcher` / `app` / `os` / `harness`), split cheaply on
 the fact that the launcher prefixes every diagnostic with `haru-pack:`. `APP-CRASHED` is
 deliberately **not** fatal: an application declining a limit a persona imposed on purpose is
 behaving correctly, and a case has to opt into accepting it.
 
-### Measured divergence
+### Measured fixture-divergence
 
 Across `iniconfig` (pure Python, 60 MB) and `numpy` (native BLAS, 77 MB):
 

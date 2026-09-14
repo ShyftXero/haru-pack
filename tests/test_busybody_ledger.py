@@ -410,7 +410,7 @@ def test_a_sweep_that_confirmed_one_fact_many_times_says_so(tmp_path):
     got = a.analyze_run(_journal(tmp_path, cases))
 
     assert len(got["cases"]) == 50
-    assert got["diverged"] == {}, "no case was given a differing outcome"
+    assert got["fixture_diverged"] == {}, "no case was given a differing outcome"
     assert len(got["fingerprints"]) == 2, "two cases, one answer each"
 
     text = a.format_analysis(got)
@@ -430,8 +430,9 @@ def test_a_case_whose_answer_depends_on_the_package_is_named(tmp_path):
               _case("varies", "fixture-heavy", "APP-CRASHED", ok=False)]
     got = a.analyze_run(_journal(tmp_path, cases))
 
-    assert set(got["diverged"]) == {"varies"}, (
-        f"expected only `varies` to diverge, got {sorted(got['diverged'])}"
+    assert set(got["fixture_diverged"]) == {"varies"}, (
+        f"expected only `varies` to fixture-diverge, got "
+        f"{sorted(got['fixture_diverged'])}"
     )
     text = a.format_analysis(got)
     assert "NOTHING DIVERGED" not in text
@@ -516,7 +517,7 @@ def test_analyze_exit_code_is_wired_into_the_cli():
 
 
 @pytest.mark.invariant("INV-CHAOS-04")
-def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
+def test_differing_error_text_is_not_reported_as_fixture_divergence(tmp_path):
     """A fingerprint folds in the diagnostic TEXT, so the same outcome with two different
     messages counts as two distinct results. That granularity is right for triage and wrong
     for "did the sweep buy anything" — and conflating them made the census print
@@ -531,7 +532,7 @@ def test_differing_error_text_is_not_reported_as_divergence(tmp_path):
     got = a.analyze_run(_journal(tmp_path, cases))
 
     assert len(got["fingerprints"]) == 25
-    assert got["diverged"] == {}, "the outcome was RAN on every fixture"
+    assert got["fixture_diverged"] == {}, "the outcome was RAN on every fixture"
 
     text = a.format_analysis(got)
     assert "NOTHING DIVERGED" in text
@@ -717,7 +718,8 @@ def test_an_aborted_run_is_never_read_as_a_verdict(tmp_path):
     text = a.format_analysis(got)
     assert "THE BOX FAILED, NOT THE PRODUCT" in text
     assert "Discard this section" in text, (
-        "the divergence a quota failure fabricates must be labelled as fabricated"
+        "the fixture-divergence a quota failure fabricates must be labelled as "
+        "fabricated"
     )
     assert "122" in text, "the abort reason belongs in the report, not just the journal"
 

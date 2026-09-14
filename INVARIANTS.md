@@ -255,7 +255,7 @@ any heavy package — the exact outcome those cases exist to produce. Or set
 Source: Both learned on 2026-09-10 while building the app-level personas. The first
 `tight_address_space` used 256 MB, which is below what a bare interpreter needs — so every
 package failed identically and the case discriminated nothing. Once calibrated to 768 MB it
-diverged, and then reported the divergence as `CRASHED`, i.e. as a haru-pack bug, because the
+diverged, and then reported the fixture-divergence as `CRASHED`, i.e. as a haru-pack bug, because the
 classifier could not tell a numpy `MemoryError` from a Nim traceback.
 Note: The split is cheap because the launcher prefixes every diagnostic with `haru-pack:`.
 That convention is now load-bearing for triage, not only for readability.
@@ -283,7 +283,7 @@ Assets: whether the harness's output means anything to a human. A sweep that rep
 "925/925 passed" and nothing else reads like 925x the assurance of a single run. It is not,
 if every case answered identically 925 times, and the difference is not visible without
 computing it.
-Red-path: Delete the divergence computation from `analyze_run`, or the FINGERPRINT CENSUS
+Red-path: Delete the fixture-divergence computation from `analyze_run`, or the FINGERPRINT CENSUS
 from `format_analysis`, and a 25-fixture sweep reports a large run count with no way to see
 that it confirmed the same handful of facts once per fixture. Two claiming tests feed
 `analyze_run` synthetic journals — one where every fixture agrees, one where they do not —
@@ -332,7 +332,7 @@ quota exceeded` and reported 470 findings. Three separate defects in one event:
   3. `--analyze` reported 30 of 37 cases as having DIVERGED by fixture. They had not. The
      five fixtures that passed everything were the five built before the quota ran out.
 
-Note: The divergence report was what made the run readable at all — the same five fixtures
+Note: The fixture-divergence report was what made the run readable at all — the same five fixtures
 passing every single case is not a pattern any package property produces. The tool found its
 own run invalid, which is the point of having it. It should not have needed to.
 Note: `df` is not the ceiling. This box reported 31 GiB free on /tmp and refused the next
@@ -459,12 +459,13 @@ Note: The pass condition is deliberately weak and must stay weak. `RAN`, `REFUSE
 7,431. Asserting anything stronger — "haru-pack always works under any three of these" —
 would be an overclaim of exactly the kind this file exists to prevent. The floor is the
 claim: it refuses intelligibly, or it works.
-Note: FALLIBILITY. Each trait has a probability of acting, so a persona is a person rather
+Note: PER-ACTION PERTURBATION PROBABILITY (cf. human error probability; FoundationDB calls
+the same mechanism buggification). Each trait has a probability of acting, so a persona is a person rather
 than a fixture. If greenhorn always fumbles, then "greenhorn fumbled AND auditor left a .env
 behind" is the only thing ever tested, and "greenhorn got it right, auditor still left the
 .env" — a different code path — never runs. A run's identity is the set that FIRED, not the
 set that was selected, and both are journalled.
-Note: Fallibility is forced OFF for two passes, and only two. The k=1 pass IS the attribution
+Note: The probability is forced to 1 for two passes, and only two. The k=1 pass IS the attribution
 baseline — "does trait A fail alone?" cannot be answered by a run where A did not fire, and a
 baseline with holes makes every composed finding unattributable. `--compose-only` is forced
 because someone asked for a specific stack, and handing them a control run answers a
