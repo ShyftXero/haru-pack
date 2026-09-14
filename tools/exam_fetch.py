@@ -127,7 +127,15 @@ def make_project(pkg: str, imp: str, ver: str, kind: str, suite: list[Path], dep
     (app / "__main__.py").write_text(
         "import os, pathlib, sys\n"
         "import pytest\n"
-        f"import {imp}  # noqa: F401  — proves the INSTALLED package imports before the suite\n"
+        # A best-effort "does the packed library import" note. NOT fatal: the guessed import name
+        # is wrong for namespace packages (opentelemetry-api -> opentelemetry, google-api-core ->
+        # google.api_core, proto-plus -> proto), and failing the whole exam on the guess would
+        # false-fail a package whose OWN suite imports it correctly. The suite is the real proof.
+        "try:\n"
+        f"    import {imp}  # noqa: F401\n"
+        "except Exception as _e:\n"
+        f"    print('exam: note: could not import {imp!r} by guessed name (' + repr(_e) + "
+        "'); running the suite anyway')\n"
         "src = pathlib.Path(__file__).parent / '_src'\n"
         "sys.path.append(str(src))   # in-tree test helpers, without shadowing the installed pkg\n"
         "os.chdir(src)              # root-relative data files / directory= config resolve\n"
