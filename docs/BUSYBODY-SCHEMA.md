@@ -176,6 +176,7 @@ One entry per **(fingerprint, post_stall)** pair.
 
 | field | type | required | meaning |
 |---|---|---|---|
+| `schema_version` | int | yes | as above |
 | `fingerprint` | string | yes | the group's identity |
 | `post_stall` | bool | yes | part of the grouping key, not of the fingerprint |
 | `count` | int | yes | rows in this group |

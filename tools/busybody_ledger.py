@@ -45,9 +45,24 @@ import tempfile
 import time
 from pathlib import Path
 
-__all__ = ["SEVERITIES", "normalize", "fingerprint", "Journal", "ledger_path",
-           "ledger_append", "ledger_rollup", "scan_runs", "heartbeat_state",
+__all__ = ["SEVERITIES", "SCHEMA_VERSION", "normalize", "fingerprint", "Journal",
+           "ledger_path", "ledger_append", "ledger_rollup", "scan_runs", "heartbeat_state",
            "Reaper", "reap_orphans", "prune_runs", "human_bytes"]
+
+# The on-disk contract's version, stamped into every record busybody writes.
+# `docs/BUSYBODY-SCHEMA.md` IS the contract; this constant is the code agreeing with it.
+#
+# It lives here rather than in busybody_config because this module owns the record shapes —
+# the journal, the ledger and the roll-up are all defined in this file — and because this is
+# the module with no first-party imports at all, which is the property that makes it the
+# cheapest thing in the harness to lift out. `busybody_runner` imports it for the perturb and
+# observe records, which travel through the journal.
+#
+# It goes up when a field CHANGES MEANING or disappears, not when one is added: a reader that
+# ignores unknown keys is unaffected by an addition, and bumping for those would train
+# everyone to ignore the number. A record with no `schema_version` at all predates the
+# document and is version 1 by definition, which is why nothing on disk needs migrating.
+SCHEMA_VERSION = 1
 
 # A closed vocabulary, as in lotek. Not "error", not "info" — three levels, chosen once.
 #   critical  the product did something it must never do
@@ -106,7 +121,8 @@ class Journal:
         self._fh = open(self.path, "a", encoding="utf-8", buffering=1)
 
     def write(self, kind: str, **fields) -> None:
-        rec = {"run": self.run_id, "at": round(time.time(), 3), "kind": kind, **fields}
+        rec = {"schema_version": SCHEMA_VERSION, "run": self.run_id,
+               "at": round(time.time(), 3), "kind": kind, **fields}
         self._fh.write(json.dumps(rec, sort_keys=True) + "\n")
         self._fh.flush()
         os.fsync(self._fh.fileno())
@@ -247,7 +263,12 @@ def ledger_append(records: list, path: Path | None = None) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8", buffering=1) as fh:
         for rec in records:
-            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            # Stamped HERE rather than at each call site that builds ledger rows, because
+            # there are two of them (`_finalize` and `_finish_compose`) and a version that
+            # only some rows carry is worse than none — a reader could not distinguish an
+            # old row from a new one written by the path that forgot.
+            fh.write(json.dumps({"schema_version": SCHEMA_VERSION, **rec},
+                                sort_keys=True) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
     return p
@@ -283,6 +304,7 @@ def ledger_rollup(path: Path | None = None) -> list:
             continue
         cascade = bool(r.get("post_stall"))
         g = groups.setdefault((fp, cascade), {
+            "schema_version": SCHEMA_VERSION,
             "fingerprint": fp, "count": 0, "runs": set(), "cases": set(),
             "personas": set(), "outcome": r.get("outcome"), "severity": r.get("severity"),
             "inv": r.get("inv", ""), "remedy": r.get("remedy", ""),

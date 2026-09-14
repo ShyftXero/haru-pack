@@ -19,6 +19,7 @@ from pathlib import Path
 
 import busybody_config as cfg
 from busybody_config import MARKER
+from busybody_ledger import SCHEMA_VERSION
 
 
 
@@ -82,7 +83,8 @@ class Ctx:
         """
         if cls.work is None:
             return
-        rec = {"at": round(time.time(), 3), "kind": "perturb", "case": cls.case,
+        rec = {"schema_version": SCHEMA_VERSION, "at": round(time.time(), 3),
+               "kind": "perturb", "case": cls.case,
                "fixture": cls.fixture, "seed": cls.seed, "action": action, **fields}
         with open(Path(cls.work) / cls.PERTURBATIONS, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
@@ -100,8 +102,8 @@ class Ctx:
         """
         if cls.work is None:
             return
-        rec = {"at": round(time.time(), 3), "kind": kind, "case": cls.case,
-               "fixture": cls.fixture, "seed": cls.seed, **fields}
+        rec = {"schema_version": SCHEMA_VERSION, "at": round(time.time(), 3), "kind": kind,
+               "case": cls.case, "fixture": cls.fixture, "seed": cls.seed, **fields}
         with open(Path(cls.work) / cls.PERTURBATIONS, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
             fh.flush()
