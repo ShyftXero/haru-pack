@@ -106,6 +106,7 @@ rather than its own doomed directory.
 | `seconds` | float | yes | wall clock for the run, 1dp |
 | `blame` | string | yes | `launcher` \| `app` \| `os` \| `harness` \| `builder` \| `none` \| `unknown` |
 | `seed` | int | yes | the run seed. With `name` and `fixture` it determines every drawn moment |
+| `indeterminate` | bool | yes | the harness stopped observing before the action resolved. Neither a pass nor a finding; excluded from both counts and from the ledger |
 | `post_stall` | bool | yes | this result resolved AFTER a stall was already declared, so it failed for the stall rather than for itself |
 | `stall_id` | string | yes | which stall, `""` if none |
 | `inv` | string | yes | the `INV-` ids governing this case, or `""`. Every non-empty value resolves to a declaration (INV-DOC-01) |
@@ -127,8 +128,21 @@ rather than its own doomed directory.
 ### The outcome vocabulary
 
 Closed. `RAN`, `REFUSED`, `CRASHED`, `HUNG`, `SILENT`, `APP-CRASHED`, `CASE-ERROR`,
-`WARNED`, `SILENT-WEDGE`, `EXPOSED`, `LEAKED`, `REFUSED-UNRELATED`, `STALLED`, `CONTAINED`,
-`SANCTIONED`, `ESCAPED`, `SMUGGLED`.
+`INDETERMINATE`, `WARNED`, `SILENT-WEDGE`, `EXPOSED`, `LEAKED`, `REFUSED-UNRELATED`,
+`STALLED`, `CONTAINED`, `SANCTIONED`, `ESCAPED`, `SMUGGLED`.
+
+**`INDETERMINATE` is not a verdict**, and that is the whole point of it. Every other name
+asserts something about what happened; this one asserts that the harness stopped observing
+before the action resolved. It is Jepsen's `:info` from the `:invoke / :ok / :fail / :info`
+model. It is not on the FATAL floor (a floor is a verdict), it is never `ok`, and it is never
+a finding — it comes out of the denominator rather than out of one side of it, because
+"14/15 behaved as expected" with one indeterminate is two different lies depending on which
+way you round.
+
+The live producer today is the herd: sixteen children share one deadline, and a child still
+working when it passes may have been a second from done. `HUNG` is a claim one process with
+its own full timeout can support and sixteen racing children cannot. The observer that CAN
+say the system stopped progressing is the watchdog, and it says `STALLED` separately.
 
 `CRASHED`, `HUNG`, `SILENT`, `SILENT-WEDGE`, `STALLED`, `ESCAPED` and `SMUGGLED` are the
 **FATAL floor** — never acceptable, whatever the case declared. `ok` is false for any of
@@ -270,8 +284,7 @@ a documentation pass over what already exists.
   construction. The check is sound in the direction that matters (it never accuses a trait
   that did act) and incomplete in the other.
 
-- **There is no outcome for "we do not know whether it applied".** Every outcome here
-  assumes the action resolved. Jepsen's model has `:info` for exactly this — timed out, may
-  or may not have taken effect — and a harness against a real system generates them
-  constantly. `HUNG` is not it: `HUNG` is a verdict, and the honest answer is an absence of
-  one.
+- ~~**There is no outcome for "we do not know whether it applied".**~~ Fixed rather than
+  recorded, because it is a hole in the vocabulary rather than an awkwardness in the code,
+  and retrofitting a value into a closed set means revisiting every `if outcome ==` in two
+  codebases. See `INDETERMINATE` above.

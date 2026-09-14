@@ -26,7 +26,7 @@ import collections
 import statistics
 from pathlib import Path
 
-from busybody_ledger import human_bytes, read_jsonl  # noqa: F401
+from busybody_ledger import is_finding, human_bytes, read_jsonl  # noqa: F401
 
 __all__ = ["analyze_run", "analyze_exit_code", "format_analysis", "RESOURCE_LADDER"]
 
@@ -73,7 +73,8 @@ def analyze_run(run_dir: Path) -> dict:
         "fixtures": fixtures,
         "matrix": dict(matrix),
         "fixture_diverged": fixture_diverged,
-        "findings": [c for c in cases if not c.get("ok")],
+        "findings": [c for c in cases if is_finding(c)],
+        "indeterminate": [c for c in cases if c.get("indeterminate")],
         "fingerprints": {c.get("fingerprint") for c in cases if c.get("fingerprint")},
         "by_persona": collections.Counter(c.get("persona", "?") for c in cases),
         "by_outcome": collections.Counter(c["outcome"] for c in cases),

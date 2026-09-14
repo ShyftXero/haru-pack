@@ -19,8 +19,8 @@ from pathlib import Path
 
 import busybody_config as cfg
 from busybody_guard import guard_single_instance
-from busybody_ledger import (Journal, Reaper, human_bytes, ledger_append, ledger_path,
-                             prune_runs, reap_orphans)
+from busybody_ledger import (Journal, Reaper, human_bytes, is_finding, ledger_append,
+                             ledger_path, prune_runs, reap_orphans)
 from busybody_report import write_report
 from busybody_runner import InfraFailure, dir_bytes, infra_failure_reason, work_root_report
 from busybody_sweep import compose_sweep, run_one, worker_pool
@@ -171,7 +171,7 @@ def _finalize(a, jr, reaper, bb_reg: Path, run_dir: Path, run_id: str, results: 
     Reaping is not conditional on success: a chaos harness is the program most likely to be
     interrupted, and at the thick tier each work directory holds a staged interpreter.
     """
-    bad = [r for r in results if not r["ok"]]
+    bad = [r for r in results if is_finding(r)]
     if bad and not aborted:
         ledger_append([{k: v for k, v in r.items()
                         if k in ("name", "persona", "outcome", "severity",
@@ -206,13 +206,23 @@ def _summarize(run_dir: Path, results: list, interrupted: bool, aborted: bool,
     did not finish, and reporting its partial findings as a completed verdict is the same
     lie facing the other way.
     """
-    bad = [r for r in results if not r["ok"]]
+    bad = [r for r in results if is_finding(r)]
+    unresolved = [r for r in results if r.get("indeterminate")]
     if aborted:
         print(f"\n{len(results)} case(s) ran before the environment failed. This run is NOT"
               f"\na verdict on haru-pack — see the message above.")
         return 2
-    print(f"\n{len(results) - len(bad)}/{len(results)} behaved as expected"
+    # Indeterminates come out of the denominator, not out of one side of it. "14/15 behaved
+    # as expected" with one indeterminate is two different lies depending on which way you
+    # round it, and the honest sentence has three numbers in it.
+    settled = len(results) - len(unresolved)
+    print(f"\n{settled - len(bad)}/{settled} behaved as expected"
           + ("  (RUN INTERRUPTED — this is not the whole suite)" if interrupted else ""))
+    if unresolved:
+        print(f"{len(unresolved)} INDETERMINATE — the harness stopped observing before the "
+              f"action\nresolved, so these are counted as neither a pass nor a finding:")
+        for r in unresolved:
+            print(f"  {r['persona']}/{r['name']}  {r.get('fixture', '?')}")
     if peak_scratch:
         print(f"peak scratch per case: {human_bytes(peak_scratch)}  "
               f"(cap {cfg.SCRATCH_CAP_GB} GiB on the root)")

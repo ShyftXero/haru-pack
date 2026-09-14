@@ -416,3 +416,92 @@ def test_the_perturb_record_survives_the_fault_it_announces(tmp_path):
 
 
 # ------------------------------------------------------- a case can attack the build instead
+
+
+# ------------------------------------------------------- INDETERMINATE (Jepsen's `:info`)
+
+
+def test_a_shared_deadline_kill_is_indeterminate_and_a_lone_timeout_is_hung():
+    """The difference is what the harness is entitled to claim, not how it felt.
+
+    One process given its own full timeout with nothing competing for the machine supports
+    "this would never have exited". Sixteen children sharing one deadline do not: a child
+    still working when the clock ran out may have been a second from done, and the observer
+    that CAN say the system stopped progressing is the watchdog, which says STALLED
+    separately.
+    """
+    import busybody_runner as br
+
+    assert br.classify(None, "", "", True) == "HUNG"
+    assert br.classify(None, "", "", True, unresolved=True) == "INDETERMINATE"
+    # unresolved is about the TIMEOUT; a process that exited is classified on what it did
+    assert br.classify(0, "BUSYBODY_OK", "", False, unresolved=True) == "RAN"
+
+
+def test_indeterminate_is_neither_a_pass_nor_a_finding():
+    """Counting it either way is a claim nobody can support.
+
+    `is_finding` is the single predicate six call sites consult, because six copies of
+    `not rec["ok"]` is how a run summary and its census end up disagreeing about how many
+    findings there were.
+    """
+    import busybody_ledger as bl
+
+    assert bl.is_finding({"ok": False}) is True
+    assert bl.is_finding({"ok": True}) is False
+    assert bl.is_finding({"ok": False, "indeterminate": True}) is False, (
+        "an indeterminate result must not enter the findings ledger — writing a non-event "
+        "into the fingerprint census puts it there forever"
+    )
+
+
+def test_indeterminate_is_not_on_the_fatal_floor():
+    """It is the ABSENCE of a verdict. A floor is a verdict, so it cannot be on one."""
+    import busybody_config as cfg
+
+    assert "INDETERMINATE" not in cfg.FATAL
+
+
+def test_indeterminate_has_a_meaning_and_a_severity():
+    """An outcome the report cannot explain is a silent way to ship something unreadable."""
+    import busybody_report as brep
+
+    assert "INDETERMINATE" in brep.OUTCOME_MEANING
+    assert "may or may not" in brep.OUTCOME_MEANING["INDETERMINATE"]
+    sev = brep.severity_for({}, {"outcome": "INDETERMINATE"}, ok=False)
+    assert sev == "note", (
+        f"INDETERMINATE graded {sev!r}. An absence of evidence must never be inflated into "
+        f"evidence of a defect."
+    )
+
+
+def test_a_herd_where_nothing_resolved_is_indeterminate_not_clean():
+    """Silence from every child is not a pass.
+
+    The reduction starts at RAN and takes the worst, so an all-indeterminate herd would
+    otherwise report RAN — "sixteen processes raced the cache and it was fine", from a run
+    in which the harness observed nothing at all.
+    """
+    import busybody_herd as bh
+
+    class _Watch:
+        stalled_at = None
+        stall_id = ""
+        stall_blame = ""
+        evidence = ""
+        quiet_max = 0.0
+        quiet_s = 40.0
+        ticks = 3
+
+    subs = [{"i": i, "rc": None, "outcome": "INDETERMINATE", "blame": "unknown",
+             "post_stall": False, "stall_id": "", "at": 0.0, "tail": ""}
+            for i in range(4)]
+    v = bh.herd_verdict(subs, _Watch(), 0.0)
+    assert v["outcome"] == "INDETERMINATE", v
+    assert v["indeterminate"] is True
+
+    # one child that DID resolve badly outranks the silence: there is a verdict now
+    subs[0] = {**subs[0], "outcome": "CRASHED", "rc": 1}
+    v2 = bh.herd_verdict(subs, _Watch(), 0.0)
+    assert v2["outcome"] == "CRASHED", v2
+    assert v2["indeterminate"] is False

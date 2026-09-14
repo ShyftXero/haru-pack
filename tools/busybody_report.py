@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 
 from busybody_config import FATAL
+from busybody_ledger import is_finding
 
 
 OUTCOME_MEANING = {
@@ -23,6 +24,10 @@ OUTCOME_MEANING = {
     "SILENT": "exit 0, but the app never ran",
     "APP-CRASHED": "the packaged application raised; the launcher was not at fault",
     "CASE-ERROR": "the chaos case itself failed; this is a bug in busybody, not in haru-pack",
+    "INDETERMINATE": ("the harness stopped observing before the action resolved, so it may or "
+                      "may not have taken effect. Jepsen calls this `:info`. NOT a verdict: "
+                      "counted as neither a pass nor a finding, because counting it either "
+                      "way would be a claim nobody can support"),
     "WARNED": "a contradictory config built, and the build said which side it overrode",
     "SILENT-WEDGE": ("a contradictory config built with no mention of the conflict, and the "
                      "artifact carries the damage"),
@@ -52,7 +57,7 @@ W = 78
 
 
 def _preamble(exe_name: str, run_id: str, results: list, bad: list,
-              interrupted: bool) -> list:
+              interrupted: bool, unresolved: int = 0) -> list:
     """Counts, the caveat if there is one, and the vocabulary the rest of the file uses.
 
     The outcome legend is printed VERBATIM from OUTCOME_MEANING rather than summarised: a
@@ -67,8 +72,9 @@ def _preamble(exe_name: str, run_id: str, results: list, bad: list,
          f"run          : {run_id or '(unrecorded)'}",
          f"fixture      : {exe_name}",
          f"cases run    : {len(results)}",
-         f"as expected  : {len(results) - len(bad)}",
-         f"findings     : {len(bad)}"]
+         f"as expected  : {len(results) - len(bad) - unresolved}",
+         f"findings     : {len(bad)}",
+         f"indeterminate: {unresolved}   (neither; the harness stopped watching first)"]
     if interrupted:
         L += ["",
               "  *** THIS RUN WAS INTERRUPTED ***",
@@ -96,8 +102,10 @@ def _summary_table(results: list) -> list:
          f"  {'persona':14} {'case':42} {'outcome':9} {'severity':8} verdict",
          f"  {'-' * 14} {'-' * 42} {'-' * 9} {'-' * 8} -------"]
     for r in results:
+        verdict = ("UNKNOWN" if r.get("indeterminate")
+                   else "ok" if r["ok"] else "FINDING")
         L.append(f"  {r['persona']:14} {r['name']:42} {r['outcome']:9} "
-                 f"{r.get('severity', ''):8} {'ok' if r['ok'] else 'FINDING'}")
+                 f"{r.get('severity', ''):8} {verdict}")
     L.append("")
     return L
 
@@ -160,8 +168,9 @@ def write_report(results: list, exe_name: str, path: Path, run_id: str = "",
 
     If you are holding this file and nothing else, that has to be enough.
     """
-    bad = [r for r in results if not r["ok"]]
-    L = _preamble(exe_name, run_id, results, bad, interrupted)
+    bad = [r for r in results if is_finding(r)]
+    L = _preamble(exe_name, run_id, results, bad, interrupted,
+                  len([r for r in results if r.get("indeterminate")]))
     L += _summary_table(results)
     if not bad:
         L += _no_findings()
@@ -206,6 +215,9 @@ def severity_for(c: dict, r: dict, ok: bool) -> str:
         return "note"          # the app declined the box it was given; not haru-pack's doing
     if r["outcome"] == "CASE-ERROR":
         return "note"          # busybody's own bug, not haru-pack's — say so, do not inflate
+    if r["outcome"] == "INDETERMINATE":
+        return "note"          # not a verdict; the harness stopped watching. Never inflate
+                               # an absence of evidence into evidence
     if r["outcome"] == "REFUSED-UNRELATED":
         return "note"          # the CASE missed its target; fix the case before believing it
     if r["outcome"] == "LEAKED":

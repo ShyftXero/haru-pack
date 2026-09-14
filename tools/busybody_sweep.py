@@ -8,7 +8,7 @@ Split out of busybody.py 2026-09-13 (INV-MODULARITY-01). Unchanged otherwise.
 """
 from __future__ import annotations
 
-from busybody_ledger import ledger_append, prune_runs  # noqa: E402
+from busybody_ledger import is_finding, ledger_append, prune_runs  # noqa: E402
 from busybody_report import write_report  # noqa: E402
 
 import json
@@ -71,10 +71,16 @@ def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
         # parent can journal them in order without touching the work dir.
         r["announced"] = Ctx.announced(work)
 
-        ok = r["outcome"] in c["expect"] and r["outcome"] not in FATAL
+        # INDETERMINATE is never `ok`, and is never a finding either. It is the absence of
+        # a verdict, so it is excluded from the pass count AND from the ledger; see
+        # busybody_ledger.is_finding.
+        indeterminate = bool(r.get("indeterminate")) or r["outcome"] == "INDETERMINATE"
+        ok = (not indeterminate and r["outcome"] in c["expect"]
+              and r["outcome"] not in FATAL)
         msg = (r.get("stderr") or r.get("stdout") or "").strip()
         rec = {**{k: c[k] for k in ("name", "persona", "why", "inv", "remedy")},
-               **r, "ok": ok, "expect": list(c["expect"]), "fixture": fixture_name,
+               **r, "ok": ok, "indeterminate": indeterminate,
+               "expect": list(c["expect"]), "fixture": fixture_name,
                "seed": seed,
                # Always present rather than sometimes-absent, so no consumer needs .get():
                # a cascade is a result that resolved after a stall was already declared.
@@ -82,7 +88,7 @@ def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
                "stall_id": r.get("stall_id", ""),
                "severity": severity_for(c, r, ok),
                "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
-        if not ok:
+        if not ok and not indeterminate:
             rec["artifacts"] = preserve(run_dir, f"{fixture_name}--{case_name}", work,
                                         light=c.get("light", False))
         if keep:
@@ -290,7 +296,7 @@ def _harness_findings(results: list) -> list:
 def _finish_compose(a, results: list, run_dir: Path, run_id: str, peak: int, jr,
                     reaper, paths) -> int:
     """Ledger, report, reap \u2014 and the exit code."""
-    bad = [r for r in results if not r["ok"]]
+    bad = [r for r in results if is_finding(r)]
     if bad:
         ledger_append([{k: v for k, v in r.items()
                         if k in ("name", "persona", "outcome", "severity", "fingerprint",

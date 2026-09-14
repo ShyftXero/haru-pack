@@ -131,6 +131,21 @@ MARKER = "BUSYBODY_OK"
 # which side lost. That is the behaviour the wedge persona is asking for, not a defect.
 FATAL = ("CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "STALLED", "ESCAPED", "SMUGGLED")
 
+# INDETERMINATE is not here, and the reason is the most important thing about it: it is not
+# a verdict at all. Jepsen's operation model is `:invoke / :ok / :fail / :info`, and `:info`
+# means "the request timed out; it may or may not have been applied". Every other name in this
+# file asserts something about what happened. INDETERMINATE asserts that the harness STOPPED
+# OBSERVING before the action resolved, which is a fact about us.
+#
+# It is therefore neither a pass nor a finding, and counting it as either is a lie in one
+# direction or the other. Records carry `indeterminate: true`, are kept out of the findings
+# ledger, and are subtracted from the pass count and reported on their own line.
+#
+# This distinction is currently thin in haru-pack — a packed binary usually starts, prints and
+# exits, so most actions resolve — and it is here anyway, because retrofitting a fourth value
+# into a closed vocabulary means revisiting every `if outcome ==` in two codebases. The one
+# live producer is the herd, where sixteen children share one deadline; see herd_collect.
+
 # SANCTIONED is deliberately NOT fatal, for the same reason EXPOSED is not: it means a
 # project-controlled capability haru-pack DOCUMENTS ran, and the build log named it before
 # it ran. Folding that into ESCAPED would train the reader to skip the one outcome that

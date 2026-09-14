@@ -282,8 +282,19 @@ def blame(out: str, err: str) -> str:
     return "unknown"
 
 
-def classify(rc, out: str, err: str, timed_out: bool) -> str:
+def classify(rc, out: str, err: str, timed_out: bool, *, unresolved: bool = False) -> str:
     """Map a process outcome onto the vocabulary.
+
+    `unresolved` distinguishes HUNG from INDETERMINATE, and the difference is what the
+    harness is entitled to claim.
+
+    HUNG says "this would never have exited". One process, given its own full timeout, with
+    nothing else competing for the machine, is enough to support that. A herd of sixteen
+    children sharing one deadline is NOT: a child still working when the clock ran out may
+    have been seconds from finishing, and the observer that can tell the difference is the
+    stall watchdog, which makes its own claim separately. So a deadline kill inside the herd
+    passes `unresolved=True` and gets INDETERMINATE — Jepsen's `:info`, the absence of a
+    verdict rather than a bad one.
 
     CRASHED vs APP-CRASHED is the distinction that makes app-level personas usable. A Nim
     traceback out of the launcher is always a defect. A Python traceback out of the PACKAGED
@@ -296,7 +307,7 @@ def classify(rc, out: str, err: str, timed_out: bool) -> str:
     """
     blob = (out or "") + (err or "")
     if timed_out:
-        return "HUNG"
+        return "INDETERMINATE" if unresolved else "HUNG"
     if any(m in blob for m in TRACEBACK_MARKERS):
         return "CRASHED" if blame(out, err) == "launcher" else "APP-CRASHED"
     if rc == 0:

@@ -52,7 +52,7 @@ from pathlib import Path
 
 __all__ = ["SEVERITIES", "SCHEMA_VERSION", "normalize", "fingerprint", "Journal",
            "ledger_path", "ledger_append", "ledger_rollup", "scan_runs", "heartbeat_state",
-           "Reaper", "reap_orphans", "prune_runs", "human_bytes"]
+           "Reaper", "reap_orphans", "prune_runs", "human_bytes", "is_finding"]
 
 # The on-disk contract's version, stamped into every record busybody writes.
 # `docs/BUSYBODY-SCHEMA.md` IS the contract; this constant is the code agreeing with it.
@@ -112,6 +112,21 @@ def fingerprint(persona: str, case: str, outcome: str, message: str) -> str:
     """
     basis = f"{persona}|{case}|{outcome}|{normalize(message)}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def is_finding(rec: dict) -> bool:
+    """Does this record count against the product?
+
+    One predicate, because the answer is consulted in six places — the ledger append, the
+    run summary, the report, the compose summary, `scan_runs` and `analyze_run` — and six
+    copies of `not rec["ok"]` is how the summary and the census end up disagreeing about how
+    many findings a run had.
+
+    An INDETERMINATE result is not ok and is not a finding. The harness stopped observing
+    before the action resolved, so there is no verdict to record; writing one to the ledger
+    would put a non-event into the fingerprint census forever.
+    """
+    return not rec.get("ok") and not rec.get("indeterminate")
 
 
 # ---------------------------------------------------------------- per-run journal
@@ -205,9 +220,10 @@ def scan_runs(out_dir: Path) -> list:
             # Counted the same way --triage groups them, or the two views disagree
             # sixteen-to-one about one stall and neither number can be trusted.
             "findings": len([r for r in cases
-                             if not r.get("ok") and not r.get("post_stall")]),
+                             if is_finding(r) and not r.get("post_stall")]),
             "cascades": len([r for r in cases
-                             if not r.get("ok") and r.get("post_stall")]),
+                             if is_finding(r) and r.get("post_stall")]),
+            "indeterminate": len([r for r in cases if r.get("indeterminate")]),
             "planned": started.get("planned"),
             "at": started.get("at"),
         })
