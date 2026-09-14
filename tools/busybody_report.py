@@ -248,6 +248,8 @@ def preserve(run_dir: Path, case_name: str, work: Path, light: bool = False) -> 
     kept = []
     for child in sorted(work.iterdir()):
         try:
+            # Forensic bundles are small JSON and are the first thing worth reading, so
+            # they are copied whatever else the `light` rule drops.
             if child.is_file() and child.stat().st_size < 300 * 1024 * 1024:
                 shutil.copy2(child, dest / child.name)
                 kept.append(child.name)

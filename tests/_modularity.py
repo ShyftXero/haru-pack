@@ -192,6 +192,7 @@ BUSYBODY_ENGINE = frozenset({
     "busybody_compose_run",  # build and run one composed stack
     "busybody_guard",        # single-instance run control
     "busybody_stall",        # the external watchdog
+    "busybody_bundle",       # forensic collection at the moment of a finding
     "busybody_cli",          # dispatch
     "busybody_args",         # flags
 })

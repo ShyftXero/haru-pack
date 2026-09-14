@@ -118,6 +118,7 @@ class StallWatch:
         self.stall_id = ""
         self.stall_blame = ""
         self.evidence = ""
+        self.forensics = ""        # path to the bundle collected AT the declaration, if any
         self.quiet_max = 0.0       # longest quiet stretch seen, stall or not: THE number
         self.ticks = 0             # cfg.STALL_QUIET_S has to be calibrated against
         self.late = 0              # ticks that arrived far later than they were asked to
@@ -201,7 +202,14 @@ class StallWatch:
         # something it merely watched happen. Ctx.observe writes to the same fsynced file
         # so the record survives this process being killed, and the parent journals it
         # under its own record type.
+        # The one moment in this harness where the interesting state is still ALIVE: every
+        # child is up, none is progressing, and in ten seconds they will all have been
+        # killed and the question "stuck on what?" will be unanswerable. Collected before
+        # the observation is even recorded, because the observation is cheap and the state
+        # is perishable.
+        self.forensics = Ctx.forensics(f"stall {self.stall_id}")
         Ctx.observe("stall", stall_id=self.stall_id, quiet_s=round(held, 1),
+                    forensics=self.forensics,
                     staged_bytes=nbytes, alive=alive, blame=self.stall_blame,
                     evidence=self.evidence)
 

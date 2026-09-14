@@ -117,6 +117,41 @@ class Ctx:
             os.fsync(fh.fileno())
 
     @classmethod
+    def forensics(cls, reason: str, cache=None) -> str:
+        """Collect a forensic bundle NOW, from the living system. Returns its path, or "".
+
+        The distinction that makes this worth having: `preserve()` copies what the case LEFT
+        BEHIND, afterwards. This captures what was GOING ON, at the moment. By the time a
+        case returns, the processes are gone, the descriptors are closed, and which of the
+        sixteen children was holding the stage is unrecoverable — and a HUNG or STALLED
+        finding is exactly the one where the record is least useful and the live state is
+        most.
+
+        Written into the work directory, the same durable channel `perturb` and `observe`
+        use, so it survives this process being killed by the thing it is documenting.
+
+        Never raises and never blocks for long; see busybody_bundle for the rules its
+        collectors follow. A collector that throws while investigating a failure turns a
+        finding into a CASE-ERROR and loses both.
+        """
+        if cls.work is None:
+            return ""
+        try:
+            import busybody_bundle
+
+            bundle = busybody_bundle.collect(work=cls.work, cache=cache, reason=reason)
+            bundle.update(case=cls.case, fixture=cls.fixture, seed=cls.seed)
+            n = len(list(Path(cls.work).glob("forensics-*.json")))
+            dest = Path(cls.work) / f"forensics-{n:02d}.json"
+            dest.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8")
+            return str(dest)
+        except Exception:
+            # Deliberately bare. This runs on the failure path; a forensic collector that
+            # can itself fail the case is worse than no forensic collector.
+            return ""
+
+    @classmethod
     def announced(cls, work) -> list:
         """The fault announcements one case left behind, oldest first."""
         p = Path(work) / cls.PERTURBATIONS

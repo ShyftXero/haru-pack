@@ -89,6 +89,11 @@ def run_one(fixture_name: str, exe_str: str, case_name: str, run_dir_str: str,
                "severity": severity_for(c, r, ok),
                "fingerprint": fingerprint(c["persona"], c["name"], r["outcome"], msg)}
         if not ok and not indeterminate:
+            # A last bundle, before teardown. Weaker than one collected mid-fault — the
+            # subprocess has exited by now — but the scratch filesystem, the staged tree and
+            # the load average are all still true, and those three answer "was it the box?",
+            # which is the first thing anyone asks of a finding on a shared machine.
+            Ctx.forensics(f"finding: {r['outcome']}")
             rec["artifacts"] = preserve(run_dir, f"{fixture_name}--{case_name}", work,
                                         light=c.get("light", False))
         if keep:
