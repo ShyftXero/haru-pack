@@ -57,32 +57,48 @@ COPY src /tmp/pkg/src
 RUN python3 -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir /tmp/pkg
 
-# uv, at the digest pins.toml pins (INV-SUPPLY-01). A thick build shells out to `uv sync`,
-# so it has to be on PATH. Deliberately NOT the upstream curl|sh installer — see
-# docker/install-uv.py for why a second acquisition path is the thing being avoided.
+# uv, Nim and zig — acquired and made world-accessible in ONE layer.
+#
+# The single RUN is not cosmetic and must stay that way. Each of these unpacks a large tree
+# (zig alone is ~1 GB, the Nim toolchain is tens of thousands of small files), and the
+# harness runs as the invoking uid (`-u uid:gid`), who owns none of it — so every baked path
+# has to be readable, traversable, and (for HOME, below) writable by an arbitrary uid.
+#
+# Doing that `chmod -R` in its OWN layer is a trap: on overlayfs a chmod is a write, so it
+# copies every file it touches up into the new layer. Measured here 2026-09-14 — as a
+# separate step it ran for over twenty minutes and roughly doubled the image, to 2.87 GB, for
+# a permission bit. In the same layer that created the files there is nothing to copy up.
+#
+# uv is the one piece that cannot come from `haru bootstrap`: a thick build shells out to
+# `uv sync`, so it must be on PATH before haru-pack runs at all. It is deliberately NOT the
+# upstream curl|sh installer — see docker/install-uv.py for why a second, unpinned artifact
+# acquisition path is the thing being avoided. Nim and zig go through haru-pack's own
+# digest-verified path for the same reason.
+#
+# /opt/haru is world-WRITABLE, not merely readable: it is HOME at run time and both nim and
+# nimble write under it during a build. Those writes land in the container's own ephemeral
+# layer and die with `--rm`, so this does not let one package's code reach the next one's
+# toolchain. Only the /cache volume persists, and the run phase mounts that read-only.
 COPY docker/install-uv.py /tmp/
-RUN python3 /tmp/install-uv.py /tmp/pkg/src/haru_pack/pins.toml /usr/local/bin
-
-# Nim (choosenim, digest-pinned) and zig (digest-pinned), through haru-pack's OWN acquisition
-# path rather than a hand-written apt/curl layer here. Same reason as uv: one audited path.
-RUN haru-pack bootstrap --minimal --yes
-RUN python3 -c "import sys; sys.path.insert(0, '/tmp/pkg/src'); \
-from haru_pack import toolchain; print(toolchain.install_zig())"
-
-# The harness runs as the invoking user (`-u uid:gid`), who owns none of the above, so every
-# baked path has to be readable and every baked directory traversable by that uid.
-#
-# /opt/haru is world-WRITABLE, not just readable: it is HOME at run time (nimble's package
-# tree is under it), and Nim and nimble both write there during a build. Writes land in the
-# container's own ephemeral layer and are destroyed by `--rm`, so this does not let one
-# package's code reach the next one's toolchain — only the /cache volume persists, and the
-# run phase mounts that read-only.
-#
-# /cache and /w are mount points, made world-writable so the run's uid can use them.
-RUN chmod -R a+rwX /opt/haru \
+RUN python3 /tmp/install-uv.py /tmp/pkg/src/haru_pack/pins.toml /usr/local/bin \
+ && haru-pack bootstrap --minimal --yes \
+ && python3 -c "import sys; sys.path.insert(0, '/tmp/pkg/src'); \
+from haru_pack import toolchain; print(toolchain.install_zig())" \
+ && chmod -R a+rwX /opt/haru \
  && chmod -R a+rX /opt/venv /usr/local/bin \
  && chmod 1777 /cache /w \
  && rm -rf /tmp/pkg /tmp/install-uv.py
+
+# A build-time smoke test, as the kind of uid the harness will actually use. Without it a
+# permission mistake in the layer above surfaces minutes into someone's first flex run,
+# as a compiler error rather than as a broken image.
+# `doctor` rather than `nim --version`: neither nim nor zig is on PATH — haru-pack locates
+# them itself — so asking haru-pack is both the honest check and the one that matches how a
+# build actually resolves the toolchain.
+USER 65534:65534
+RUN haru-pack --version && uv --version && haru-pack doctor \
+ || (echo "the image is not usable by a non-root uid" && exit 1)
+USER 0:0
 
 # The working tree wins over the copy installed above. This is what makes flex test the code
 # you are editing rather than the code the image was built from.
