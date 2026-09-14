@@ -52,11 +52,23 @@ IMAGE_NAME = "haru-pack-flex"
 #: a toolchain 25 times. Named, so it survives between runs. `docker volume rm` to reset.
 CACHE_VOLUME = "haru-flex-cache"
 
-#: Mount modes for /cache. `cold` is an ANONYMOUS volume: docker creates it empty and
-#: `--rm` destroys it with the container, which is what makes the thick offline check mean
-#: something. A warm cache would let the run succeed from cache and prove nothing.
-CACHE_RW, CACHE_RO, CACHE_COLD = "rw", "ro", "cold"
-CACHE_MODES = (CACHE_RW, CACHE_RO, CACHE_COLD)
+#: Mount modes for /cache. Exactly two, and which phase gets which is the security decision:
+#:
+#:   `rw`    the shared named volume, writable. The BUILD phase only — it is what stops a
+#:           25-package matrix downloading a toolchain 25 times.
+#:   `cold`  an ANONYMOUS volume: docker creates it empty and `--rm` destroys it with the
+#:           container. The RUN phase always. Stranger code therefore never sees the shared
+#:           cache at all, in either direction, and every run starts pristine — which is
+#:           also what makes the thick offline check mean something, since a warm cache
+#:           would let the run succeed from cache and prove nothing about the payload.
+#:
+#: There is deliberately no read-only mode. The first draft of this gave the run phase the
+#: shared volume mounted `:ro`, which is unimplementable: a thick binary STAGES into
+#: $XDG_CACHE_HOME before it can execute, so it died with
+#: `OSError: Read-only file system /cache/haru-pack/<hash>.tmp-1`. Not mounting the shared
+#: cache is the stronger answer anyway — `:ro` still let a package read it.
+CACHE_RW, CACHE_COLD = "rw", "cold"
+CACHE_MODES = (CACHE_RW, CACHE_COLD)
 
 WORKDIR = "/w"
 SRCDIR = "/src"
@@ -132,8 +144,7 @@ def docker_argv(image: str, *, cmd, work: Path, network: bool, cache: str,
     if cache == CACHE_COLD:
         argv += ["-v", CACHEDIR]                       # anonymous; --rm destroys it
     else:
-        suffix = ":ro" if cache == CACHE_RO else ""
-        argv += ["-v", f"{CACHE_VOLUME}:{CACHEDIR}{suffix}"]
+        argv += ["-v", f"{CACHE_VOLUME}:{CACHEDIR}"]
 
     for key, value in sorted((env or {}).items()):
         argv += ["-e", f"{key}={value}"]

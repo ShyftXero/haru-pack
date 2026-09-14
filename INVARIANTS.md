@@ -3097,7 +3097,7 @@ Red-path: Three, each walked 2026-09-14. (1) Mount the docker socket, or drop `:
 repository mount — `test_the_docker_socket_is_never_mounted` /
 `test_the_repository_is_mounted_read_only_or_not_at_all` /
 `test_the_only_writable_host_path_is_the_per_package_work_directory` go red. (2) Mount the
-warm cache read-write for the run phase — `test_the_cache_is_read_only_while_stranger_code_runs`
+shared cache into the run phase at all — `test_the_shared_cache_is_never_mounted_while_stranger_code_runs`
 goes red. (3) Move `subprocess.run([str(exe)], ...)` out of `HostRunner` and back into
 `run_one`, where it would run whichever runner was selected —
 `test_no_harness_executes_a_built_binary_except_through_the_sandbox` names the offending
@@ -3111,9 +3111,16 @@ between that and the maintainer's `$HOME`. The threat is ordinary: a compromised
 any top-25 package, or of anything one of them depends on.
 Note: The **build** phase needs the uv cache read-write, and that cache is shared across
 packages so a 25-package run does not fetch a toolchain 25 times. A malicious sdist build
-backend can therefore write into a cache a later package reads. That is a real residual risk,
-stated rather than papered over; it is confined to a docker volume, never touches the host
-filesystem, and the run phase mounts it read-only.
+backend can therefore write into a cache a later package's BUILD reads. That is a real
+residual risk, stated rather than papered over; it is confined to a docker volume and never
+touches the host filesystem. The **run** phase does not share it: it gets an anonymous volume
+that docker creates empty and `--rm` destroys, so package code never sees the shared cache in
+either direction.
+Note: The first implementation gave the run phase the shared volume mounted `:ro`, which is
+unimplementable — a thick binary stages into `$XDG_CACHE_HOME` before it can execute, and the
+first real end-to-end run died with `OSError: Read-only file system`. There is now no
+read-only cache mode at all and a test asserts its absence, because "mount the shared cache
+read-only" reads as the cautious choice and would be reached for again.
 Note: A container is not a VM. A kernel exploit leaves the box. Rootless docker narrows the
 gap and does not close it, which is why `rootless()` warns loudly rather than claiming the
 problem is solved — and why `--require-rootless` exists for anyone who wants the stronger

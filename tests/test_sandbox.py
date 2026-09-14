@@ -83,7 +83,7 @@ def test_the_default_tier_run_keeps_its_network():
     At the default tier the dependency is SUPPOSED to be fetched on first run. Denying the
     network there tests nothing; it just breaks the harness.
     """
-    argv = argv_for(cmd=["/w/requests"], network=True, cache=sandbox.CACHE_RO)
+    argv = argv_for(cmd=["/w/requests"], network=True, cache=sandbox.CACHE_COLD)
     assert flag_value(argv, "--network") == "bridge"
 
 
@@ -110,7 +110,7 @@ def test_the_docker_socket_is_never_mounted():
     not to be one.
     """
     for kw in ({}, dict(network=False, cache=sandbox.CACHE_COLD),
-               dict(cache=sandbox.CACHE_RO), dict(repo=REPO)):
+               dict(cache=sandbox.CACHE_COLD), dict(repo=REPO)):
         argv = argv_for(**kw)
         joined = " ".join(argv)
         assert "docker.sock" not in joined, f"docker socket mounted: {joined}"
@@ -133,14 +133,36 @@ def test_the_repository_is_mounted_read_only_or_not_at_all():
 
 
 @pytest.mark.invariant("INV-SANDBOX-01")
-def test_the_cache_is_read_only_while_stranger_code_runs():
-    """Red-path: mount the warm cache rw during the run phase.
+def test_the_shared_cache_is_never_mounted_while_stranger_code_runs():
+    """Red-path: pass CACHE_RW for the run phase, i.e. hand the package the shared volume.
 
-    The build phase needs it writable and that is a stated residual risk (ADR 0005 §9). The
-    run phase does not, and that is where the package's own code executes.
+    The build phase needs the shared cache writable, and that is a stated residual risk
+    (ADR 0005 §9). The run phase — where the package's own code executes — must not see it
+    at all, in either direction: writable lets a package poison what the next build reads,
+    and read-only still lets it read every other package's fetched artifacts.
+
+    It cannot simply be omitted either: a thick binary STAGES into $XDG_CACHE_HOME before it
+    can execute. The first implementation mounted the shared volume `:ro` and died with
+    `OSError: Read-only file system /cache/haru-pack/<hash>.tmp-1`. A throwaway anonymous
+    volume is what satisfies both halves.
     """
-    argv = argv_for(cmd=["/w/numpy"], network=True, cache=sandbox.CACHE_RO)
-    assert f"{sandbox.CACHE_VOLUME}:{sandbox.CACHEDIR}:ro" in mounts(argv)
+    argv = argv_for(cmd=["/w/numpy"], network=True, cache=sandbox.CACHE_COLD)
+    assert not any(m.startswith(f"{sandbox.CACHE_VOLUME}:") for m in mounts(argv)), (
+        "the run phase must not mount the shared cache volume"
+    )
+    assert sandbox.CACHEDIR in mounts(argv), (
+        "the run phase still needs a writable /cache — the launcher stages into it"
+    )
+
+
+def test_there_is_no_read_only_cache_mode_to_reach_for():
+    """The mode that looked right and does not work is gone, not merely unused.
+
+    Leaving `CACHE_RO` in the enum would invite exactly the bug that was just fixed back in,
+    because mounting the shared cache read-only reads as the cautious choice.
+    """
+    assert set(sandbox.CACHE_MODES) == {sandbox.CACHE_RW, sandbox.CACHE_COLD}
+    assert not hasattr(sandbox, "CACHE_RO")
 
 
 @pytest.mark.invariant("INV-SANDBOX-01")

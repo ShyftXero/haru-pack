@@ -15,7 +15,8 @@ cloud credentials and this repository's working tree in scope. `tools/exam.py` w
 end: it runs each package's **own test suite**.
 
 Both harnesses now give every package its own throwaway containers, by default. The build
-phase gets the network and a writable cache; the run phase gets a read-only cache. The
+phase gets the network and the shared cache; the run phase gets a throwaway cache of its own
+and never sees the shared one, so one package cannot leave anything for the next to find. The
 repository is bind-mounted **read-only**, so flex still tests your working tree rather than a
 stale copy baked into an image. `--no-docker` still runs on the host, after printing what that
 puts at risk; docker being missing is an error, never a silent fallback
@@ -33,7 +34,7 @@ stronger one is how evidence gets overstated.
 
 **The containment is checked offline.** `docker_argv()` is a pure function — it reads no
 environment, no filesystem and no clock — so `tests/test_sandbox.py` asserts the properties
-that matter (no network at thick, read-only cache during the run, the docker socket never
+that matter (no network at thick, the shared cache unmounted during the run, the docker socket never
 mounted, the repo never mounted writable) by reading the argv, on a box with no docker
 installed. A guarantee that can only be checked by running docker is one that gets checked
 when somebody remembers.
@@ -45,9 +46,17 @@ refusing on purpose: refusing would send people to `--no-docker`, and a rootful 
 beats no container. `--require-rootless` makes it fatal for anyone who wants the stronger line.
 
 Stated and not papered over: the build phase needs the uv cache read-write and shares it
-across packages, so a malicious build backend can still write into a cache a later package
-reads. It is confined to a docker volume and never touches the host filesystem. And a
-container is not a VM.
+across packages, so a malicious build backend can still write into a cache a later package's
+*build* reads. It is confined to a docker volume and never touches the host filesystem;
+`docker volume rm haru-flex-cache` resets it. And a container is not a VM.
+
+Two things the first implementation got wrong, both found by running it rather than by
+reading it, and both now recorded in the ADR rather than quietly amended. The run phase was
+given the shared cache mounted `:ro` — unimplementable, because a thick binary stages into
+`$XDG_CACHE_HOME` before it can execute, so it died with `OSError: Read-only file system`.
+And the image's `chmod -R` sat in its own layer after unpacking zig and the Nim toolchain;
+on overlayfs a chmod is a write, so it copied the whole tree up and added ~1.08 GB to the
+image for a permission bit.
 
 ### busybody — an alignment pass against lotek's independent implementation
 

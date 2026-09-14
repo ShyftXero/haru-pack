@@ -50,8 +50,8 @@ def docker_argv(image, *, cmd, work, network, cache, uid, gid,
 ```
 
 This is the load-bearing design choice in the whole ADR. It means the properties that
-matter — that a thick run gets `--network none`, that the cache is read-only during the run
-phase, that the docker socket is never mounted — are assertable by a unit test that runs
+matter — that a thick run gets `--network none`, that the shared cache is not mounted during
+the run phase, that the docker socket is never mounted — are assertable by a unit test that runs
 **offline, in CI, on a box with no docker installed**. A containment guarantee that can only
 be checked by running docker is a guarantee that gets checked when someone remembers.
 
@@ -88,13 +88,27 @@ by both phases and both harnesses.
 ## 4. Two containers per package
 
 ```
-build:  docker run --network bridge  -v <work>:/w  -v haru-flex-cache:/cache     <image>  haru-pack build /w/proj -o /w/exe --tier T
-run:    docker run --network <N>     -v <work>:/w  -v haru-flex-cache:/cache:ro  <image>  /w/exe
+build:  docker run --network bridge  -v <work>:/w  -v haru-flex-cache:/cache  -v <repo>:/src:ro  <image>  haru-pack build /w/proj -o /w/exe --tier T
+run:    docker run --network <N>     -v <work>:/w  -v /cache                                     <image>  /w/exe
 ```
 
 Per-package rather than one container for the whole matrix: a package that corrupts its own
 environment cannot carry that into the next package's result, and each run phase gets its
 own network decision.
+
+The two phases get **different caches**, and that is the point. The build phase gets the
+shared named volume, because it is what stops a 25-package matrix downloading a toolchain 25
+times. The run phase — where the package's own code executes — gets an **anonymous** volume
+that docker creates empty and `--rm` destroys, so stranger code never sees the shared cache
+in either direction.
+
+**Correction to this ADR's first draft**, which gave the run phase the shared volume mounted
+`:ro`. That is unimplementable: a thick binary stages into `$XDG_CACHE_HOME` before it can
+execute, so the first real end-to-end run died with
+`OSError: Read-only file system /cache/haru-pack/<hash>.tmp-1`. It was also weaker than it
+looked — `:ro` still let a package read every other package's fetched artifacts. There is now
+no read-only cache mode at all, and a test asserts its absence, because "mount the shared
+cache read-only" reads as the cautious choice and would be reached for again.
 
 `<N>` is the honest part, and it is not "always none":
 
@@ -183,12 +197,14 @@ image and a stale image cannot be silently reused.
 - **It does not make `haru-pack build` safe for an operator packing an untrusted tree.**
   `INV-TRUST-02` stays `proposed`. This ADR moves *haru-pack's own test harnesses* into a
   box; the tool's behaviour on a customer's machine is unchanged.
-- **The shared cache is a real, stated residual risk.** The build phase needs the uv cache
-  read-write, and it is shared across packages so that a 25-package run does not download a
-  toolchain 25 times. A malicious sdist build backend can therefore write into a cache a
-  later package reads. It is confined to the volume, never touches the host filesystem, and
-  the run phase mounts it `ro` — but it is not zero. `--cold-cache` forces a fresh volume
-  per package for anyone who wants to pay for it.
+- **The shared cache is a real, stated residual risk — in the BUILD phase.** That phase needs
+  the uv cache read-write, and it is shared across packages so that a 25-package run does not
+  download a toolchain 25 times. A malicious sdist build backend therefore writes into a cache
+  a later package's build reads. It is confined to a docker volume and never touches the host
+  filesystem, but it is not zero. `docker volume rm haru-flex-cache` resets it; running
+  one package at a time is the only way to avoid it entirely today.
+  The **run** phase does not share this risk: it gets an anonymous volume and never sees the
+  shared one.
 - **A container is not a VM.** A kernel exploit leaves the box. Rootless narrows this; it
   does not close it.
 
