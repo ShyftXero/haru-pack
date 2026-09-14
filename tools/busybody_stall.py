@@ -202,16 +202,30 @@ class StallWatch:
         # something it merely watched happen. Ctx.observe writes to the same fsynced file
         # so the record survives this process being killed, and the parent journals it
         # under its own record type.
-        # The one moment in this harness where the interesting state is still ALIVE: every
-        # child is up, none is progressing, and in ten seconds they will all have been
-        # killed and the question "stuck on what?" will be unanswerable. Collected before
-        # the observation is even recorded, because the observation is cheap and the state
-        # is perishable.
-        self.forensics = Ctx.forensics(f"stall {self.stall_id}")
         Ctx.observe("stall", stall_id=self.stall_id, quiet_s=round(held, 1),
-                    forensics=self.forensics,
                     staged_bytes=nbytes, alive=alive, blame=self.stall_blame,
                     evidence=self.evidence)
+        # THE RECORD FIRST, THE BUNDLE SECOND, and the order is not a preference.
+        #
+        # This method runs on the WATCHDOG THREAD. `self.stalled_at` is set at the top, and
+        # that is what the case on the main thread is polling for — so the instant it is
+        # set, the main thread is free to finish the case and call `Ctx.clear()`. Anything
+        # this method does after that point finds `Ctx.work is None` and is silently
+        # dropped, because `observe` and `forensics` both no-op outside a case.
+        #
+        # Collecting forensics first widened that window from microseconds to seconds (the
+        # collectors are bounded at ~5s each), and `test_the_watchdog_declares_a_stall_while_
+        # every_child_is_still_alive` went red intermittently with "expected one stall
+        # record, got []" — the stall WAS declared and the record explaining it was lost.
+        # Found 2026-09-14, after it had passed a full suite run once.
+        #
+        # So the cheap, load-bearing record goes first. The bundle is an aid to reading a
+        # finding; the record IS the finding. Losing the bundle to this race is survivable
+        # and shows up as an empty `forensics` path; losing the record is not.
+        #
+        # The children are still alive either way — `herd_collect` kills them later, not
+        # here — so nothing perishable is given up by this ordering.
+        self.forensics = Ctx.forensics(f"stall {self.stall_id}")
 
     def _attribute(self, held: float, nbytes: int, alive: int) -> tuple:
         """"launcher" only on launcher-side evidence. Otherwise "unknown".
