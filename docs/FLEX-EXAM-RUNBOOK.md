@@ -67,6 +67,22 @@ git diff flex/packages.toml
 # One package while debugging:            ... run --only numpy,idna
 ```
 
+## Watching a run — the HUD
+
+The ledger is checkpointed after every package, so a live HUD just re-reads it:
+
+```sh
+# On the box the run is on (or against a synced ledger). Percent, pass/fail/no-suite
+# tallies, total tests run, and each package's pytest result; --once for a snapshot.
+./.venv/bin/python tools/exam.py hud
+./.venv/bin/python tools/exam.py hud --interval 5      # slower refresh
+./.venv/bin/python tools/exam.py hud --once            # one frame
+
+# Watch a remote (xps) run over ssh:
+ssh -t user@xps9360.tail8940e.ts.net \
+    'cd ~/code/haru-pack && ./.venv/bin/python tools/exam.py hud'
+```
+
 ## Step 4 — render the page
 
 ```sh
