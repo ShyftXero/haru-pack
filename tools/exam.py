@@ -16,6 +16,18 @@ runnable suite in the wheel). So the tool fetches the sdist, finds the test tree
 lives, ships it into a thick app whose entrypoint runs pytest over it, and runs that binary
 with the network denied. A pass means the payload carried a WORKING library.
 
+"THE NETWORK DENIED" IS LITERAL, AND SO IS THE SANDBOX
+
+Running a package's own test suite is the largest quantity of stranger code anything in this
+repo executes, and `uv sync` runs its build backend before that. Both happen inside a
+throwaway container: the build gets the network, the suite gets `--network none` and a cache
+volume that has never been used (INV-SANDBOX-01/02, docs/adr/0005).
+
+`--no-docker` runs it on this host instead, after printing what that means. There the
+"denied" is the older approximation — uv forced offline and the proxy variables pointed at a
+dead port — which a package can bypass with a socket of its own. Results carry which one
+they were produced under; they are not the same evidence.
+
 The page is generated, never hand-edited, and never written by an AI: `emit` is pure
 formatting over `flex/exam-results.json`, which is itself produced by real build+run results.
 `emit` touches no network, so the committed page reproduces byte-for-byte from the ledger.
@@ -24,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import os
 import shutil
 import subprocess
 import sys
@@ -33,6 +46,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
+if str(REPO / "tools") not in sys.path:
+    sys.path.insert(0, str(REPO / "tools"))
+
+import sandbox  # noqa: E402
 
 PACKAGES = REPO / "flex" / "packages.toml"
 LEDGER = REPO / "flex" / "exam-results.json"
@@ -68,7 +85,81 @@ def _reason(text: str) -> str:
     return (lines[-1] if lines else "")[:280]
 
 
-def run_exam(pkg: str, imp: str, haru: str, work: Path,
+class HostRunner:
+    """Build and run the exam directly on this machine. Opt-in via --no-docker.
+
+    The exam is the one harness that runs a package's OWN test suite, which is the largest
+    quantity of stranger code anything in this repo executes.
+    """
+
+    kind = "host"
+    offline_is_real = False       # no network namespace; offline_env is an approximation
+
+    def __init__(self, haru: str):
+        self.haru = haru
+
+    def build(self, work: Path, proj: Path, out: Path, timeout: int) -> tuple:
+        b = subprocess.run([self.haru, "build", str(proj), "-o", str(out), "--thick"],
+                           capture_output=True, text=True, timeout=timeout)
+        return b.returncode, (b.stderr or b.stdout)
+
+    def execute(self, work: Path, out: Path, timeout: int) -> dict:
+        # A NEUTRAL directory outside the repo. If the suite runs from inside flex/out/,
+        # pytest walks up and discovers haru-pack's own pyproject.toml / conftest.py, applies
+        # their addopts (the summary line vanishes → a passing suite reports 0 tests) and
+        # imports their fixtures. A real end user's cache is in ~/.cache, not in a checkout.
+        rundir = Path(tempfile.mkdtemp(prefix="haru-exam-"))
+        try:
+            x = subprocess.run([str(out)], capture_output=True, text=True, timeout=timeout,
+                               cwd=rundir, env=offline_env(rundir / "cold"))
+            return {"rc": x.returncode, "stdout": x.stdout, "stderr": x.stderr,
+                    "timed_out": False}
+        except subprocess.TimeoutExpired:
+            return {"rc": None, "stdout": "", "stderr": "", "timed_out": True}
+        finally:
+            shutil.rmtree(rundir, ignore_errors=True)
+
+
+class DockerRunner:
+    """Build and run the exam in throwaway containers (INV-SANDBOX-01/02)."""
+
+    kind = "docker"
+    offline_is_real = True
+
+    def __init__(self, image: str, uid: int, gid: int):
+        self.image, self.uid, self.gid = image, uid, gid
+
+    def _env(self) -> dict:
+        return sandbox.container_env()
+
+    def build(self, work: Path, proj: Path, out: Path, timeout: int) -> tuple:
+        r = sandbox.run(
+            self.image,
+            cmd=["haru-pack", "build", f"{sandbox.WORKDIR}/{proj.name}",
+                 "-o", f"{sandbox.WORKDIR}/{out.name}", "--thick"],
+            work=work, network=True, cache=sandbox.CACHE_RW, uid=self.uid, gid=self.gid,
+            repo=REPO, env=self._env(), timeout=timeout)
+        if r["infra"]:
+            return 125, f"the sandbox could not start this build: {r['stderr'].strip()[-300:]}"
+        return (r["rc"] if r["rc"] is not None else 124), (r["stderr"] or r["stdout"])
+
+    def execute(self, work: Path, out: Path, timeout: int) -> dict:
+        # `--network none` is the whole claim the exam page makes: the suite passed with the
+        # network DENIED, so the payload carried a working library. A cold cache volume and
+        # no interface is that claim made literally true.
+        #
+        # workdir is /cache, not /w: /w holds the generated project's pyproject.toml, and
+        # pytest walking up into it is the same rootdir trap the host path avoids with a
+        # temp dir. The cold volume is empty, which is exactly what "neutral" means here.
+        r = sandbox.run(
+            self.image, cmd=[f"{sandbox.WORKDIR}/{out.name}"], work=work,
+            network=False, cache=sandbox.CACHE_COLD, uid=self.uid, gid=self.gid,
+            env=self._env(), workdir=sandbox.CACHEDIR, timeout=timeout)
+        return {"rc": r["rc"], "stdout": r["stdout"], "stderr": r["stderr"],
+                "timed_out": r["timed_out"]}
+
+
+def run_exam(pkg: str, imp: str, runner, work: Path,
              build_timeout: int, run_timeout: int) -> dict:
     """Sit the exam for one package. Returns a ledger-shaped result dict. Never raises for a
     package-level problem — a timeout or a broken suite is a recorded FAIL, not a crash."""
@@ -90,13 +181,12 @@ def run_exam(pkg: str, imp: str, haru: str, work: Path,
     make_project(pkg, imp, meta["version"], kind, suite, test_deps(root), work / "proj")
     out = work / "exam.bin"
     try:
-        b = subprocess.run([haru, "build", str(work / "proj"), "-o", str(out), "--thick"],
-                           capture_output=True, text=True, timeout=build_timeout)
+        rc, output = runner.build(work, work / "proj", out, build_timeout)
     except subprocess.TimeoutExpired:
         r["error"] = f"build timed out after {build_timeout}s"
         return r
     if not out.exists():
-        r["error"] = "build: " + _reason(b.stderr or b.stdout)
+        r["error"] = "build: " + _reason(output)
         return r
     r["mb"] = round(out.stat().st_size / 1e6, 1)
     # Run the binary from a NEUTRAL directory OUTSIDE the repo, with its cache there too. If it
@@ -106,21 +196,17 @@ def run_exam(pkg: str, imp: str, haru: str, work: Path,
     # (spurious collection errors). That is the same "run-in-place adopts the surrounding
     # project" trap the launcher itself guards against; a real end user's cache is in ~/.cache,
     # not in a checkout, so this reproduces their conditions rather than the harness's.
-    rundir = Path(tempfile.mkdtemp(prefix=f"haru-exam-{pkg}-"))
     # A separate, shorter cap for the RUN: a suite that shells out to subprocesses (click's
     # does) can hang or crawl inside a packed offline binary, and that is an honest FAIL, not
     # a reason to stall the whole sweep behind one package.
-    try:
-        x = subprocess.run([str(out)], capture_output=True, text=True, timeout=run_timeout,
-                           cwd=rundir, env=offline_env(rundir / "cold"))
-    except subprocess.TimeoutExpired:
+    ex = runner.execute(work, out, run_timeout)
+    if ex["timed_out"]:
         r["error"] = f"suite did not finish inside {run_timeout}s (often subprocess-spawning tests)"
         return r
-    finally:
-        shutil.rmtree(rundir, ignore_errors=True)
-    blob = x.stdout + x.stderr
+    blob = ex["stdout"] + ex["stderr"]
     r["tests"] = _passed_count(blob)
-    if x.returncode == 0 and MARKER in x.stdout:
+    r["offline_is_real"] = runner.offline_is_real
+    if ex["rc"] == 0 and MARKER in ex["stdout"]:
         r["passed"] = True
     else:
         r["error"] = _reason(blob)
@@ -150,10 +236,6 @@ def cmd_refresh(_a) -> int:
 
 
 def cmd_run(a) -> int:
-    haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
-    if not Path(haru).exists() and not shutil.which("haru-pack"):
-        print("haru-pack not found on PATH", file=sys.stderr)
-        return 2
     pkgs = top_n()
     if a.top_n:
         pkgs = pkgs[:a.top_n]
@@ -171,16 +253,35 @@ def cmd_run(a) -> int:
                   + ", ".join(sorted(skip)))
         pkgs = [p for p in pkgs if p["name"] not in skip]
 
+    # The sandbox decision, before any sdist is fetched or any suite is run.
+    if a.no_docker:
+        print(sandbox.host_warning(len(pkgs), "packages' own test suites"), file=sys.stderr)
+        haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
+        if not Path(haru).exists() and not shutil.which("haru-pack"):
+            print("haru-pack not found on PATH", file=sys.stderr)
+            return 2
+        runner = HostRunner(haru)
+        where = "ON THIS HOST (--no-docker)"
+    else:
+        try:
+            image = sandbox.preflight(require_rootless=a.require_rootless,
+                                      log=lambda m: print(m, file=sys.stderr))
+        except sandbox.SandboxUnavailable as e:
+            print(f"\nexam: {e}", file=sys.stderr)
+            return 2
+        runner = DockerRunner(image, os.getuid(), os.getgid())
+        where = f"in containers ({image})"
+
     def one(p):
         imp = p.get("import_name") or p["name"].replace("-", "_")
         # Belt-and-braces: run_exam already swallows package-level failures, but a bug in the
         # harness itself must still not abort the sweep and lose every other result.
         try:
-            return run_exam(p["name"], imp, haru, out / p["name"], a.timeout, a.run_timeout)
+            return run_exam(p["name"], imp, runner, out / p["name"], a.timeout, a.run_timeout)
         except Exception as e:  # noqa: BLE001
             return {"name": p["name"], "passed": False, "tests": 0, "error": f"harness: {e}"}
 
-    print(f"exam: {len(pkgs)} package(s), {a.jobs} job(s)\n")
+    print(f"exam: {len(pkgs)} package(s), {a.jobs} job(s), {where}\n")
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
         futs = {ex.submit(one, p): p for p in pkgs}
         for fut in concurrent.futures.as_completed(futs):    # first-done, not first-submitted
@@ -208,6 +309,11 @@ def main() -> int:
                     help="per-package RUN timeout (s); a suite that overruns is a FAIL")
     pr.add_argument("--rerun-passed", action="store_true",
                     help="re-run packages already marked passed (default: skip them)")
+    pr.add_argument("--no-docker", action="store_true",
+                    help="run the packages' own test suites DIRECTLY ON THIS HOST instead "
+                         "of in a container. Prints what that puts at risk before it starts.")
+    pr.add_argument("--require-rootless", action="store_true",
+                    help="refuse to run against a rootful docker daemon")
     sub.add_parser("emit", help="render top_n_pypi_stats.md from the ledger (offline)")
     a = ap.parse_args()
     return {"refresh": cmd_refresh, "run": cmd_run, "emit": lambda _a: emit() or 0}[a.cmd](a)

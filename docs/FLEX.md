@@ -10,6 +10,31 @@ python tools/flex-run.py --dry-run          # what would run
 Results land in `flex/out/results.json` and a summary table on stdout. Exit code is
 non-zero if anything came out other than expected.
 
+## It runs in a container, because it runs strangers' code
+
+This harness downloads code chosen by PyPI download rank — not by audit — and executes it,
+at three points: sdist build backends under `uv sync`, the binary the build produces, and
+any `[[bundle]]`/`[[post_install]]` step in the manifest. Every package gets its own
+throwaway containers, so a poisoned one cannot reach `$HOME`, your keys, or the next
+package's result (`INV-SANDBOX-01`, `docs/adr/0005-sandboxed-flex-and-exam-harnesses.md`).
+
+Two containers per package: the **build** gets the network and a writable cache, the **run**
+gets a read-only cache and — at thick — no network interface at all.
+
+The image (`docker/flex.Dockerfile`) carries the toolchain and is built on first use. It is
+tagged with a hash of the Dockerfile plus `pins.toml`, so bumping a pin rebuilds it. Your
+working tree is bind-mounted read-only at `/src`, so flex tests the code you are editing
+rather than a copy baked in whenever the image was last built.
+
+```sh
+python tools/flex-run.py --require-rootless   # refuse a rootful daemon (docs/ROOTLESS_DOCKER.md)
+python tools/flex-run.py --no-docker          # run it on THIS host; prints what that risks
+```
+
+There is no silent fallback: if docker is missing and you did not pass `--no-docker`, flex
+stops and tells you. The first hard thing to get right about a safe default is that it stays
+the default.
+
 ## What it does
 
 For each package: build a tiny project that depends on it, whose `flexapp/__main__.py`
@@ -30,15 +55,23 @@ At the **default** tier the dependency is fetched on first run, so a green resul
 packaging path and nothing about what the binary contains. At `--thick` the payload is
 supposed to carry uv, the interpreter and every dependency.
 
-`--offline-check` runs the thick binary a second time with a **pristine cache directory**
-and uv forced offline. The pristine part is load-bearing: with a warm `~/.cache/haru-pack`
-the staged tree is reused and the run succeeds no matter what the payload holds. The summary
-column reads `carried` or `FETCHED`.
+`--offline-check` runs the thick binary a second time in a container with **no network
+interface** and a **cache volume that has never been used**. The pristine cache is
+load-bearing: with a warm one the staged tree is reused and the run succeeds no matter what
+the payload holds. The summary column reads `carried` or `FETCHED`.
 
-What this does *not* prove: it forces uv offline and points the proxy variables at a dead
-port, which blocks the dependency-fetch path. It is not a network namespace, so it does not
-stop a package from opening a socket of its own. A green offline check means "the
-dependencies came from the payload", not "this binary makes no network calls".
+This is a real network namespace (`INV-SANDBOX-02`). It used to force uv offline and point
+the proxy variables at a dead port, and this page used to say so: that blocked the
+dependency-fetch path but did not stop a package opening a socket of its own. `--network
+none` does.
+
+A green offline check still means "the dependencies came from the payload", not "this binary
+makes no network calls" — the second is a claim about the package's behaviour, and this
+harness does not measure it.
+
+Run with `--no-docker` and the offline check falls back to the old approximation, because
+the host cannot create a network namespace. Those results print as `carried*` rather than
+`carried`, so the weaker evidence is not read as the stronger.
 
 Measured here, `certifi` at each tier:
 

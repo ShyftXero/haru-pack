@@ -5,6 +5,50 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-14
 
+### flex and exam now run strangers' code in a container, not on your workstation
+
+The flex matrix is a list of packages picked by PyPI download rank, and running their code is
+the entire point of the harness. That code executed in three places — sdist build backends
+under `uv sync`, the binary the build produces, and any `[[bundle]]`/`[[post_install]]` step —
+and all three ran on the maintainer's machine, as the maintainer, with `$HOME`, SSH keys,
+cloud credentials and this repository's working tree in scope. `tools/exam.py` was the sharp
+end: it runs each package's **own test suite**.
+
+Both harnesses now give every package its own throwaway containers, by default. The build
+phase gets the network and a writable cache; the run phase gets a read-only cache. The
+repository is bind-mounted **read-only**, so flex still tests your working tree rather than a
+stale copy baked into an image. `--no-docker` still runs on the host, after printing what that
+puts at risk; docker being missing is an error, never a silent fallback
+([`INV-SANDBOX-01`](INVARIANTS.md), [ADR 0005](docs/adr/0005-sandboxed-flex-and-exam-harnesses.md)).
+
+**This made an existing result stronger, not just safer.** `--offline-check` is how the thick
+tier's "the payload carries its dependencies" claim gets tested, and `tools/flex-run.py` was
+honest in its own docstring about how weak the mechanism was: it forced `UV_OFFLINE` and
+pointed the proxy variables at a dead port, which "does not stop a package from opening a raw
+socket of its own". The run phase now gets `--network none` and a cache volume that has never
+been used — a real network namespace, with no interface to open a socket on
+([`INV-SANDBOX-02`](INVARIANTS.md)). The `--no-docker` path keeps the old approximation and
+prints its results as `carried*`, because a weaker check reported in the same column as a
+stronger one is how evidence gets overstated.
+
+**The containment is checked offline.** `docker_argv()` is a pure function — it reads no
+environment, no filesystem and no clock — so `tests/test_sandbox.py` asserts the properties
+that matter (no network at thick, read-only cache during the run, the docker socket never
+mounted, the repo never mounted writable) by reading the argv, on a box with no docker
+installed. A guarantee that can only be checked by running docker is one that gets checked
+when somebody remembers.
+
+**Rootless docker is preferred, detected, and warned about rather than required.** The gap is
+real — on a rootful daemon the socket is a root-equivalent handle — and
+[`docs/ROOTLESS_DOCKER.md`](docs/ROOTLESS_DOCKER.md) is the switch-over. It warns instead of
+refusing on purpose: refusing would send people to `--no-docker`, and a rootful container
+beats no container. `--require-rootless` makes it fatal for anyone who wants the stronger line.
+
+Stated and not papered over: the build phase needs the uv cache read-write and shares it
+across packages, so a malicious build backend can still write into a cache a later package
+reads. It is confined to a docker volume and never touches the host filesystem. And a
+container is not a VM.
+
 ### busybody — an alignment pass against lotek's independent implementation
 
 haru-pack's busybody was a deliberate reimplementation of lotek's, from lessons learned. This
