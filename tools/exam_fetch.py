@@ -105,21 +105,36 @@ def test_deps(root: Path) -> list[str]:
 
 # ─────────────────────────────────────────────────────────── build the exam project
 def make_project(pkg: str, imp: str, ver: str, kind: str, suite: list[Path], deps: list[str],
-                 proj: Path) -> None:
+                 proj: Path, sdist_root: Path) -> None:
     app = proj / "exam"
-    (app / "_suite").mkdir(parents=True)
+    app.mkdir(parents=True)
     (app / "__init__.py").write_text("")
+    # Ship the WHOLE unpacked sdist, not just the tests/ subtree, and run pytest from the sdist
+    # ROOT. A project's suite is written to run from a checkout: it imports in-tree test helpers
+    # that live BESIDE tests/ (urllib3's `dummyserver`, jmespath's `tests` package), reads data
+    # files by a root-relative path, and points `directory="tests/statics"`-style config at the
+    # root (starlette). Shipping only tests/ and running from a scratch cwd breaks all of those —
+    # the ModuleNotFoundError / FileNotFoundError classes that dominate the failures. So: copy the
+    # root, chdir into it, and APPEND it to sys.path (append, not insert(0), so the INSTALLED
+    # package under test still wins `import pkg` — only the un-installed in-tree helpers fall
+    # through to the source tree).
+    shutil.copytree(sdist_root, app / "_src")
     if kind == "dir":
-        shutil.copytree(suite[0], app / "_suite" / suite[0].name)
+        targets = [str(suite[0].relative_to(sdist_root))]
     else:
-        for f in suite:
-            shutil.copy2(f, app / "_suite" / f.name)
+        targets = [str(f.relative_to(sdist_root)) for f in suite if f.name != "conftest.py"]
+    targets_lit = ", ".join(repr(t) for t in targets)
     (app / "__main__.py").write_text(
-        "import pathlib, sys\n"
+        "import os, pathlib, sys\n"
         "import pytest\n"
-        f"import {imp}  # noqa: F401  — proves it imports before the suite even starts\n"
-        "suite = pathlib.Path(__file__).parent / '_suite'\n"
-        "rc = pytest.main(['-q', '--no-header', '-p', 'no:cacheprovider', str(suite)])\n"
+        f"import {imp}  # noqa: F401  — proves the INSTALLED package imports before the suite\n"
+        "src = pathlib.Path(__file__).parent / '_src'\n"
+        "sys.path.append(str(src))   # in-tree test helpers, without shadowing the installed pkg\n"
+        "os.chdir(src)              # root-relative data files / directory= config resolve\n"
+        # -o addopts= clears the project's own addopts (--cov, -p plugins it does not ship),
+        # which would newly fail suites that pass today; markers/testpaths from config still apply.
+        "rc = pytest.main(['-q', '--no-header', '-p', 'no:cacheprovider', '-o', 'addopts=', "
+        f"{targets_lit}])\n"
         f"if rc == 0:\n    print({MARKER!r}, {pkg!r}, 'passed its own suite inside the binary')\n"
         "sys.exit(rc)\n")
     # json.dumps, not f'"{d}"': a PEP 508 marker carries double quotes

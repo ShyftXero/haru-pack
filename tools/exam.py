@@ -87,7 +87,8 @@ def run_exam(pkg: str, imp: str, haru: str, work: Path,
         r["error"] = "no test suite in sdist"
         return r
     r["layout"] = kind + ":" + ",".join(p.name for p in suite)
-    make_project(pkg, imp, meta["version"], kind, suite, test_deps(root), work / "proj")
+    make_project(pkg, imp, meta["version"], kind, suite, test_deps(root), work / "proj",
+                 sdist_root=root)
     out = work / "exam.bin"
     try:
         b = subprocess.run([haru, "build", str(work / "proj"), "-o", str(out), "--thick"],
