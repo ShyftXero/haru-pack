@@ -126,6 +126,14 @@ out, the scratch filesystem including the quota that `df` cannot see, and the lo
 The important one is taken the instant a stall is declared, while every child is still up.
 Ten seconds later they have all been killed and "stuck on what?" is unanswerable forever.
 
+The stall RECORD is written before the bundle is collected, and the order is not a
+preference. `_declare` runs on the watchdog thread, and the main thread is polling the flag
+it sets at the top — so as soon as that flag is set, the case may finish and call
+`Ctx.clear()`, after which anything `_declare` does is silently dropped. Collecting first
+widened that window from microseconds to seconds and lost the record explaining a stall that
+had genuinely been declared. The cheap load-bearing record goes first; the bundle is an aid
+to reading a finding, and the record *is* the finding.
+
 ## Analysis is a tool, not a reading exercise
 
 Every analysis in this document was first done by hand, with throwaway one-liners over

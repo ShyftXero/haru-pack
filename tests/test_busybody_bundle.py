@@ -115,3 +115,37 @@ def test_the_stall_declaration_collects_while_the_children_are_still_alive():
         "the stall declaration no longer collects a bundle. By the time the case returns, "
         "every process it is about is gone."
     )
+
+
+def test_the_stall_record_is_written_before_the_bundle_is_collected():
+    """Ordering inside `_declare`, pinned. This was a real regression, found the hard way.
+
+    `_declare` runs on the WATCHDOG THREAD. `self.stalled_at` is set at the top of it, and
+    that is what the case on the main thread polls for — so the instant it is set, the main
+    thread may finish the case and call `Ctx.clear()`. Everything `_declare` does after that
+    point finds `Ctx.work is None` and is silently dropped, because both `observe` and
+    `forensics` no-op outside a case.
+
+    Collecting the bundle first widened that window from microseconds to seconds (each
+    collector is bounded at ~5s), and the stall record — the thing that EXPLAINS the
+    finding — was lost while the stall itself was still declared. Reproduced 3/3 with the
+    bundle first and 5/5 clean with the record first, on 2026-09-14.
+
+    So: the cheap load-bearing record first, the aid to reading it second. Nothing
+    perishable is given up, because the children are killed by `herd_collect` later and not
+    here.
+    """
+    import inspect
+    import textwrap
+
+    import busybody_stall
+
+    src = textwrap.dedent(inspect.getsource(busybody_stall.StallWatch._declare))
+    observe_at = src.index('Ctx.observe("stall"')
+    forensics_at = src.index("Ctx.forensics(")
+    assert observe_at < forensics_at, (
+        "the forensic bundle is collected BEFORE the stall record is written. _declare runs "
+        "on the watchdog thread and the main thread may call Ctx.clear() as soon as "
+        "stalled_at is set, so anything slow in between loses the record that explains the "
+        "finding. Write the record first."
+    )
