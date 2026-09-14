@@ -51,6 +51,7 @@ were serialised after the last case. Every record is now flushed as it happens, 
 | `stall` | when the watchdog declares no progress | `case`, `fixture`, `seed`, `stall_id` (string), `quiet_s` (float), and the watchdog's evidence |
 | `finished` | once, only on a complete run | `cases` (int), `findings` (int), `peak_scratch_bytes` (int) |
 | `interrupted` | on Ctrl-C | `completed` (int), `planned` (int) |
+| `harness_finding` | a fault fired and never reached the target | `reason` (string, currently always `"inert_trait"`), `trait` (string), `stack` (string), `seed` (int), `run_index` (int), `detail` (string). **About busybody, not about haru-pack** — deliberately never written to the findings ledger |
 | `setup_failure` | the harness never reached the starting line | `detail` (string, ≤400 chars) |
 | `infra_failure` | the BOX failed, not the product | `detail` (string, ≤400 chars), `completed` (int) |
 
@@ -120,6 +121,8 @@ rather than its own doomed directory.
 | `selected` | list of string | compose only | traits chosen for this stack |
 | `fired` | list of string | compose only | traits that actually acted. **The run's identity is the set that FIRED** |
 | `run_index` | int | compose only | which draw this was, part of the firing decision's basis |
+| `golden` | bool | compose only | this is the un-perturbed control: an empty stack, run first, through the same code path as every perturbed one |
+| `inert` | list of string | compose only | traits that fired and left the injection point unchanged. Reported as test-infrastructure findings; never a product defect |
 
 ### The outcome vocabulary
 
@@ -158,6 +161,14 @@ There is no crisp standard term for this and we are keeping ours.
 It is defined against the **golden run**: the un-perturbed control, rate 0, no traits fired,
 recorded as such. Without a golden run the window has nothing to be a window *from* — you
 can say a fault was injected but not what the system was doing when it was not.
+
+Every composed campaign now includes exactly one, prepended, carrying `golden: true`. It is
+not a flag and cannot be skipped: a baseline somebody can forget is missing on the run where
+it mattered. A stack where a probabilistic draw happened to fire nothing is **not** a golden
+run and is named differently in the report — an accident is not a control.
+
+A run whose golden run is itself a finding has measured nothing. The campaign summary says so
+before it lists anything else, because that fact conditions every other line in it.
 
 The per-finding tag naming which perturbations were open when a finding landed is its
 **injection provenance**: `seed`, `fired`, and the `perturb` records that precede it in the
@@ -250,6 +261,14 @@ a documentation pass over what already exists.
   `--analyze` as a `?` bucket; there were 25 of them in the 2026-09-10 sweep, all from one
   early-return path. The schema cannot say the field is meaningful because sometimes it is
   not.
+
+- **`inert` detection sees the injection point, not the target.** A trait is judged to have
+  landed if it changed the context object it was handed. That is exact for this catalogue —
+  every trait acts by mutating its context and none touches the filesystem inside its own
+  body — but it does not catch a mutation that lands in the context and is then cancelled
+  downstream, which is what the `post_late` / `pre_late` ordering exists to prevent by
+  construction. The check is sound in the direction that matters (it never accuses a trait
+  that did act) and incomplete in the other.
 
 - **There is no outcome for "we do not know whether it applied".** Every outcome here
   assumes the action resolved. Jepsen's model has `:info` for exactly this — timed out, may

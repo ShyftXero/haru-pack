@@ -313,3 +313,138 @@ def test_the_cross_target_check_does_not_flag_source_files_named_manylinux():
     ]
     for name in innocuous:
         assert not (name.endswith(".whl")), "test data should not be actual wheels"
+
+
+# ------------------------------------------------- the golden run, and did the fault land?
+
+
+def test_the_golden_run_is_prepended_and_is_not_optional():
+    """Every campaign includes one un-perturbed control, first, through the same code path.
+
+    Not a flag. A baseline somebody can forget is a baseline that is missing on the run where
+    it mattered, and the three things that depend on it — attributability, detecting
+    nondeterminism in the product rather than the harness, and defining `fault window` — are
+    all silently weaker rather than loudly absent when it is skipped.
+    """
+    import ast
+    import inspect
+
+    from busybody_sweep import compose_sweep
+
+    src = ast.unparse(ast.parse(inspect.getsource(compose_sweep)))
+    assert "[()] + list(combos)" in src, (
+        "compose_sweep no longer prepends the empty stack. The golden run is the control "
+        "every other result in the campaign is read against."
+    )
+    assert "golden=i == 0" in src or "golden=(i == 0)" in src, (
+        "the first stack is no longer marked as the golden run, so nothing downstream can "
+        "tell the control from a draw that happened to fire nothing"
+    )
+
+
+def test_a_control_run_and_a_golden_run_are_named_differently():
+    """An accident is not a control, and the report must not call one the other.
+
+    A stack where a probabilistic draw fired nothing looks identical to the deliberate empty
+    stack in every field except this one. Conflating them is how a campaign with no baseline
+    reads as a campaign with one.
+    """
+    from busybody_sweep import _stack_record
+
+    base = {"outcome": "RAN", "rc": 0, "seconds": 1.0, "blame": "none",
+            "stdout": "", "stderr": ""}
+    golden = _stack_record({**base, "fired": [], "golden": True}, (), 7)
+    accident = _stack_record({**base, "fired": [], "golden": False}, ("a", "b"), 7)
+
+    assert golden["name"] == "(golden run)"
+    assert accident["name"] == "(nothing fired)"
+    assert golden["name"] != accident["name"]
+    assert "baseline is broken" in golden["remedy"], (
+        "the golden run's remedy must say what a FINDING on the control means: that nothing "
+        "else in the campaign is evidence"
+    )
+
+
+def test_a_trait_that_changes_nothing_is_reported_as_a_harness_finding():
+    """A fault swallowed before it reaches the target must not read as tolerance.
+
+    This is the whole point of the check. A deliberately injected fault that never lands
+    produces silence, and silence is indistinguishable from "the system absorbed it
+    correctly" — so the run looks like evidence of robustness and is evidence of nothing.
+    """
+    import busybody_compose_run as bcr
+    from busybody_compose import BuildCtx
+
+    real, inert = [], []
+
+    bcr.TRAITS["_t_real"] = {"name": "_t_real", "phase": "build", "layer": "cli",
+                             "fn": lambda ctx: ctx.cli.append("--tier=thin")}
+    bcr.TRAITS["_t_inert"] = {"name": "_t_inert", "phase": "build", "layer": "cli",
+                              "fn": lambda ctx: None}
+    try:
+        ctx = BuildCtx(proj=Path("/nonexistent"))
+        inert = bcr._apply_traits(["_t_real", "_t_inert"], ctx)
+        real = ctx.cli
+    finally:
+        bcr.TRAITS.pop("_t_real", None)
+        bcr.TRAITS.pop("_t_inert", None)
+
+    assert real == ["--tier=thin"], "the live trait did not act; the fixture is wrong"
+    assert inert == ["_t_inert"], (
+        f"expected only the no-op trait to be reported inert, got {inert}. A trait that "
+        f"fires and leaves the injection point unchanged never reached the target."
+    )
+
+
+def test_the_snapshot_sees_every_kind_of_mutation_a_trait_makes():
+    """The injection-point check is only as good as what the snapshot can see.
+
+    Every trait in this catalogue acts by mutating its context — appending to a list,
+    setting a dict key, rebinding a scalar, appending a callable to `post`. If the snapshot
+    missed one of those shapes, real traits would be reported inert and the check would be
+    noise that everyone learns to skip.
+    """
+    import busybody_compose_run as bcr
+    from busybody_compose import BuildCtx, RunCtx
+
+    mutations = [
+        ("append to a list", lambda c: c.cli.append("-o")),
+        ("set a dict key", lambda c: c.files.__setitem__("a.py", "x")),
+        ("rebind a scalar", lambda c: setattr(c, "entry", "other.py")),
+        ("flip a bool", lambda c: setattr(c, "runnable", False)),
+        ("append a callable", lambda c: c.post.append(lambda p: None)),
+    ]
+    for label, mutate in mutations:
+        ctx = BuildCtx(proj=Path("/nonexistent"))
+        before = bcr._snapshot(ctx)
+        mutate(ctx)
+        assert bcr._snapshot(ctx) != before, f"the snapshot cannot see: {label}"
+
+    rctx = RunCtx()
+    before = bcr._snapshot(rctx)
+    rctx.env["HOME"] = "/nowhere"
+    assert bcr._snapshot(rctx) != before, "the snapshot cannot see a run-phase env change"
+
+
+def test_a_harness_finding_never_reaches_the_findings_ledger():
+    """`inert` is a statement about busybody. The ledger is the record of what haru-pack did.
+
+    Mixing them would put busybody's own bugs into `--triage`, ranked against product
+    defects, which is the exact category error the `blame` field and the CASE-ERROR outcome
+    already exist to prevent one level down.
+    """
+    import ast
+    import inspect
+
+    from busybody_sweep import _finish_compose, _run_one_stack
+
+    ledger_src = ast.unparse(ast.parse(inspect.getsource(_finish_compose)))
+    assert '"inert"' not in ledger_src and "'inert'" not in ledger_src, (
+        "_finish_compose names `inert` in the ledger-row field list. A test-infrastructure "
+        "finding must not be recorded as a product finding."
+    )
+    stack_src = ast.unparse(ast.parse(inspect.getsource(_run_one_stack)))
+    assert "harness_finding" in stack_src, (
+        "an inert trait is no longer journalled under its own record kind, so nothing "
+        "distinguishes it from a product finding in the journal"
+    )
