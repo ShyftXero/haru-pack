@@ -125,7 +125,7 @@ reimplementing an installer.
 
 **The launcher is Nim.** It has to be a real native executable that Windows will let you
 Authenticode-sign, and it has to cross-compile from Linux without a Windows machine. Nim
-compiles to C and does both. It is a ~500-line stub, not an application.
+compiles to C and does both. It is a ~500-line stub, not an application. Why not port it to Zig, since a `zig cc` is already pinned for cross-compiling? Costed and declined in [`docs/COMMON_CRITIQUES.md`](docs/COMMON_CRITIQUES.md).
 
 **Three tiers, because "one binary" means different things.** `--thin` bundles nothing and
 fetches on first run. Default bundles `uv` and fetches Python + deps once. `--thick`
@@ -317,6 +317,8 @@ user data — the code lives in the stage dir.
   it is not rediscovered from scratch
 - [docs/ZIG_TOOLCHAIN.md](docs/ZIG_TOOLCHAIN.md) — why the **default** compiler is one bundled
   `zig cc` instead of four system cross-compilers: the evidence, the shim, the byte-for-byte KAT
+- [docs/COMMON_CRITIQUES.md](docs/COMMON_CRITIQUES.md) — fair objections answered once with
+  evidence: why Nim **and** the zig compiler (not a Zig rewrite), where's the Rust, why not PyInstaller
 - [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)
 
 ## Status
