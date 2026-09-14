@@ -96,7 +96,7 @@ from haru_pack import toolchain; print(toolchain.install_zig())" \
 # them itself — so asking haru-pack is both the honest check and the one that matches how a
 # build actually resolves the toolchain.
 USER 65534:65534
-RUN haru-pack --version && uv --version && haru-pack doctor \
+RUN haru-pack version && uv --version && haru-pack doctor \
  || (echo "the image is not usable by a non-root uid" && exit 1)
 USER 0:0
 
