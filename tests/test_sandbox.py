@@ -11,6 +11,7 @@ installed.
 from __future__ import annotations
 
 import ast
+import subprocess
 import sys
 from pathlib import Path
 
@@ -395,6 +396,69 @@ def test_the_host_caches_are_labelled_as_shared_and_the_volume_is_not():
     for label, owner in owners.items():
         expected = "harness" if "sandbox" in label else "shared"
         assert owner == expected, f"{label} is labelled {owner}, expected {expected}"
+
+
+def test_progress_is_visible_when_stdout_is_redirected(tmp_path):
+    """Regression. Python block-buffers stdout when it is not a terminal.
+
+    An 18-minute top25 run written to a file showed NOTHING until it finished, then everything
+    at once. A harness whose output only arrives at the end is indistinguishable from a hung
+    one, and the first thing anyone does about a hung harness is kill it.
+
+    This runs the real thing in a subprocess with stdout on a pipe — the condition that
+    triggers the bug — rather than asserting the source contains a call, which would pass just
+    as happily if the call were in a function nobody invokes.
+    """
+    script = tmp_path / "prog.py"
+    script.write_text(
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(REPO / 'tools')!r})\n"
+        "import importlib.util\n"
+        f"spec = importlib.util.spec_from_file_location('fr', {str(REPO / 'tools' / 'flex-run.py')!r})\n"
+        "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+        "mod.line_buffer_stdout()\n"
+        "print('EARLY-LINE')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8")
+
+    proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True)
+    try:
+        line = proc.stdout.readline()       # must arrive long before the process exits
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+        proc.stdout.close()
+    assert line.strip() == "EARLY-LINE", (
+        f"expected the line while the process was still running, got {line!r} — stdout is "
+        f"still block-buffered under redirection"
+    )
+
+
+def test_a_budget_below_the_floor_is_refused_with_what_it_would_cost():
+    """Regression. The sandbox volume is small and EXPENSIVE, not small and idle.
+
+    This was paid for: `--max-cache-gb 0.001` was used to exercise the budget, it removed the
+    volume, and the next top25 run spent 207-213s on each of its first four builds instead of
+    70-83s — about 140s per build, to reclaim 13.5 MB. Nothing about the number warns you of
+    that trade, so the tool has to.
+
+    Red-path: drop the floor check and a 1 MB budget silently empties the toolchain cache.
+    """
+    with pytest.raises(ValueError) as exc:
+        sandbox.enforce_cache_budget(0.001, "some-image:tag")
+    msg = str(exc.value)
+    assert "floor" in msg
+    assert "--flush-cache sandbox" in msg, "it must name the flag that does mean it"
+    assert "207" in msg or "140s" in msg, (
+        "refusing without saying what it would have cost is just an obstacle"
+    )
+
+
+def test_a_sensible_budget_is_not_refused():
+    """The floor must not be so eager that the flag stops working. 20 GB is a real budget."""
+    assert sandbox.MIN_BUDGET_GB <= 20
+    # No volume on a CI box, so this returns after the floor check rather than touching docker.
+    sandbox.enforce_cache_budget(20.0, "some-image:tag")
 
 
 @pytest.mark.invariant("INV-SANDBOX-01")

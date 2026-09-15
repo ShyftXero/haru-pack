@@ -56,8 +56,14 @@ def cache_command(a) -> int:
 
     if a.flush_cache == "sandbox":
         removed, freed = sandbox.flush_volume(image=image or None)
-        print(f"removed {sandbox.CACHE_VOLUME} ({sandbox.human(freed)} freed)" if removed
-              else f"{sandbox.CACHE_VOLUME} does not exist; nothing to remove")
+        if not removed:
+            print(f"{sandbox.CACHE_VOLUME} does not exist; nothing to remove")
+            return 0
+        print(f"removed {sandbox.CACHE_VOLUME} ({sandbox.human(freed)} freed)")
+        # Say what it cost, after the fact but before the next run pays for it. This volume
+        # is small and EXPENSIVE, not small and idle, and the freed number on its own reads
+        # like the whole story.
+        print(f"\n  note: {sandbox.FLUSH_COST}")
         return 0
 
     if a.flush_cache == "host":
