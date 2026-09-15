@@ -1,0 +1,140 @@
+name: nim-aarch64
+
+# Build a linux-aarch64 Nim from the tarball pinned in src/haru_pack/pins.toml, and publish
+# it so arm64 users do not each pay an eleven-thousand-file C bootstrap.
+#
+# WHY THIS RUNS IN CI RATHER THAN ON A MAINTAINER'S PI
+#
+# Pinning a third-party artifact says "this is what the publisher published". Pinning one we
+# built says "this is what WE built" — a weaker claim, and one that is worth very little if
+# the only evidence is that somebody ran a command on hardware nobody else can see. A CI run
+# leaves a public log tying the output digest to the input digest and to the exact steps in
+# between. That is the difference between provenance and a promise.
+#
+# It builds under QEMU on an amd64 runner. That is slow (the bootstrap compiles a lot of C)
+# and it is deliberate: free arm64 runners are public-repo only, and this repository is not
+# public yet. When it goes public, switch `runs-on` to `ubuntu-24.04-arm` and delete the
+# QEMU step — the rest of the job is unchanged, and it will take minutes instead of an hour.
+#
+# Manual dispatch only. Nim versions change when somebody decides they do, not on a schedule,
+# and an accidental rebuild would publish a second artifact for a digest that is already
+# pinned.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "attach the result to a release (otherwise build and print the digest only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write        # only to attach the release asset
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: enable arm64 emulation
+        # Remove this, and switch runs-on to ubuntu-24.04-arm, once the repo is public.
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: read the pinned source
+        id: pin
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib, pathlib
+          pins = tomllib.loads(pathlib.Path("src/haru_pack/pins.toml").read_text())
+          e = [a for a in pins["artifact"]
+               if a.get("kind") == "nim" and a.get("variant") == "source"]
+          assert len(e) == 1, f"expected exactly one pinned nim source, got {len(e)}"
+          print(f"version={e[0]['version']}")
+          print(f"sha256={e[0]['sha256']}")
+          PY
+
+      - name: build nim for linux-aarch64
+        # The build runs inside an arm64 container so the output is a real aarch64 binary.
+        # `build.sh`, never `build_all.sh`: the latter clones csources from git, which would
+        # put an unpinned fetch in the middle of a chain whose whole point is that it is not.
+        #
+        # VERSION reaches the inner shell through the container environment rather than
+        # `${{ }}` interpolation. The value is repo-controlled, so this is not an injection
+        # fix so much as a quoting one — a nested docker/bash/tar command with an expression
+        # spliced into the middle of a filename is a bug waiting to happen.
+        env:
+          VERSION: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          docker run --rm --platform linux/arm64 \
+            -e VERSION -v "$PWD:/repo" -w /repo \
+            debian:12-slim bash -c '
+              set -euxo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential ca-certificates curl xz-utils python3
+              python3 docker/install-nim-source.py src/haru_pack/pins.toml /tmp/nim > /tmp/src.txt
+              src="$(tail -1 /tmp/src.txt)"
+              cd "$src"
+              sh build.sh
+              ./bin/nim c --skipUserCfg --skipParentCfg --hints:off koch
+              ./koch boot -d:release --skipUserCfg --skipParentCfg --hints:off
+              ./koch tools --skipUserCfg --skipParentCfg --hints:off
+              ./bin/nim --version
+              # Ship the tree the compiler needs at run time, not the build scratch.
+              cd /tmp/nim
+              base="$(basename "$src")"
+              rm -rf "$base/c_code" "$base/nimcache"
+              tar -cJf "/repo/out/nim-${VERSION}-linux-aarch64.tar.xz" "$base"
+            '
+
+      - name: digest
+        id: digest
+        env:
+          VERSION: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          f="out/nim-${VERSION}-linux-aarch64.tar.xz"
+          sha="$(sha256sum "$f" | cut -d' ' -f1)"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "::notice::$f sha256=$sha"
+          echo "Pin this in src/haru_pack/pins.toml as kind=nim variant=binary," \
+               "platform=linux-aarch64, with provenance = this workflow run URL."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nim-${{ steps.pin.outputs.version }}-linux-aarch64
+          path: out/*.tar.xz
+
+      - name: publish
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pin.outputs.version }}
+          SRC_SHA: ${{ steps.pin.outputs.sha256 }}
+          OUT_SHA: ${{ steps.digest.outputs.sha256 }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          tag="nim-aarch64-${VERSION}"
+          notes="$(cat <<EOF
+          linux-aarch64 Nim ${VERSION}, built by \`.github/workflows/nim-aarch64.yml\` from the
+          source tarball pinned in \`src/haru_pack/pins.toml\` (sha256 \`${SRC_SHA}\`).
+
+          Result sha256: \`${OUT_SHA}\`
+          Build log: ${RUN_URL}
+
+          This exists so arm64 users do not each pay an eleven-thousand-file C bootstrap. It
+          was built by this repository, not by nim-lang.org — a weaker claim than an upstream
+          artifact, which is why the pin's provenance is the build log above rather than a
+          person. Anyone who would rather not run it can build their own: \`NIM_FROM=source\`.
+          EOF
+          )"
+          gh release create "$tag" --title "$tag" --notes "$notes" \
+            2>/dev/null || echo "release $tag already exists; attaching to it"
+          gh release upload "$tag" out/*.tar.xz --clobber
