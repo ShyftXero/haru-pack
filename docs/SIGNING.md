@@ -128,9 +128,23 @@ all**. Under Windows Smart App Control — which requires every binary to be rec
 signed, not just the entry point — a signed stub confers nothing on an unsigned staged
 interpreter.
 
-Partially mitigated as of 2026-09-09: every staged artifact is pinned to a SHA-256 in
-`src/haru_pack/pins.toml` and verified at build time before it enters the payload
-(`INV-SUPPLY-01`), and the payload as a whole is digest-checked at launch
-(`INV-LAUNCH-01`). That closes "did we stage the bytes upstream published"; it does not make
-the staged interpreter *signed*, so Smart App Control's requirement is still unmet. See
-`research/05` Part 5 (#3) and Part 9.4.
+Partially mitigated as of 2026-09-09 — but read what the mitigation covers, because "every
+staged artifact is verified by us" is not true and was claimed here until 2026-09-15. Three
+different levels of assurance go into one payload:
+
+- **The two staged binaries — uv and the CPython interpreter — are ours to check.** Each is
+  verified at build time against a SHA-256 pinned in `src/haru_pack/pins.toml` before it enters
+  the payload, and an unpinned artifact is refused rather than fetched (`INV-SUPPLY-01`,
+  `INV-SUPPLY-06`, `INV-SUPPLY-07`).
+- **The application's own wheels are hash-verified, but not by us.** `INV-SUPPLY-08` makes the
+  install hash-checked; the hashes come from the lockfile and **uv** enforces them. That is
+  delegated verification — good, and a different thing from a pin in this repository.
+- **The Nim compiler that builds the launcher is not pinned at all.** haru-pack pins the
+  choosenim installer; choosenim fetches the toolchain from nim-lang.org and nothing here hashes
+  it (`INV-SUPPLY-01`, residual-gap Note). It is not *staged*, so it is outside this section's
+  gap — but it is in the exe you are about to sign.
+
+On top of that the payload as a whole is digest-checked at launch (`INV-LAUNCH-01`, with the
+caveats above — it is not a MAC). Together that closes "did we stage the bytes upstream
+published" for the two staged binaries; it does not make the staged interpreter *signed*, so
+Smart App Control's requirement is still unmet. See `research/05` Part 5 (#3) and Part 9.4.

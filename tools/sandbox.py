@@ -19,13 +19,32 @@ WHY THE ARGV IS BUILT BY A PURE FUNCTION
 
 `docker_argv()` reads nothing — no environment, no filesystem, no clock. Everything it needs
 is an argument. That is the load-bearing decision in this module, and it is not for elegance:
-it means the properties that actually contain the blast radius (a thick run gets
-`--network none`, the cache is read-only while stranger code runs, the docker socket is never
-mounted, the repo is never mounted writable) are assertable by a unit test that runs OFFLINE,
-in CI, on a box with no docker installed at all.
+it means the properties that actually contain the blast radius are assertable by a unit test
+that runs OFFLINE, in CI, on a box with no docker installed at all. Asked for a run with no
+network, the argv says `--network none` — no interface at all, not a blocked one — and no
+argument can reach `--network host`, because the one caller-supplied passthrough (`extra=`) is
+checked against an allowlist before it is spliced in. The RUN phase gets a THROWAWAY anonymous
+cache volume,
+so stranger code never sees the shared cache in either direction; that is stronger than
+mounting it read-only, and read-only is not on offer anyway — see `CACHE_MODES` below for the
+run that died of it. The docker socket is never mounted, for any arguments — no argument can
+express a bind mount this function did not choose. The repository is mounted `:ro` or not at
+all, and the per-package work directory is the only writable host path.
 
 A containment guarantee that can only be checked by running docker is a guarantee that gets
 checked when somebody remembers to check it. `tests/test_sandbox.py` reads the argv instead.
+
+WHAT THAT DOES NOT COVER
+
+Those tests read THIS function's output for a mode they pass in themselves. They do not read
+the call sites that CHOOSE the mode: `network=not offline` and `cache=CACHE_COLD` in
+`tools/flex-run.py`, and the same pair in `tools/exam.py`, are ordinary code no test asserts.
+Change `not offline` to `True` and every test here stays green while `results.json` keeps
+printing `carried`. What is proved is that `docker_argv` is faithful to the mode it is handed,
+not that a harness ever hands it the offline one — which is why the Statements of
+INV-SANDBOX-01 and INV-SANDBOX-02 were narrowed to the argv on 2026-09-15. The one
+harness-level check that does exist is an AST one: that no harness executes a built artifact
+outside `HostRunner`.
 
 WHAT THIS IS NOT
 
@@ -80,9 +99,12 @@ SRCDIR = "/src"
 CACHEDIR = "/cache"
 
 #: HOME inside the container, and it must be the same path the IMAGE was built with.
-#: `haru-pack bootstrap` installs the launcher's pinned nimble dependencies (zippy, puppy,
-#: parsetoml, nimcrypto — INV-SUPPLY-02) into `$HOME/.nimble`, and Nim's default config looks
-#: for them under `$HOME`. Pointing HOME at the cache volume instead loses them, and the
+#: `haru-pack bootstrap` installs the launcher's nimble dependencies (zippy, puppy, parsetoml,
+#: nimcrypto) into `$HOME/.nimble`, each requested at an exact version — that is INV-SUPPLY-09,
+#: which is about what gets INSTALLED. Not INV-SUPPLY-02: that one is about which version the
+#: compiler ends up LINKING, it is still `proposed`, and `nim c` here resolves each import to
+#: the highest version present regardless of what was installed. Nim's default config looks for
+#: these under `$HOME`. Pointing HOME at the cache volume instead loses them, and the
 #: failure surfaces four minutes into a build as `cannot open file: nimcrypto/sha2`, which
 #: reads like a missing pin rather than a misrouted environment variable.
 #:
@@ -104,6 +126,73 @@ class SandboxUnavailable(RuntimeError):
 
 # ───────────────────────────────────────────────────────────────── the pure part
 
+#: What `extra=` may carry. An ALLOWLIST, and that choice is the fix for a real hole rather
+#: than a matter of taste: `extra` is spliced in AFTER every containment flag below, and docker
+#: resolves a repeated single-value flag LAST-WINS. So `extra=("--network", "host")` beat
+#: `--network none`, `("-u", "0:0")` beat the uid drop, and `("--privileged",)` or
+#: `("-v", "/var/run/docker.sock:/var/run/docker.sock")` were simply accepted — while the
+#: module docstring promised the opposite "for any arguments". Nothing in-tree passes `extra`
+#: yet, and `test_there_is_no_way_to_ask_for_the_host_network` reads only the string literals
+#: inside `docker_argv`, so nothing was broken and nothing was red. The sentence was just false.
+#:
+#: Why an allowlist and not a denylist of the dangerous flags: a denylist is true only while it
+#: is COMPLETE. It would have to name every flag docker has — or later adds — that can pierce
+#: containment (`--privileged`, `--network`/`--net`, `-u`/`--user`, `--cap-add`,
+#: `--security-opt`, `--pid`, `--ipc`, `--uts`, `--userns`, `--cgroupns`, `--device`,
+#: `--sysctl`, `--volumes-from`, `--runtime`, `-v`/`--volume`/`--mount`), and it stops being
+#: true on a docker release, silently. An allowlist is true by default: an unfamiliar flag is
+#: refused, and widening it is a deliberate edit to this dict rather than something a caller
+#: can do from outside the module.
+#:
+#: The value is whether the flag takes one. What is here is what the harnesses actually ask
+#: for — busybody's resource lids — and none of it can override a decision made below:
+#: `--read-only` only tightens, `--tmpfs` names a path INSIDE the container and cannot reach a
+#: host path, and the rest are ceilings on cpu, memory and pids.
+_EXTRA_FLAGS = {
+    "--read-only": False,
+    "--init": False,
+    "--tmpfs": True,
+    "-m": True, "--memory": True, "--memory-swap": True, "--memory-swappiness": True,
+    "--cpus": True, "--cpu-shares": True, "--pids-limit": True, "--ulimit": True,
+}
+
+
+def _check_extra(extra) -> list:
+    """`extra` validated token by token, as strings, or ValueError naming the token and why.
+
+    Returns the strings it checked, so the caller splices THOSE rather than the original
+    sequence: a `str()` at splice time on an object whose `__str__` is not stable would check
+    one string and run another.
+    """
+    tokens = [str(t) for t in extra]
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        flag, inline, _ = token.partition("=")      # `-m=512m` is the same flag as `-m 512m`
+        if flag not in _EXTRA_FLAGS:
+            raise ValueError(
+                f"extra={token!r} is not an allowed sandbox flag.\n"
+                f"  `extra` is spliced in after the containment flags and docker takes the "
+                f"LAST value of a repeated flag, so a token here can undo one of them: "
+                f"`--network host` would beat `--network none` and `-u 0:0` the uid drop. "
+                f"`--privileged`, `--cap-add`, `--security-opt`, `--pid`/`--ipc`/`--userns` "
+                f"and any `-v`/`--volume`/`--mount` (the docker socket included) are not "
+                f"expressible here at all.\n"
+                f"  This is an allowlist, so a flag that is merely unfamiliar is refused too. "
+                f"Allowed: {', '.join(sorted(_EXTRA_FLAGS))}.\n"
+                f"  If a harness genuinely needs another one, add it to `_EXTRA_FLAGS` in "
+                f"tools/sandbox.py and say there why it cannot loosen containment.")
+        if inline and not _EXTRA_FLAGS[flag]:
+            raise ValueError(f"extra={token!r}: {flag} takes no value")
+        if _EXTRA_FLAGS[flag] and not inline:
+            if i + 1 >= len(tokens):
+                raise ValueError(f"extra={token!r}: {flag} needs a value and is the last token")
+            i += 2      # the next token IS that value, and is never re-read as a flag
+        else:
+            i += 1
+    return tokens
+
+
 def docker_argv(image: str, *, cmd, work: Path, network: bool, cache: str,
                 uid: int, gid: int, repo: Path | None = None,
                 env: dict | None = None, extra=(), workdir: str = WORKDIR) -> list[str]:
@@ -120,9 +209,20 @@ def docker_argv(image: str, *, cmd, work: Path, network: bool, cache: str,
     and pytest walks up from the cwd looking for a rootdir — started in /w it finds the
     generated project's own pyproject.toml, applies its addopts and reports a passing suite
     as 0 tests. The same trap as running it inside the repo worktree on the host.
+
+    `extra` is the caller's passthrough for resource lids — busybody passes `--read-only`,
+    `-m 512m`, `--tmpfs` — and is checked against `_EXTRA_FLAGS` before anything is spliced.
+    It lands LAST, after every containment flag, and docker takes the last value of a repeated
+    flag; unchecked, it was a way for a caller to undo all of them. See `_EXTRA_FLAGS`.
     """
     if cache not in CACHE_MODES:
         raise ValueError(f"cache must be one of {CACHE_MODES}, got {cache!r}")
+    # `image` is positional, so an image string beginning with `-` would be parsed by docker as
+    # a FLAG, with the first word of `cmd` promoted to the image name. That is the only other
+    # route from an argument of this function to a containment flag, and it costs one line.
+    if str(image).startswith("-"):
+        raise ValueError(f"image={image!r} starts with '-'; docker would read it as a flag")
+    checked_extra = _check_extra(extra)
 
     argv = [
         "docker", "run", "--rm",
@@ -154,7 +254,7 @@ def docker_argv(image: str, *, cmd, work: Path, network: bool, cache: str,
     for key, value in sorted((env or {}).items()):
         argv += ["-e", f"{key}={value}"]
 
-    argv += ["-w", workdir, *extra, image, *[str(c) for c in cmd]]
+    argv += ["-w", workdir, *checked_extra, image, *[str(c) for c in cmd]]
     return argv
 
 
@@ -181,14 +281,32 @@ def host_warning(count: int, what: str) -> str:
     )
 
 
-def image_tag(dockerfile_bytes: bytes, pins_bytes: bytes) -> str:
-    """Tag derived from the image's inputs, so a pin bump rebuilds and a stale image is
-    never silently reused. Pure, so the derivation itself is testable."""
-    h = hashlib.sha256()
-    h.update(dockerfile_bytes)
-    h.update(b"\0")
-    h.update(pins_bytes)
-    return h.hexdigest()[:12]
+def image_tag(dockerfile_bytes: bytes, pins_bytes: bytes, *other_inputs: bytes) -> str:
+    """Tag derived from the image's inputs, so a change to one of them rebuilds and a stale
+    image is never silently reused. Pure, so the derivation itself is testable.
+
+    WHICH INPUTS, AND THE ONE THAT IS DELIBERATELY LEFT OUT
+
+    `current_tag` feeds this the Dockerfile, `pins.toml`, `pyproject.toml` and every script in
+    `docker/` — the files that decide what gets BAKED: the toolchain, and the venv the harness
+    imports from. Until 2026-09-15 it hashed only the first two, so editing `docker/
+    install-nim-source.py` or adding a dependency changed what the image would contain and the
+    tag did not move; the stale image was reused and the edit appeared to do nothing.
+
+    It does NOT hash `src/` or `README.md`, which `flex.Dockerfile` also `COPY`s, and that is a
+    decision rather than an oversight. The baked copy of the source is overwritten at run time
+    by the read-only `/src` mount and `PYTHONPATH` — testing the WORKING TREE is the whole
+    point — so a source edit changes nothing the run reads, while retagging on it would force a
+    multi-minute toolchain rebuild on every edit. The residue is narrow and worth naming: add a
+    runtime dependency and the tag DOES move (`pyproject.toml` is hashed, and the venv really is
+    stale), but a `src/` edit alone reuses the image, correctly.
+
+    Not hashed either: the `NIM_FROM` build arg. `ensure_image` never passes `--build-arg`, so
+    in this tool it is always `auto` — but an image built by hand with `NIM_FROM=source` carries
+    the same tag as one built with `binary`.
+    """
+    return hashlib.sha256(
+        b"\0".join((dockerfile_bytes, pins_bytes, *other_inputs))).hexdigest()[:12]
 
 
 # ───────────────────────────────────────────────────────── the part that touches docker
@@ -225,8 +343,30 @@ ROOTFUL_WARNING = (
 )
 
 
+def _image_input_files() -> list:
+    """The rest of the files the image is built FROM, in a stable order.
+
+    Everything in `docker/` (the Dockerfile's own `COPY docker/*.py docker/acquire-nim.sh` —
+    taken as the whole directory so a script added later is covered without anyone remembering
+    to add it here) plus `pyproject.toml`, which decides what lands in the baked venv. Measured
+    on the dev box: six files, well under a millisecond to read, and `current_tag` is called
+    once per harness run. Hashing `src/` too would be ~40 ms, which is also affordable — the
+    reason it is excluded is not cost, it is that a `src/` edit must NOT force a rebuild. See
+    `image_tag`.
+    """
+    files = [p for p in sorted((REPO / "docker").iterdir())
+             if p.is_file() and p != DOCKERFILE]
+    pyproject = REPO / "pyproject.toml"
+    return ([pyproject] if pyproject.exists() else []) + files
+
+
 def current_tag() -> str:
-    return image_tag(DOCKERFILE.read_bytes(), PINS.read_bytes())
+    parts = [DOCKERFILE.read_bytes(), PINS.read_bytes()]
+    for path in _image_input_files():
+        # The NAME is hashed with the bytes: renaming a script changes what the Dockerfile
+        # copies, and two files swapping contents is still a different image.
+        parts.append(path.name.encode() + b"\0" + path.read_bytes())
+    return image_tag(*parts)
 
 
 def ensure_image(log=print, timeout: int = 3600) -> str:

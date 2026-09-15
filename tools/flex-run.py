@@ -61,7 +61,9 @@ This harness downloads code written by strangers, chosen by download rank rather
 audit, and executes it — at three points: sdist build backends under `uv sync`, the binary
 the build produces, and any [[bundle]]/[[post_install]] step in the manifest. Each package
 gets its own throwaway containers, so a poisoned one cannot reach $HOME, your keys, or the
-next package's result (INV-SANDBOX-01, docs/adr/0005).
+next package's RUN (INV-SANDBOX-01, docs/adr/0005). The build phase is the exception and a
+real one: it shares a read-write uv cache across packages, so a hostile sdist build backend
+can write into a cache a later package's build reads.
 
 `--no-docker` runs it on this host instead, after printing what that means. There is no
 silent fallback: if docker is missing and you did not pass the flag, this stops.
@@ -192,8 +194,11 @@ class HostRunner:
 class DockerRunner:
     """Build and run each package in its own throwaway containers (INV-SANDBOX-01).
 
-    Two per package: the build gets the network and a writable cache, the run gets a
-    read-only cache and — at thick — no network interface at all.
+    Two per package: the build gets the network and the shared cache, the run gets a
+    THROWAWAY anonymous cache of its own and — at thick — no network interface at all.
+    There is no read-only cache mode: a thick binary stages into $XDG_CACHE_HOME before it
+    can execute, so `:ro` died with `OSError: Read-only file system`. Not mounting the shared
+    volume at all is the stronger answer anyway (`tools/sandbox.py`, CACHE_MODES).
     """
 
     kind = "docker"

@@ -46,7 +46,12 @@ def ensure_nim_deps(nim: str) -> bool:
     if not Path(nimble).exists():
         nimble = shutil.which("nimble") or "nimble"
     ok = True
-    for spec in nim_dep_specs():                                    # INV-SUPPLY-02
+    # INV-SUPPLY-02 (`proposed`) — this argv is the REQUEST half of that invariant and
+    # nothing more. `build.compile_launcher` runs a bare `nim c` with no lockfile, no
+    # project `.nimble` and no `--nimblePath`, so Nim resolves each import to the highest
+    # version present in the package directory no matter what we installed here. Pinning
+    # the installer controls which versions arrive, not which one gets linked.
+    for spec in nim_dep_specs():
         try:
             r = subprocess.run([nimble, "install", "-y", spec], capture_output=True, text=True, timeout=600)
             ok = ok and r.returncode == 0

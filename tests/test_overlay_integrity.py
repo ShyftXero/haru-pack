@@ -1,8 +1,16 @@
 """INV-PAYLOAD-02 and INV-SUPPLY-03.
 
-Read the Note on INV-PAYLOAD-02 before trusting these: they cover the BUILD-TIME check
-only. The shipped launcher does not verify its payload digest at all (INV-LAUNCH-01,
-`proposed`). A green suite here is not evidence that distributed binaries self-verify.
+Read the Note on INV-PAYLOAD-02 before trusting these: they cover the BUILD-SIDE overlay
+only — `overlay.attach` and `overlay.verify`, which is what `haru-pack verify` runs on a
+binary you already have. The runtime check is a separate promise under INV-LAUNCH-01,
+now `active` (`main.launch` calls `verifyPayloadDigest` before staging, main.nim:251),
+with its own tests. A green suite here is not evidence about that one, or vice versa.
+
+Neither check is tamper-evidence, and nothing here should be quoted as if it were. Both
+compare the payload against a digest that lives in the same attacker-writable footer, so
+whoever rewrites the payload can recompute the digest beside it and still be accepted.
+What they buy is detection of corruption, truncation and naive edits. Real tamper-evidence
+would need a signature over the payload — INV-LAUNCH-03, still `proposed`.
 """
 from __future__ import annotations
 

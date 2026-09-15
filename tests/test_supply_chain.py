@@ -1,4 +1,4 @@
-"""INV-SUPPLY-01 / INV-SUPPLY-02 — what we download and then execute.
+"""INV-SUPPLY-01, INV-SUPPLY-09 and INV-SUPPLY-11 — what we download and then execute.
 
 These tests are deliberately offline. Every "download" here is a `file://` URL or a
 stubbed `urlretrieve`, so the code path under test is the real one (`fetch_verified`
@@ -8,8 +8,17 @@ Red-path, INV-SUPPLY-01: make `archives.verify_sha256` return without comparing,
 put `urllib.request.urlretrieve` back into `bootstrap.install_nim` /
 `bundle.bundle_uv` / `bundle.bundle_python`. Every rejection test below goes red.
 
-Red-path, INV-SUPPLY-02: restore `NIM_DEPS = ("zippy", "puppy", ...)` and pass the bare
+Red-path, INV-SUPPLY-09: restore `NIM_DEPS = ("zippy", "puppy", ...)` and pass the bare
 package name to `nimble install`. `test_nimble_is_invoked_with_pinned_specs` goes red.
+
+That is the whole of what the nimble tests below claim: the argv nimble receives carries
+an exact version for every package. They do NOT claim INV-SUPPLY-02 — reproducible crypto
+— which stays `proposed` and has no claiming test here or anywhere, because pinning the
+installer controls which versions *arrive* on the build host, not which one the compiler
+*links*: `build.compile_launcher` runs a bare `nim c` with no `--nimblePath` and no project
+`.nimble`, so Nim picks the highest version present in a multi-version package directory.
+INV-SUPPLY-02's Red-path is written in the future tense and has not been walked. Do not
+read a green suite here as reproducibility.
 """
 from __future__ import annotations
 

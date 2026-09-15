@@ -988,15 +988,38 @@ otherwise archive hundreds of megabytes of the same bytes.
 
 ### timetraveller — moves the clock, lies about location
 
-Spoofs `HARUPACK_GEO`, sets licence variables that should not apply.
+Spoofs `HARUPACK_GEO`, sets licence variables that should not apply. (The launcher stopped
+reading `HARUPACK_GEO` on 2026-09-12 — see the geo note below.)
 
-This persona is unusual: **it is expected to get through.** The docs say expiry and geo are
-advisory — geo reads an environment variable supplied by the person being restricted, and
-expiry reads their clock. A refusal here would mean the documentation *understates* what
-those checks do, which is its own kind of finding.
+This persona is unusual: **it is expected to get through.** That expectation was written
+when both halves were advisory, and only one half still is.
+
+**Expiry — still advisory, and the passing result still means something.** `expires` is
+compared against the target's own clock, after decryption, inside a binary they control. A
+refusal here would mean the documentation *understates* what the check does, which is its
+own kind of finding.
+
+**Geo — the mechanism changed on 2026-09-12 (ADR 0006, Phase 4), and this case is stale.**
+The gate no longer reads `HARUPACK_GEO` or any other environment variable: `checkGeoGate`
+in `src/haru_pack/launcher/execgate.nim` resolves the caller's location ONLINE over HTTPS
+and fails closed (`INV-GATE-01` / `INV-GEO-01`), and `tests/test_canary.py` fails the build
+if that env read comes back. The case here still spoofs `HARUPACK_GEO` against an
+*unencrypted* fixture, which never enters the licence path at all — so what its pass now
+demonstrates is "a binary with no policy ignores a variable nothing reads", not "the geo
+check is advisory". That staleness is flagged in `tools/busybody_cases_stage.py`; rewriting
+it to attack an encrypted fixture is a scoping question about `INV-GEO-01`, not a wording
+fix.
+
+The honest residual limit for geo is a different one, and worth stating because it is the
+one a buyer should weigh: the HTTPS call is made on the licensee's own machine, so they
+control their proxy, their CA trust (`SSL_CERT_FILE`/`SSL_CERT_DIR`) and their
+DNS and `/etc/hosts`, and can MITM the resolver and forge an allowed answer. Endpoint consensus
+does not help — one on-path position intercepts every endpoint identically. The gate is real
+against a casual user and against honest network faults; it is not an attestation.
 
 A persona whose passing result confirms a documented weakness is worth having. It keeps the
-docs honest in the direction they are most likely to drift.
+docs honest in the direction they are most likely to drift — as long as the persona is
+still attacking the mechanism the docs describe, which is exactly what lapsed here.
 
 ## App-level personas — the ones that vary by package
 

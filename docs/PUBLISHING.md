@@ -18,22 +18,29 @@ Verified 2026-09-10 on this commit:
 | name `haru-pack` on PyPI | free (HTTP 404) — first publish claims it |
 | name `haru` on PyPI | **taken** by an unrelated web framework. The *command* is fine; the distribution name is not available |
 | `uv build` | clean; sdist + wheel |
-| wheel contents | 7 `.nim`, 8 vendored `xz/*.c`/`.h`, `PROVENANCE.md`, `pins.toml` — checked, and `INV-PKG-02` keeps it that way |
+| wheel contents | everything the launcher compiles from: `launcher/*.nim`, the vendored `launcher/xz/*.c` and `*.h`, `PROVENANCE.md`, `pins.toml` — the `[tool.hatch.build] include` globs in `pyproject.toml` are the list. A file count would rot the first time a source is added; `INV-PKG-02` instead asserts that every launcher file **on disk** is covered by an include pattern, and goes red when one is not |
 | `LICENSE` | present, and hatchling ships it to `dist-info/licenses/LICENSE` |
 | clean-venv install | both `haru-pack` and `haru` land on PATH and run |
 | `./scripts/cut-release.sh --check` | passes locally |
-| **GitHub Actions `ci`** | **failing** — and `publish.yml` has `needs: ci`, so a tag push will not publish |
+| **GitHub Actions `ci`** | was **failing** on 2026-09-10 for the ruff reason below, which has since been fixed; `publish.yml` has `needs: ci`, so a tag push still will not publish while `ci` is red |
 
-That last row is the only thing actually blocking a release. The cause is that CI runs
-`uvx ruff check .` **unpinned**, so it lints with whatever ruff was released most recently;
-newer ruff turned on rules this repo does not satisfy (`I001`, `PLW1510`, `RUF100`). The
-same commit passes the local gate and fails CI, which is the tell. Pin the linter — this
-repo pins every other tool it executes (`INV-SUPPLY-01`) — e.g.
+**The ruff blocker is fixed; re-check `ci` rather than assuming it.** On 2026-09-10 the job
+ran `uvx ruff check .` **unpinned**, so it linted with whatever ruff was released most
+recently and newer ruff turned on rules this repo did not satisfy (`I001`, `PLW1510`,
+`RUF100`) — the same commit passed the local gate and failed CI, which was the tell. The
+lint step now reads the exact pin out of `pyproject.toml`'s `[dependency-groups] dev` with
+`sed`, hard-fails if there is no exact `ruff==` pin, and runs `uvx "ruff@$pin"`
+(`.github/workflows/ci.yml`, `INV-CI-01`). It stays on `uvx` deliberately: `uv run --group
+dev` would install the linter into the project environment the tests then run in, which is
+how the first attempt broke `typer.testing`.
 
-```yaml
-- name: lint
-  run: uv run ruff check .        # ruff is already in [dependency-groups] dev, pin it there
-```
+That pin closed the drift for ruff specifically. Do not read it as "every tool is pinned":
+haru-pack pins each artifact it downloads itself against `src/haru_pack/pins.toml`
+(`INV-SUPPLY-01`), but that invariant **explicitly excludes the Nim compiler**. `install_nim`
+pins the choosenim *installer* and choosenim then downloads the Nim toolchain from
+nim-lang.org under its own TLS, which nothing in this repository hashes — INVARIANTS.md calls
+that "the widest blast radius of any unpinned input in the project", since that compiler
+builds the launcher inside every binary haru-pack ships.
 
 Two steps remain that only a human with the accounts can do, both unchanged from below:
 the PyPI **pending publisher**, and the GitHub **`pypi` environment**.

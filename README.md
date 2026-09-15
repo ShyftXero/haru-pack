@@ -84,10 +84,14 @@ haru-pack init ./myproject       # optional: write a haru_pack.toml you can edit
 ```
 
 `bootstrap` installs Nim **and** the default C compiler — a pinned `zig` — into haru-pack's
-own directory. Both are plain downloads verified against a digest; your system Nim, your
-`~/.nimble`, and your system compilers are left alone, and neither needs sudo. That is the
-point of the zig default: `uv tool install haru-pack && haru-pack bootstrap` is the whole
-setup, with nothing for the package manager to do (`INV-TOOL-02`).
+own directory. They are not verified the same way, and the difference is worth knowing: the
+`zig` archive is checked against a digest pinned in this repository before it is extracted,
+while for Nim what haru-pack pins is the `choosenim` *installer* — the compiler choosenim
+then downloads from nim-lang.org is verified by choosenim, not by this repository
+(`INV-SUPPLY-01`). Either way, your system Nim, your `~/.nimble`, and your system compilers
+are left alone, and neither install needs sudo. That is the point of the zig default:
+`uv tool install haru-pack && haru-pack bootstrap` is the whole setup, with nothing for the
+package manager to do (`INV-TOOL-02`).
 
 You only reach for sudo if you opt out with `--cc system`: then the host C compiler, the
 cross toolchains, and wine are ordinary system packages. Those are still worked out first,
@@ -143,22 +147,48 @@ and the busybody `reverse_engineer` persona, which proves each edge rather than 
 
 **One code path, not two.** Host and cross builds download the same artifacts the same way.
 Where there used to be a fork — a "fast path" for the host — the fast path was the
-unverified one, and it was the path almost everyone took. Nim is installed exactly one way
-(choosenim); there is no archive fallback and no build-from-source fallback.
+unverified one, and it was the path almost everyone took. `haru-pack bootstrap` installs Nim
+exactly one way (choosenim); it has no archive fallback and no build-from-source fallback.
+The flex sandbox **container image** is the one exception, and only because choosenim
+publishes no linux-aarch64 binary: [`docker/acquire-nim.sh`](docker/acquire-nim.sh) takes
+`NIM_FROM=auto|binary|source|system`. `source` compiles a pinned Nim tarball
+([`docker/install-nim-source.py`](docker/install-nim-source.py)); `binary` installs a pinned
+prebuilt Nim archive ([`docker/install-nim-binary.py`](docker/install-nim-binary.py)) —
+except that **`src/haru_pack/pins.toml` carries no `variant = "binary"` nim entry today, for
+any platform**. The artifact it would name is a release asset of this repository, and this
+repository is still private, so an unauthenticated fetch of it cannot work. Until that entry
+exists, `NIM_FROM=binary` fails everywhere and `auto` always falls through to the source
+build — which on arm64 means an hour of bootstrapping, not a download. It becomes the primary
+path once the asset is publishable, and its `provenance` must then be the workflow run URL
+that produced it, not a person. Those fallbacks are the image's; they are not reachable from
+the CLI.
 
-**Everything downloaded is pinned.** `uv`, the Python interpreter, and choosenim are all
-checked against a SHA-256 in [`src/haru_pack/pins.toml`](src/haru_pack/pins.toml) before
-they are unpacked. No pin means the build refuses — it does not fall back to trusting TLS.
-Digests come from the publisher's own sidecar or release API, never from hashing whatever a
-server happened to send. `tools/add-pin.py` does this for you.
+**Every artifact haru-pack fetches with its own downloader is pinned.** `uv`, the Python
+interpreter, and the choosenim *installer* are each checked against a SHA-256 in
+[`src/haru_pack/pins.toml`](src/haru_pack/pins.toml) before they are unpacked. No pin means
+the build refuses — it does not fall back to trusting TLS. Digests come from the publisher's
+own sidecar or release API, never from hashing whatever a server happened to send.
+`tools/add-pin.py` does this for you. What that sentence does **not** cover, because
+haru-pack does not fetch it: the Nim compiler itself, which the verified choosenim binary
+then downloads from nim-lang.org on its own terms; the nimble libraries linked into every
+shipped launcher (`zippy`, `puppy`, `parsetoml`, `nimcrypto`), which are pinned to exact
+versions but never digest-checked; and the PyPI sdists `tools/exam_fetch.py` pulls for the
+flex harness. The first of those three builds the launcher in every customer binary, so it
+is the gap that matters most.
 
 **Mirrors change where, never whether.** If you cannot reach github.com, point `[sources]`
 at a mirror. The pin is chosen by the artifact's upstream identity *before* the URL is
 rewritten, so a hostile mirror gets you a failed build, not a compromised one.
 
-**ARM Linux is a target, not a build host.** choosenim publishes no ARM Linux binary, so
-you build Pi binaries on an x86_64 machine with `--target linux-aarch64`. You never need a
-toolchain on the Pi.
+**ARM Linux is a target; `bootstrap` will not make it a build host.** choosenim publishes no
+ARM Linux binary, so `haru-pack bootstrap` on a bare arm64 Linux box refuses with a message
+pointing you at an x86_64 machine and `--target linux-aarch64`. You do not need a toolchain
+on the Pi to get a Pi binary. (Bring your own Nim and haru-pack will use it — but then it is
+yours to maintain.) The flex sandbox container image is a separate story: it *does* build on
+arm64 — today via the source fallback above, which compiles Nim (about 25 minutes on a
+4-core Pi). The pinned-archive route is built but has nothing to fetch yet: no
+`variant = "binary"` nim entry exists in `pins.toml`, so `NIM_FROM=binary` fails and `auto`
+compiles.
 
 **The bundled uv is compressed, not packed.** `uv` is the biggest thing in any non-thin
 payload and the payload zip only has DEFLATE, so uv ships XZ-compressed (55.59 → 14.17 MB
@@ -187,9 +217,15 @@ cleanly, exits 0, and fails on the customer's machine — which is the worst pla
 out.
 
 **Claims are tested, not asserted.** [`INVARIANTS.md`](INVARIANTS.md) lists what must not
-regress, each with a *red-path*: the exact edit that makes its test fail. `pytest -m
-invariant` enforces that every `active` entry has a test and every `proposed` entry does
-not. This exists because an audit found five documented, dated "Verified" security claims
+regress, each with a *red-path*: the exact edit that makes its test fail. The gate is two
+commands, and CI runs both: `pytest tests/test_invariants_enforced.py` enforces the linkage
+— every `active` entry is claimed by a test, every `proposed` entry is not — and `pytest -m
+invariant` runs the claiming tests themselves. It takes both because `-m invariant` selects
+only tests that *claim* an invariant and so deselects the linkage checks, which carry no
+marker; run alone it would not notice a claiming test that had been deleted. A claiming test
+that **skips** also fails the gate, which is what makes a green run mean something: a CI job
+with no Nim installed used to exit 0 with five active invariants defended by nothing that
+ran. This exists because an audit found five documented, dated "Verified" security claims
 in this repo that were never implemented.
 
 ## Commands
@@ -225,7 +261,7 @@ in this repo that were never implemented.
 | `--obfuscate-args "…"` | | extra args passed through to the obfuscation engine |
 | `--expires YYYY-MM-DD` | | license expiry |
 | `--machine ID` | | bind cryptographically to a machine id (`haru-pack machine-id`) |
-| `--user NAME` | | bind cryptographically to an OS username |
+| `--user NAME` | | bind to an OS username. Cryptographic (folded into the KDF) but it reads `$USER`, which the licensee sets — see Status |
 | `--geo CC,CC` | | allowed country codes |
 
 `bootstrap` takes repeatable `--target`, plus `--yes` and `--force`. `doctor` takes `--target`.
@@ -279,7 +315,6 @@ run = ["playwright", "install", "firefox"]
 | `HARUPACK_EXE_DIR` | folder the shipped exe lives in (find config next to the exe) |
 | `HARUPACK_STAGE` | the extraction/stage dir (bundled resources) |
 | `HARU_SECRET` | (you set) license secret for an `--encrypt` build — default SECRET-knob canary; `--env-canary` / `--stub-env-secret-canary` change the prefix (INV-CANARY-01) |
-| `HARUPACK_GEO` | (you set) current country code for the geo check |
 
 `open("file.txt")` follows the process cwd like a native binary; use `cwd_policy = "exe"`
 to make relative paths always resolve next to the shipped exe. Never use `__file__` for
@@ -332,9 +367,19 @@ commercial. What the licensing feature does and does not enforce:
 - **Machine and user binding are cryptographic.** The identity is folded into the KDF, so a
   different machine id yields a different key and decryption fails. Note that
   `/etc/machine-id` is a writable file, so this binds to a value the target *reports*.
-- **`--expires` and `--geo` are not enforcement.** Geo reads `HARUPACK_GEO` — an environment
-  variable set by the person being restricted — and expiry reads their clock. Both run after
-  decryption inside a binary they control.
+  `--user` is weaker still: the launcher reads `$USER` (`$USERNAME` on Windows), so
+  `USER=alice ./app` presents a different seat with no patching and no privilege. Both are
+  cryptographic in the sense that a wrong value never decrypts; neither is an attestation.
+- **`--expires` is not enforcement.** It reads the target's clock, after decryption, inside a
+  binary they control.
+- **`--geo` is a network call to a third party on every launch.** The old `HARUPACK_GEO`
+  environment bypass is gone; the gate now resolves the caller's IP and country from online
+  resolvers (default `https://ipwho.is/`, an unaffiliated free service) and **fails closed**
+  when fewer than the required consensus answer or agree. Two things follow that a buyer must
+  weigh before shipping one: every run sends the customer's IP to that service, and if the
+  service is down, rate-limits, or disappears, every geo-gated binary in the field stops
+  running. It is also an IP check, not a presence check — a VPN exiting in an allowed country
+  passes.
 - **The launcher verifies its payload digest before staging or executing**
   ([`INV-LAUNCH-01`](INVARIANTS.md)), but that digest is **not a MAC**: it lives in the same
   footer an attacker would edit, so someone who modifies the payload can recompute it. Real

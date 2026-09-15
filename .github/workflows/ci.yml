@@ -48,11 +48,53 @@ jobs:
           echo "linting with pinned ruff $pin"
           uvx "ruff@$pin" check .
 
+      - name: install nim
+        # This step is what makes the invariant gate below mean anything. Without it the job
+        # had no Nim at all, so every test that compiles a launcher called pytest.skip, and
+        # skips are not failures: `pytest -m invariant` exited 0 with INV-CRYPTO-06,
+        # INV-GATE-01, INV-GEO-01, INV-REMOTE-01 and INV-EPHEMERAL-03 defended by nothing
+        # that ran. Measured 2026-09-15: every claiming test for all five was nim-gated.
+        #
+        # haru-pack installs its own Nim, so this uses the product rather than a third-party
+        # action: if `bootstrap` breaks, the thing every user is told to run has broken and CI
+        # should say so. Its own step, not folded into the test steps, so that failure reads as
+        # "bootstrap broke" and not as a wall of skipped tests.
+        #
+        # What this step does NOT give the job is a verified compiler. src/haru_pack/pins.toml
+        # pins the choosenim INSTALLER, and `install_nim` in src/haru_pack/toolchain.py refuses
+        # to run one whose digest is not pinned; the Nim toolchain choosenim then downloads from
+        # nim-lang.org is hashed by nothing in this repository. The pin chain stops at the
+        # installer. That gap is named rather than closed, in INV-SUPPLY-01 — so the compiler
+        # that builds launchers here is trusted, not verified, and this comment is not a place
+        # to imply otherwise.
+        #
+        # choosenim puts Nim in haru-pack's data directory and nowhere on PATH, which is the
+        # point of it not touching your system Nim. Most of the nim-gated tests gate on
+        # `shutil.which("nim")` (a handful use `find_nim()`, which finds the managed copy
+        # without help), so the path has to be published here or those skips stay exactly
+        # where they were.
+        run: |
+          uv run --no-sync haru-pack bootstrap --minimal --yes
+          nim="$(uv run --no-sync python -c 'from haru_pack.bootstrap import find_nim; print(find_nim() or "")')"
+          test -n "$nim" || { echo "::error::bootstrap exited 0 but no nim is findable"; exit 1; }
+          dirname "$nim" >> "$GITHUB_PATH"
+          "$nim" --version
+
       - name: invariant contract
         # Runs first and on its own so a linkage failure is legible in the log rather
-        # than buried in a full-suite summary. This is the gate that catches an `active`
-        # invariant whose claiming test was deleted.
-        run: uv run --no-sync pytest -m invariant
+        # than buried in a full-suite summary.
+        #
+        # Two commands, because `-m invariant` selects the tests that CLAIM an invariant and
+        # deselects the linkage checks themselves — which are unmarked, and are the ones that
+        # catch an `active` invariant whose claiming test was deleted. Running only the second
+        # command, as this step used to, left that gate to the full-suite step.
+        #
+        # HARUPACK_INVARIANT_SKIPS_OK is deliberately NOT set: the second command fails if an
+        # active invariant's claimants all skipped, which is how the missing-Nim hole above
+        # would announce itself if this workflow ever loses the bootstrap step again.
+        run: |
+          uv run --no-sync pytest tests/test_invariants_enforced.py
+          uv run --no-sync pytest -m invariant
 
       - name: full suite
         run: uv run --no-sync pytest

@@ -1,4 +1,4 @@
-"""INV-BUILD-01, INV-BUILD-02, INV-SECRET-02 — the build reports what it did.
+"""INV-BUILD-01, INV-BUILD-02, INV-SECRET-03 — the build reports what it did.
 
 Red-path for INV-BUILD-02: revert the `encrypt` parameter threaded through
 `cli.build -> build.build -> build._resolve` and restore the old enablement rule
@@ -127,7 +127,7 @@ def test_receipt_cannot_lie_about_encryption(stub_toolchain, script_project, tmp
                              secret=b"hunter2", encrypt=True)
 
 
-@pytest.mark.invariant("INV-SECRET-02")
+@pytest.mark.invariant("INV-SECRET-03")
 def test_secret_never_lands_in_a_produced_artifact(stub_toolchain, script_project, tmp_path):
     secret = b"correct-horse-battery-staple"
     out = tmp_path / "app"

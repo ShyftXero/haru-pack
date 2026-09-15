@@ -682,12 +682,16 @@ proc expandCompressedMembers(root: string) =
       want = parseInt(readFile(sizePath).strip())
     except ValueError:
       raise newException(StageError, "unreadable size sidecar for " & rel)
-    # The sidecar is a number from the payload, and the payload is not verified at runtime
-    # (INV-LAUNCH-01 is still `proposed`). Feeding it straight to `newString` means a
-    # tampered or corrupt value allocates that much: measured 2026-09-11, `newString(1 shl
-    # 50)` aborts the process with a bare "out of memory" — an OutOfMemDefect, which is not
-    # catchable, so none of the error handling below would ever run. A ceiling turns that
-    # into a refusal with a reason.
+    # The sidecar is a number from the payload. `main.launch` does verify the payload
+    # against the digest in its own footer before we get here (INV-LAUNCH-01, now
+    # `active`), but that is not a MAC: both halves come from the same attacker-writable
+    # footer, so it catches corruption and naive edits, not a deliberate rewrite. The
+    # invariant that would make a hostile size unreachable is a signature over the payload
+    # — INV-LAUNCH-03, still `proposed`. So treat this number as untrusted. Feeding it
+    # straight to `newString` means a tampered or corrupt value allocates that much:
+    # measured 2026-09-11, `newString(1 shl 50)` aborts the process with a bare "out of
+    # memory" — an OutOfMemDefect, which is not catchable, so none of the error handling
+    # below would ever run. A ceiling turns that into a refusal with a reason.
     if want <= 0 or want > MaxExpandedBytes:
       raise newException(StageError,
         "size sidecar for " & rel & " says " & $want & " bytes, which is outside the " &
@@ -709,9 +713,12 @@ proc expandCompressedMembers(root: string) =
     # decompression "succeeds" and yields something else.
     #
     # What it does NOT do, stated plainly: defeat tampering. An attacker who can rewrite
-    # `uv.xz` can rewrite `uv.xz.sha256` alongside it. Closing that needs the digest in a
-    # signature-covered place the payload cannot reach — see INV-LAUNCH-01, still
-    # `proposed`. This is an integrity check against corruption, not an authenticity one.
+    # `uv.xz` can rewrite `uv.xz.sha256` alongside it. The footer digest checked in
+    # `main.launch` (INV-LAUNCH-01, `active`) does not close the gap either — it is the
+    # same shape of check, payload against a digest an editor can recompute. Closing it
+    # needs the digest in a signature-covered place the payload cannot reach — see
+    # INV-LAUNCH-03, still `proposed`. This is an integrity check against corruption, not
+    # an authenticity one.
     let shaPath = full & ".sha256"
     if fileExists(shaPath):
       let wantSha = readFile(shaPath).strip().toLowerAscii
