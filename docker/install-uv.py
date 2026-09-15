@@ -36,6 +36,18 @@ LINUX_ASSETS = {
 }
 
 
+def _request(url: str) -> urllib.request.Request:
+    """A request with a real User-Agent.
+
+    Some publishers answer urllib's default `Python-urllib/3.x` with HTTP 403 — nim-lang.org
+    does. The failure arrives as a bare Forbidden in the middle of an image build and reads
+    like a bad pin or a blocked host, which is a very expensive way to learn about a header.
+
+    It weakens nothing: the digest check is what decides whether the bytes are acceptable,
+    and that is unchanged by who we said we were.
+    """
+    return urllib.request.Request(url, headers={"User-Agent": "haru-pack-image-build"})
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
@@ -60,7 +72,7 @@ def main(argv: list[str]) -> int:
 
     url, want = entry["url"], entry["sha256"]
     print(f"install-uv: {asset} (uv {entry.get('version')}) from {url}")
-    with urllib.request.urlopen(url, timeout=300) as r:
+    with urllib.request.urlopen(_request(url), timeout=300) as r:
         blob = r.read()
 
     got = hashlib.sha256(blob).hexdigest()

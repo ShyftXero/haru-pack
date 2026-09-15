@@ -40,6 +40,20 @@ except ModuleNotFoundError:                     # 3.9/3.10
     import tomli as tomllib                     # type: ignore
 
 
+def _request(url: str) -> urllib.request.Request:
+    """A request with a real User-Agent.
+
+    nim-lang.org answers urllib's default `Python-urllib/3.x` with **HTTP 403**. Nothing about
+    that failure says "user agent" — it arrives as a bare Forbidden, forty seconds into an
+    arm64 image build, and reads like the pin is wrong or the host is blocked. Sending a name
+    costs nothing and removes a very confusing dead end.
+
+    It does not weaken anything: the digest check below is what decides whether these bytes
+    are acceptable, and that is unchanged by who we said we were.
+    """
+    return urllib.request.Request(url, headers={"User-Agent": "haru-pack-image-build"})
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
@@ -64,7 +78,7 @@ def main(argv: list[str]) -> int:
     entry = entries[0]
     url, want, version = entry["url"], entry["sha256"], entry.get("version", "?")
     print(f"install-nim-source: nim {version} from {url}", flush=True)
-    with urllib.request.urlopen(url, timeout=900) as r:
+    with urllib.request.urlopen(_request(url), timeout=900) as r:
         blob = r.read()
 
     got = hashlib.sha256(blob).hexdigest()
