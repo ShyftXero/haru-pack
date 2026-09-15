@@ -77,7 +77,10 @@ def main(argv: list[str]) -> int:
 
     entry = entries[0]
     url, want, version = entry["url"], entry["sha256"], entry.get("version", "?")
-    print(f"install-nim-source: nim {version} from {url}", flush=True)
+    # stderr, not stdout: this script's stdout IS its return value — the caller does
+    # `src="$(install-nim-source.py ...)"`. A progress line on stdout ends up inside the
+    # path, and the failure reads `cd: can't cd to install-nim-source: nim 2.2.6 from...`
+    print(f"install-nim-source: nim {version} from {url}", file=sys.stderr, flush=True)
     with urllib.request.urlopen(_request(url), timeout=900) as r:
         blob = r.read()
 

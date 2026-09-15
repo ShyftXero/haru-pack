@@ -83,6 +83,33 @@ def test_a_digest_mismatch_is_never_a_gap(tmp_path):
     assert "do not fall back" in r.stderr.lower()
 
 
+def test_stdout_carries_the_path_and_nothing_else(tmp_path):
+    """Regression. These scripts' stdout IS their return value — callers do `src="$(...)"`.
+
+    A progress line on stdout ended up inside the captured path, and the arm64 image build
+    failed forty seconds in with:
+
+        acquire-nim.sh: cd: can't cd to install-nim-source: nim 2.2.6 from https://...
+
+    which names neither the script's real problem nor the word "stdout". Red-path: move either
+    progress line back to stdout.
+    """
+    blob, digest = make_nim_tarball(tmp_path)
+    import platform as _p
+    plat = "linux-aarch64" if _p.machine() in ("aarch64", "arm64") else "linux-x86_64"
+    pins = write_pins(tmp_path / "pins.toml",
+                      '[[artifact]]\nkind = "nim"\nvariant = "binary"\n'
+                      f'platform = "{plat}"\nversion = "9.9.9"\n'
+                      f'sha256 = "{digest}"\nurl = "{blob.as_uri()}"\n')
+    r = run(BINARY, pins, tmp_path / "out")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().count("\n") == 0, (
+        f"stdout must be exactly one line (a path); got:\n{r.stdout}"
+    )
+    assert Path(r.stdout.strip()).is_dir(), f"stdout is not a usable path: {r.stdout!r}"
+    assert "install-nim-binary:" in r.stderr, "progress belongs on stderr, not nowhere"
+
+
 def test_a_matching_pinned_binary_installs(tmp_path):
     blob, digest = make_nim_tarball(tmp_path)
     import platform as _p
