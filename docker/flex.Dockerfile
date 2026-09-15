@@ -17,11 +17,13 @@
 # the image would mean flex quietly testing whatever the tree looked like when the image was
 # last built, which is the kind of stale result that reads as a pass.
 #
-# ARCHITECTURE: linux/amd64.
-# Not a preference — `haru_pack.toolchain` documents that choosenim publishes binaries for
-# linux x86_64, macOS x86_64/arm64 and Windows, and NOTHING for linux aarch64. On an arm64
-# host Nim has to be built from source, which is a different (and much slower) Dockerfile
-# than this one. Running flex on the arm64 box needs that work done first.
+# ARCHITECTURE: linux/amd64 and linux/arm64.
+#
+# `haru_pack.toolchain` documents that choosenim publishes binaries for linux x86_64, macOS
+# x86_64/arm64 and Windows, and NOTHING for linux aarch64. That is why arm64 needs a second
+# route to a compiler rather than a second Dockerfile — see NIM_FROM below. Both
+# architectures end up on the same Nim version on purpose, so an arm64 result and an amd64
+# result are comparable rather than merely both green.
 
 FROM debian:12-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
@@ -79,15 +81,45 @@ RUN python3 -m venv /opt/venv \
 # nimble write under it during a build. Those writes land in the container's own ephemeral
 # layer and die with `--rm`, so this does not let one package's code reach the next one's
 # toolchain. Only the /cache volume persists, and the run phase mounts that read-only.
-COPY docker/install-uv.py /tmp/
-RUN python3 /tmp/install-uv.py /tmp/pkg/src/haru_pack/pins.toml /usr/local/bin \
- && haru-pack bootstrap --minimal --yes \
- && python3 -c "import sys; sys.path.insert(0, '/tmp/pkg/src'); \
-from haru_pack import toolchain; print(toolchain.install_zig())" \
- && chmod -R a+rwX /opt/haru \
- && chmod -R a+rX /opt/venv /usr/local/bin \
- && chmod 1777 /cache /w \
- && rm -rf /tmp/pkg /tmp/install-uv.py
+# NIM_FROM is the escape hatch, and it applies to every architecture:
+#
+#   auto     (default) whatever is fastest and pinned: choosenim where upstream publishes a
+#            binary, otherwise our prebuilt one, otherwise compile from the pinned source
+#   binary   a pinned binary only — FAIL rather than quietly compiling for an hour
+#   source   compile from the pinned source; never run a Nim binary this project published
+#   system   use the nim already in the image; fetch and compile nothing
+#
+# Two of those exist for opposite reasons and both are legitimate: someone on a slow arm64
+# box wants `binary` and would rather fail than wait, and someone who declines to execute a
+# compiler this project built wants `source` and would rather wait than trust it.
+ARG NIM_FROM=auto
+
+COPY docker/install-uv.py docker/install-nim-binary.py docker/install-nim-source.py \
+     docker/acquire-nim.sh /tmp/
+# On the architecture split below: choosenim is the fast path where upstream publishes for
+# it, and `haru-pack bootstrap` is how this repo acquires it — but its table covers linux
+# x86_64 and NOT linux aarch64 (`haru_pack.toolchain` documents it). Everything else goes
+# through acquire-nim.sh, which is also where any non-default NIM_FROM lands.
+RUN set -eu; \
+    python3 /tmp/install-uv.py /tmp/pkg/src/haru_pack/pins.toml /usr/local/bin; \
+    pins=/tmp/pkg/src/haru_pack/pins.toml; \
+    arch="$(uname -m)"; \
+    if [ "$arch" = "x86_64" ] && [ "$NIM_FROM" = auto ]; then \
+        haru-pack bootstrap --minimal --yes; \
+    else \
+        sh /tmp/acquire-nim.sh "$pins" /opt/haru/nim "$NIM_FROM"; \
+        python3 -c "import sys; sys.path.insert(0, '/tmp/pkg/src'); \
+from haru_pack.bootstrap import ensure_nim_deps, find_nim; \
+nim = find_nim(); print('nim:', nim); \
+raise SystemExit(0 if ensure_nim_deps(nim) else 'nimble deps failed')"; \
+    fi; \
+    python3 -c "import sys; sys.path.insert(0, '/tmp/pkg/src'); \
+from haru_pack import toolchain; print(toolchain.install_zig())"; \
+    chmod -R a+rwX /opt/haru; \
+    chmod -R a+rX /opt/venv /usr/local/bin; \
+    chmod 1777 /cache /w; \
+    rm -rf /tmp/pkg /tmp/install-uv.py /tmp/install-nim-binary.py \
+           /tmp/install-nim-source.py /tmp/acquire-nim.sh
 
 # A build-time smoke test, as the kind of uid the harness will actually use. Without it a
 # permission mistake in the layer above surfaces minutes into someone's first flex run,

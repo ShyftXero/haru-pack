@@ -278,3 +278,35 @@ sha256 = "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"
 url = "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip"
 provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
 retrieved = "2026-09-11"
+
+# ── nim, from source ─────────────────────────────────────────────────────────
+# For build hosts choosenim does not publish a binary for — linux aarch64 is the one that
+# matters here (docs/adr/0005 §8, issue #32). `haru_pack.toolchain` documents the supported
+# set: linux x86_64, macOS x86_64/arm64, Windows. Nothing for linux arm64.
+#
+# The VERSION is chosen to match what choosenim installs on the platforms it does cover, so
+# an arm64 build and an amd64 build use the same compiler rather than two that merely both
+# work. Bump this and CHOOSENIM's pinned toolchain together, or the two arches drift.
+#
+# This tarball ships `c_code/` — 11,473 prebuilt C files — and a `build.sh`, so bootstrapping
+# needs no git clone and no network beyond this one verified download. `build_all.sh` is the
+# script that WOULD clone csources; it is deliberately not the one used.
+
+[[artifact]]
+kind = "nim"
+variant = "source"
+version = "2.2.6"
+asset = "nim-2.2.6.tar.xz"
+sha256 = "657b0e3d5def788148d2a87fa6123fa755b2d92cad31ef60fd261e451785528b"
+url = "https://nim-lang.org/download/nim-2.2.6.tar.xz"
+provenance = "https://nim-lang.org/download/nim-2.2.6.tar.xz.sha256 (the publisher's own digest file)"
+retrieved = "2026-09-15"
+
+# A `variant = "binary"` entry belongs here too, and is the PRIMARY path once it exists:
+# linux-aarch64 Nim built from the source pinned above by `.github/workflows/nim-aarch64.yml`
+# and attached to a release. It is absent today because this repository is still private, so
+# an unauthenticated fetch of a release asset cannot work; until then `auto` compiles.
+#
+# When it is added, its `provenance` must be the WORKFLOW RUN URL, not a person. That is the
+# whole difference between "a maintainer's Raspberry Pi produced this" and "here is the public
+# log of the job that produced it, from the source tarball digest above".
