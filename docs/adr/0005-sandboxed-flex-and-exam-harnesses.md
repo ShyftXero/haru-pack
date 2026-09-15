@@ -185,9 +185,38 @@ problem.
 **Correction to this ADR's first draft**, which claimed the bootstrap route made the image
 "arch-agnostic for free". It does not. `haru_pack.toolchain` documents that choosenim
 publishes binaries for linux x86_64, macOS x86_64/arm64 and Windows, and **nothing for linux
-aarch64**; on arm64 Nim has to be built from source. The image is therefore **linux/amd64**,
-and the Dockerfile says so. Running flex on the arm64 box needs a different (and much slower)
-image built first — that work is not in this ADR.
+aarch64**.
+
+**Resolved 2026-09-15 (issue #32).** The image now builds for linux/amd64 *and* linux/arm64,
+and the way it gets a compiler is governed by `NIM_FROM`:
+
+| `NIM_FROM` | what it does |
+|---|---|
+| `auto` (default) | choosenim where upstream publishes for it; otherwise our pinned prebuilt binary; otherwise compile from the pinned source |
+| `binary` | a pinned binary only — **fails** rather than quietly compiling for an hour |
+| `source` | compile from the pinned source; never run a Nim binary this project published |
+| `system` | use the Nim already present; fetch and compile nothing |
+
+Compiling is the **fallback**, not the plan. Bootstrapping Nim means compiling roughly eleven
+thousand C files, and there is no reason an arm64 user should pay that when the platforms
+choosenim covers do not. So `.github/workflows/nim-aarch64.yml` builds one, from the source
+tarball already pinned in `pins.toml`, and the result is pinned in turn.
+
+Two of those modes exist for **opposite** reasons and both are legitimate: someone on a slow
+arm64 box wants `binary` and would rather fail than wait, and someone who declines to execute
+a compiler this project built wants `source` and would rather wait than trust it. A single
+"offline" or "no-download" switch would have served only one of them.
+
+**The provenance rule is different for an artifact we publish.** Pinning a third-party
+artifact asserts "this is what the publisher published". Pinning our own asserts "this is what
+*we* built" — a weaker claim, worth very little if the only evidence is that somebody ran a
+command on hardware nobody else can see. So a `variant = "binary"` pin's `provenance` must be
+the **workflow run URL**, and a test asserts it. Building it on a maintainer's Raspberry Pi
+would have been faster and is specifically what this rules out.
+
+The build runs under QEMU on an amd64 runner today, because free arm64 runners are
+public-repo-only and this repository is not public yet. When it goes public, `runs-on` becomes
+`ubuntu-24.04-arm`, the QEMU step goes, and the job takes minutes instead of an hour.
 
 The image tag is a hash of `flex.Dockerfile` + `pins.toml`, so bumping a pin rebuilds the
 image and a stale image cannot be silently reused.

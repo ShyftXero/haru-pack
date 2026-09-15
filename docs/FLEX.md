@@ -28,6 +28,35 @@ tagged with a hash of the Dockerfile plus `pins.toml`, so bumping a pin rebuilds
 working tree is bind-mounted read-only at `/src`, so flex tests the code you are editing
 rather than a copy baked in whenever the image was last built.
 
+### Where the compiler comes from — `NIM_FROM`
+
+Both linux/amd64 and linux/arm64 are supported, but they get to Nim differently: choosenim
+publishes binaries for linux x86_64, macOS x86_64/arm64 and Windows, and **nothing for linux
+aarch64**. Both ends up on the same Nim version regardless, so an arm64 result and an amd64
+result are comparable rather than merely both green.
+
+```sh
+docker build -f docker/flex.Dockerfile --build-arg NIM_FROM=source -t haru-pack-flex:mine .
+```
+
+| `NIM_FROM` | what it does |
+|---|---|
+| `auto` (default) | choosenim where upstream publishes for it; else our pinned prebuilt binary; else compile from the pinned source |
+| `binary` | a pinned binary only — **fails** rather than quietly compiling for an hour |
+| `source` | compile from the pinned source; never run a Nim binary this project published |
+| `system` | use the Nim already present; fetch and compile nothing |
+
+`binary` and `source` exist for opposite reasons and both are reasonable. On a slow arm64 box
+you may want `binary` and prefer a clear failure to a surprise hour of compiling. If you would
+rather not execute a compiler *this project* built, you want `source` and will happily wait —
+measured on a 4-core Raspberry Pi, the full bootstrap plus image is roughly 25 minutes.
+
+The prebuilt arm64 Nim is built by `.github/workflows/nim-aarch64.yml` from the source tarball
+pinned in `pins.toml`, and its pin's `provenance` is the **workflow run URL**. That is
+deliberate: pinning a third-party artifact asserts "this is what the publisher published";
+pinning our own asserts "this is what we built", which is worth little if the only evidence is
+that somebody ran a command on hardware nobody else can see. A test enforces it.
+
 ```sh
 python tools/flex-run.py --require-rootless   # refuse a rootful daemon (docs/ROOTLESS_DOCKER.md)
 python tools/flex-run.py --no-docker          # run it on THIS host; prints what that risks
