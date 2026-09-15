@@ -5,6 +5,37 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-15
 
+### CI tests the happy path fast; the fallback is tested where it does not cost every push
+
+Giving CI a Nim toolchain (so the invariant gate stops being green on tests that never ran)
+took the job from ~30 s to ~10 min. Most of that was avoidable.
+
+Measured on the 3.13 job: installing Nim took **24 s**. The other nine and a half minutes were
+launcher compiles inside the tests — and they happened **twice**, because a `pytest -m invariant`
+step ran the claiming tests and then the full suite ran the same tests again (4m06 + 5m20).
+That step is gone. The skip-detector does not need it and is stronger in a full run, where
+every claimant is selected rather than just the marked ones.
+
+The toolchain now goes on **one** Python version. x86_64 Ubuntu on 3.13 is the target
+demographic and gets the full treatment; 3.9 stays a real floor check for the pure-Python half
+and sets `HARUPACK_INVARIANT_SKIPS_OK` explicitly, because launcher tests skipping there is by
+design rather than an accident to be caught.
+
+**The compile-from-source route is still fully tested** — in `nim-source-route.yml`, weekly and
+on demand, not on every push. It builds the image with `NIM_FROM=source`, asserts the compiler
+it produced is the version `pins.toml` names (so the two architectures cannot drift apart),
+and packs a real binary with it. It also asserts the escape hatch fails closed: with no
+`variant = "binary"` pin, `NIM_FROM=binary` must refuse rather than quietly compile for an hour.
+
+It runs on x86_64 rather than arm64 on purpose, and the workflow says so: what is under test is
+the *logic* — which route `acquire-nim.sh` picks, whether `install-nim-source.py` verifies the
+pinned tarball, whether `build.sh` bootstraps without reaching for git — none of which is
+architecture-specific. A green run there says the route works, not that arm64 works; arm64 was
+verified by hand on a Raspberry Pi.
+
+Nothing changed about *when* Nim gets compiled: `NIM_FROM=auto` on x86_64 has always taken the
+choosenim binary, and the source build only runs where choosenim publishes nothing.
+
 ### the flex sandbox image builds for arm64, and getting a compiler is now a choice
 
 `docker/flex.Dockerfile` supported linux/amd64 only, because choosenim publishes binaries for

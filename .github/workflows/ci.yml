@@ -16,9 +16,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # the floor and the ceiling of `requires-python = ">=3.9"`. 3.9 matters here:
-        # it is where tarfile's extraction filter is not the default (INV-SUPPLY-03).
-        python-version: ["3.9", "3.13"]
+        # The floor and the ceiling of `requires-python = ">=3.9"`.
+        #
+        # Only ONE of them installs Nim and compiles launchers. That work is the whole cost of
+        # this workflow — measured 2026-09-15 on the 3.13 job: installing Nim took 24 s, and
+        # the launcher compiles in the tests took the other nine and a half minutes. Doing it
+        # twice bought nothing: the Nim-gated tests exercise the launcher and the Nim/Python
+        # container layout, neither of which changes between 3.9 and 3.13.
+        #
+        # x86_64 Ubuntu is the target demographic, so that is the configuration that gets the
+        # full treatment. 3.9 stays as a real floor check for the pure-Python half — import
+        # compatibility, syntax, the stdlib differences that actually bite at 3.9.
+        include:
+          - python-version: "3.13"
+            toolchain: true      # installs Nim; runs the Nim-gated tests for real
+          - python-version: "3.9"
+            toolchain: false     # pure-Python floor check; launcher tests skip, by design
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -49,6 +62,7 @@ jobs:
           uvx "ruff@$pin" check .
 
       - name: install nim
+        if: matrix.toolchain
         # This step is what makes the invariant gate below mean anything. Without it the job
         # had no Nim at all, so every test that compiles a launcher called pytest.skip, and
         # skips are not failures: `pytest -m invariant` exited 0 with INV-CRYPTO-06,
@@ -80,21 +94,28 @@ jobs:
           dirname "$nim" >> "$GITHUB_PATH"
           "$nim" --version
 
-      - name: invariant contract
-        # Runs first and on its own so a linkage failure is legible in the log rather
-        # than buried in a full-suite summary.
-        #
-        # Two commands, because `-m invariant` selects the tests that CLAIM an invariant and
-        # deselects the linkage checks themselves — which are unmarked, and are the ones that
-        # catch an `active` invariant whose claiming test was deleted. Running only the second
-        # command, as this step used to, left that gate to the full-suite step.
-        #
-        # HARUPACK_INVARIANT_SKIPS_OK is deliberately NOT set: the second command fails if an
-        # active invariant's claimants all skipped, which is how the missing-Nim hole above
-        # would announce itself if this workflow ever loses the bootstrap step again.
-        run: |
-          uv run --no-sync pytest tests/test_invariants_enforced.py
-          uv run --no-sync pytest -m invariant
+      - name: invariant linkage
+        # The linkage checks themselves: every `active` entry is claimed by a test, every
+        # `proposed` one is not, no id is declared twice. They carry no `invariant` marker —
+        # they are ABOUT the markers — so `-m invariant` deselects them and the full suite is
+        # the only other thing that runs them. Kept as its own fast step so a linkage failure
+        # is legible in the log rather than buried in a full-suite summary. Seconds, no Nim.
+        run: uv run --no-sync pytest tests/test_invariants_enforced.py
 
       - name: full suite
+        # There used to be a separate `pytest -m invariant` step ahead of this one. It was
+        # pure duplication: `-m invariant` selects the claiming tests, and the full suite runs
+        # those same tests — so every launcher got compiled twice and the job took 4 minutes
+        # longer than it needed to (measured 2026-09-15: 4m06 + 5m20).
+        #
+        # The skip-detector does not need that step to work, and is stronger here: it fails
+        # the session when every SELECTED claimant of an active invariant skipped, and in a
+        # full run every claimant is selected. So the missing-Nim hole this workflow was fixed
+        # for still announces itself — from this step, on the toolchain job.
+        #
+        # HARUPACK_INVARIANT_SKIPS_OK is set only on the non-toolchain job, where launcher
+        # tests skip BY DESIGN. Setting it there is not a loosening: that job never claimed to
+        # check them. Leaving it unset on the toolchain job is what keeps the gate real.
+        env:
+          HARUPACK_INVARIANT_SKIPS_OK: ${{ matrix.toolchain && '' || '1' }}
         run: uv run --no-sync pytest
