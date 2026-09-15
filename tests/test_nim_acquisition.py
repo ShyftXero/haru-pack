@@ -22,6 +22,11 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+if str(REPO / "src") not in sys.path:
+    sys.path.insert(0, str(REPO / "src"))
+
+from haru_pack import tomlio  # noqa: E402
+
 DOCKER = REPO / "docker"
 BINARY = DOCKER / "install-nim-binary.py"
 SOURCE = DOCKER / "install-nim-source.py"
@@ -167,8 +172,9 @@ def test_the_source_build_refuses_an_unpinned_tarball(tmp_path):
 def test_the_real_pins_file_has_exactly_one_nim_source():
     """The repo's own pins, not a fixture. Both scripts refuse ambiguity, so this would break
     an arm64 image build rather than pick wrongly — but it should never get that far."""
-    import tomllib
-    pins = tomllib.loads((REPO / "src" / "haru_pack" / "pins.toml").read_text())
+    # `haru_pack.tomlio`, not a bare `import tomllib`: tomllib is 3.11+, this project's floor
+    # is 3.9, and CI's 3.9 job is the one that caught it. tomlio is the repo's own shim.
+    pins = tomlio.load(REPO / "src" / "haru_pack" / "pins.toml")
     src = [a for a in pins["artifact"]
            if a.get("kind") == "nim" and a.get("variant") == "source"]
     assert len(src) == 1, f"expected one pinned nim source, got {len(src)}"
@@ -186,8 +192,9 @@ def test_any_pinned_nim_binary_cites_a_build_log_as_provenance():
     not a name. Vacuous today (no binary pinned yet); it goes red the moment one is added
     with provenance like "built on the maintainer's Pi".
     """
-    import tomllib
-    pins = tomllib.loads((REPO / "src" / "haru_pack" / "pins.toml").read_text())
+    # `haru_pack.tomlio`, not a bare `import tomllib`: tomllib is 3.11+, this project's floor
+    # is 3.9, and CI's 3.9 job is the one that caught it. tomlio is the repo's own shim.
+    pins = tomlio.load(REPO / "src" / "haru_pack" / "pins.toml")
     for a in pins["artifact"]:
         if a.get("kind") == "nim" and a.get("variant") == "binary":
             prov = a.get("provenance", "")
