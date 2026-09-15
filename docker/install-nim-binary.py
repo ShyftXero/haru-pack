@@ -85,7 +85,9 @@ def main(argv: list[str]) -> int:
 
     entry = entries[0]
     url, want, version = entry["url"], entry["sha256"], entry.get("version", "?")
-    print(f"install-nim-binary: nim {version} for {want_platform} from {url}", flush=True)
+    # stderr: stdout carries the installed prefix and nothing else (see install-nim-source).
+    print(f"install-nim-binary: nim {version} for {want_platform} from {url}",
+          file=sys.stderr, flush=True)
     try:
         with urllib.request.urlopen(_request(url), timeout=900) as r:
             blob = r.read()
