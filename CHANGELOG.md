@@ -3,6 +3,57 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-09-15
+
+### the flex sandbox image builds for arm64, and getting a compiler is now a choice
+
+`docker/flex.Dockerfile` supported linux/amd64 only, because choosenim publishes binaries for
+linux x86_64, macOS x86_64/arm64 and Windows and **nothing for linux aarch64**. That left the
+arm64 box unable to run flex sandboxed at all — it could only use `--no-docker`, which is
+precisely the unprotected path the sandbox exists to stop being the default.
+
+Both architectures now work, and both land on the same Nim version, so an arm64 result and an
+amd64 result are comparable rather than merely both green.
+
+**Compiling is the fallback, not the plan.** Bootstrapping Nim means compiling roughly eleven
+thousand C files — about 25 minutes on a 4-core Raspberry Pi. Nobody on the platforms
+choosenim covers pays that, and there is no reason an arm64 user should either. So
+`.github/workflows/nim-aarch64.yml` builds one from the source tarball pinned in `pins.toml`,
+and the result gets pinned in turn.
+
+**`NIM_FROM` is the escape hatch**, and two of its modes exist for opposite reasons:
+
+| `NIM_FROM` | what it does |
+|---|---|
+| `auto` (default) | choosenim where upstream publishes for it; else our pinned prebuilt binary; else compile from the pinned source |
+| `binary` | a pinned binary only — fails rather than quietly compiling for an hour |
+| `source` | compile from the pinned source; never run a Nim binary this project published |
+| `system` | use the Nim already present; fetch and compile nothing |
+
+Someone on a slow arm64 box wants `binary` and would rather fail than wait. Someone who
+declines to execute a compiler this project built wants `source` and would rather wait than
+trust it. A single "no-download" switch would have served only one of them.
+
+**A gap and a mismatch are different answers.** "No pin for this platform" exits 3 and the
+caller may fall back to a source build. "There is a pin and the bytes do not match it" exits 1
+and nothing falls back — quietly recompiling instead would erase exactly the supply-chain
+signal worth keeping.
+
+**Provenance for an artifact we publish is held to a different standard.** Pinning a
+third-party artifact asserts "this is what the publisher published". Pinning our own asserts
+"this is what *we* built" — weaker, and worth very little if the only evidence is that someone
+ran a command on hardware nobody else can see. So a `variant = "binary"` pin's `provenance`
+must be the workflow run URL, and a test enforces it. Building it on a maintainer's Pi would
+have been faster and is specifically what this rules out.
+
+Verified on the arm64 box: image built, `Nim Compiler Version 2.2.6 [Linux: arm64]`, and
+`certifi` packed and ran inside the sandbox (13.3 MB, build 44.4 s, run 10.8 s).
+
+Two small things found on the way, both of which produced failures that named nothing useful:
+nim-lang.org answers urllib's default User-Agent with **HTTP 403**, and the installer scripts
+were printing progress to stdout when stdout *is* their return value — so a captured path came
+back as `install-nim-source: nim 2.2.6 from https://...` and the build died on `cd`.
+
 ## 2026-09-14
 
 ### flex: two things the first top25 run taught us
