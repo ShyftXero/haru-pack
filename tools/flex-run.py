@@ -344,8 +344,14 @@ def choose_runner(a, count: int) -> tuple:
     if a.max_cache_gb:
         # Before the matrix starts, never during it: reclaiming space underneath a run in
         # flight turns a disk problem into a pile of confusing package failures.
-        sandbox.enforce_cache_budget(a.max_cache_gb, image,
-                                     log=lambda m: print(m, file=sys.stderr))
+        try:
+            sandbox.enforce_cache_budget(a.max_cache_gb, image,
+                                         log=lambda m: print(m, file=sys.stderr))
+        except ValueError as e:
+            # A refused budget is a usage error, not a crash. A traceback here would bury
+            # the one sentence that explains what the flag was about to cost.
+            print(f"\nflex: {e}", file=sys.stderr)
+            return None, ""
     return DockerRunner(image, os.getuid(), os.getgid()), f"in containers ({image})"
 
 
@@ -426,7 +432,27 @@ def verdict(r: dict) -> str:
     return "ok" if ok else "FAIL"
 
 
+def line_buffer_stdout() -> None:
+    """Make progress visible when stdout is a file or a pipe.
+
+    Python block-buffers stdout when it is not a terminal, so `flex-run.py > log` showed
+    NOTHING for the whole of an 18-minute top25 run and then everything at once. A harness
+    whose output only arrives after it finishes is indistinguishable from a hung one, and the
+    first thing anyone does about a hung harness is kill it.
+
+    Line buffering rather than `flush=True` at each call site: the per-package line is not the
+    only thing worth seeing as it happens, and one setting cannot be forgotten at a new
+    `print`.
+    """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass            # not a TextIOWrapper (redirected oddly, or already replaced)
+
+
 def main() -> int:
+    line_buffer_stdout()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--list", dest="which", choices=["top25", "hard_targets", "all"],

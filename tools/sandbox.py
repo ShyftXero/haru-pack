@@ -307,8 +307,17 @@ def _du_bytes(image: str, volume: str, timeout: int = 300) -> int:
 
 
 def volume_exists(volume: str = CACHE_VOLUME) -> bool:
-    return subprocess.run(["docker", "volume", "inspect", volume],
-                          capture_output=True, timeout=60).returncode == 0
+    """False when docker is absent, rather than raising.
+
+    The cache accounting is reachable on boxes with no docker at all — `--cache-info` still
+    has the host caches to report, and CI runs the tests around it. "There is no such volume"
+    is the correct answer there, not a FileNotFoundError.
+    """
+    try:
+        return subprocess.run(["docker", "volume", "inspect", volume],
+                              capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def clean_path(text: str) -> Path:
@@ -390,6 +399,21 @@ def flush_volume(volume: str = CACHE_VOLUME, image: str | None = None) -> tuple:
     return r.returncode == 0, freed
 
 
+#: Refuse a budget below this. Not arbitrary — see `enforce_cache_budget`.
+MIN_BUDGET_GB = 1.0
+
+#: What emptying the sandbox volume actually costs, measured on the top25 run 2026-09-14.
+#: Pre-wrapped: this is printed to a terminal, and a 400-character single line is how a
+#: message that took real measurement to write gets skimmed past.
+FLUSH_COST = (
+    "the volume holds haru-pack's XZ-compressed uv (55.6 MB -> 14.2 MB at preset 9),\n"
+    "  which is recomputed on the next build if it is gone. Measured across a top25\n"
+    "  matrix: builds took 207-213s with a cold volume and 70-83s with a warm one —\n"
+    "  about 140s per build, paid by every build that runs before the first one\n"
+    "  repopulates it."
+)
+
+
 def enforce_cache_budget(max_gb: float, image: str, log=print) -> None:
     """Bring the sandbox volume under `max_gb` BEFORE a run starts.
 
@@ -402,9 +426,23 @@ def enforce_cache_budget(max_gb: float, image: str, log=print) -> None:
     than a bug. Most of this volume is haru-pack's OWN cache at `/cache/haru-pack` (the
     XZ-compressed uv binaries), which uv neither owns nor knows about; uv's cache is the
     smaller `/cache/uv`. Prune is still tried first because it is cheap and, on a volume that
-    has done a lot of dependency resolution, it is the non-destructive win. When it is not
-    enough the volume goes — it is a cache, it is ours, and the next run refills what it needs.
+    has done a lot of dependency resolution, it is the non-destructive win.
+
+    THE FLOOR EXISTS BECAUSE THIS VOLUME IS SMALL AND EXPENSIVE, NOT SMALL AND IDLE
+
+    A budget under `MIN_BUDGET_GB` is refused rather than honoured. That looks paternalistic
+    until you have paid for it: the first implementation of this was tested with a 1 MB
+    budget, which removed the volume, and the next top25 run spent 207-213s on each of its
+    first four builds instead of 70-83s. The saving would have been 13.5 MB. Nothing about
+    the number "0.001" warns you that it trades ten minutes of CPU for a rounding error of
+    disk, so the tool says it instead.
     """
+    if max_gb < MIN_BUDGET_GB:
+        raise ValueError(
+            f"--max-cache-gb {max_gb:g} is below the {MIN_BUDGET_GB:g} GB floor.\n\n"
+            f"  That budget would empty the sandbox cache to save almost nothing —\n"
+            f"  {FLUSH_COST}\n\n"
+            f"  If you actually want it gone, say so directly: --flush-cache sandbox.")
     if not volume_exists():
         return
     size = _du_bytes(image, CACHE_VOLUME)

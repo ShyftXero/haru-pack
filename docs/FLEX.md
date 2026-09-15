@@ -126,6 +126,19 @@ rebuildable, so `--max-cache-gb` may remove it. `~/.cache/uv` is shared with eve
 the machine and most of it has nothing to do with flex, so it is only ever reported, and only
 ever *pruned*, and only when you type `--flush-cache host`. `--max-cache-gb` never touches it.
 
+**That volume is small and expensive, not small and idle.** It holds haru-pack's
+XZ-compressed uv (55.6 MB → 14.2 MB at preset 9), which is recomputed if it is gone. Measured
+across a top25 matrix:
+
+| sandbox cache | build time |
+|---|---|
+| cold (volume removed) | 207–213 s |
+| warm | 70–83 s |
+
+About 140 s per build, paid by every build that runs before the first one repopulates it — to
+reclaim 13.5 MB. So `--max-cache-gb` refuses a budget under 1 GB and says what it would have
+cost; `--flush-cache sandbox` still empties it, because that one is you saying you meant it.
+
 ## Proving the payload carries its dependencies
 
 ```sh

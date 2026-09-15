@@ -5,6 +5,30 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-14
 
+### flex: two things the first top25 run taught us
+
+Both found by running the matrix for real rather than by reading the diff.
+
+**`--max-cache-gb` treated a toolchain cache as reclaimable bulk.** The sandbox volume is
+13.5 MB, which reads like nothing worth keeping — but it holds haru-pack's XZ-compressed uv
+(55.6 MB → 14.2 MB at preset 9), recomputed from scratch if it is gone. Measured across a
+top25 run: builds took **207–213 s with a cold volume and 70–83 s with a warm one**, about
+140 s per build, paid by every build that starts before the first one repopulates it. To
+reclaim 13.5 MB.
+
+That was not hypothetical — the volume had been emptied by testing the budget with
+`--max-cache-gb 0.001`, which is why the first four builds of that run were three times
+slower than the other twenty-one. Budgets under 1 GB are now refused, with the measurement in
+the message. `--flush-cache sandbox` still empties it and now prints the same cost, because
+that flag is someone saying they meant it.
+
+**Progress was invisible when stdout was redirected.** Python block-buffers stdout when it is
+not a terminal, so `flex-run.py > log` showed nothing at all for an 18-minute top25 run and
+then everything at once. A harness whose output only arrives after it finishes is
+indistinguishable from a hung one, and the first thing anyone does about a hung harness is
+kill it. stdout and stderr are now line-buffered — one setting, rather than a `flush=True`
+that the next `print` forgets.
+
 ### flex: an `importable` probe style, import names that are found rather than guessed
 
 Three rungs now, cheapest first — `importable` (flex default), `smoke`
