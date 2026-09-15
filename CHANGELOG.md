@@ -18,8 +18,14 @@ amd64 result are comparable rather than merely both green.
 **Compiling is the fallback, not the plan.** Bootstrapping Nim means compiling roughly eleven
 thousand C files — about 25 minutes on a 4-core Raspberry Pi. Nobody on the platforms
 choosenim covers pays that, and there is no reason an arm64 user should either. So
-`.github/workflows/nim-aarch64.yml` builds one from the source tarball pinned in `pins.toml`,
-and the result gets pinned in turn.
+`.github/workflows/nim-aarch64.yml` builds one from the source tarball pinned in `pins.toml`.
+
+The pinning half is not done yet, so arm64 still compiles under `auto`: the workflow uploads
+the tarball and prints its sha256 with an instruction to add the pin by hand — it never writes
+`pins.toml` — and `pins.toml` has a comment where a `variant = "binary"` entry goes rather
+than the entry. While this repository is private an unauthenticated fetch of a release asset
+cannot work, so a pin would point at something nobody could download. When it lands its
+`provenance` must be the workflow run URL, and a test is already waiting to enforce that.
 
 **`NIM_FROM` is the escape hatch**, and two of its modes exist for opposite reasons:
 
@@ -142,7 +148,12 @@ end: it runs each package's **own test suite**.
 
 Both harnesses now give every package its own throwaway containers, by default. The build
 phase gets the network and the shared cache; the run phase gets a throwaway cache of its own
-and never sees the shared one, so one package cannot leave anything for the next to find. The
+and never sees the shared one, so nothing a package writes into the cache can reach the next
+package's **run**. Its next package's *build* is another matter: the build cache is shared
+read-write across packages on purpose, so a 25-package run does not fetch the same toolchain
+25 times, and a malicious sdist build backend can therefore write into a cache a later build
+reads. That residual risk is stated rather than papered over — it lives in a docker volume,
+never on your filesystem, and `docker volume rm haru-flex-cache` resets it. The
 repository is bind-mounted **read-only**, so flex still tests your working tree rather than a
 stale copy baked into an image. `--no-docker` still runs on the host, after printing what that
 puts at risk; docker being missing is an error, never a silent fallback

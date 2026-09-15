@@ -11,9 +11,13 @@
   *Sandboxed path* — the harness running each package's build and run inside its own
   throwaway container. *Build phase* / *run phase* — the two containers a single package
   gets (§4).
-- Invariants: `INV-SANDBOX-01` (container by default, host path opt-in and announced),
-  `INV-SANDBOX-02` (a thick verification run has no network interface). Both are claimed
-  by tests in `tests/test_sandbox.py` whose Red-path was walked. Partially answers
+- Invariants: `INV-SANDBOX-01` (no execution path around the sandbox runner, and a container
+  argv that keeps the host out of reach), `INV-SANDBOX-02` (asked for an offline run, the argv
+  builder emits `--network none` and a cold cache). Both are claimed by tests in
+  `tests/test_sandbox.py` whose Red-path was walked — but walked against the argv builder and
+  the harnesses' AST, **not** against the call sites that choose a runner or a mode, so the
+  headline "runs in a container" is design intent held up by code reading rather than a
+  machine-checked fact (§10; `INVARIANTS.md` carries the exact wording). Partially answers
   `INV-TRUST-02`, which stays `proposed` — this ADR contains the blast radius of
   *haru-pack's own harnesses*, it does not make `haru-pack build` safe against an
   untrusted tree for an operator (§9).
@@ -39,6 +43,11 @@ download rank, not by audit.
 Both harnesses execute third-party code only inside a container, by default. The host path
 still exists behind `--no-docker`, because a harness you cannot debug is a harness people
 route around — but it announces exactly what it is about to do (§6).
+
+That paragraph describes what the code does; it is not what the tests check. The claiming
+tests cover the argv the runner builds and the absence of a second execution path, not the
+call sites that select a runner — §10 is explicit about which half is which, and the
+distinction matters because the unchecked half is where a regression would hide.
 
 ## 3. `tools/sandbox.py` — one runner, and a pure function at the center
 
@@ -66,7 +75,7 @@ The rest of the module is thin:
 | `run(...)` | `subprocess.run` over `docker_argv` |
 | `container_env() -> dict` | HOME / cache variables, defined once for both phases |
 | `host_warning(n, what) -> str` | the `--no-docker` banner text |
-| `image_tag(dockerfile, pins) -> str` | the content-derived tag (§8) |
+| `image_tag(*inputs) -> str` | the content-derived tag (§8) |
 
 Every container gets `--rm`, `--cap-drop=ALL`, `--security-opt no-new-privileges` and
 `-u <uid>:<gid>`. Exactly three things are mounted: the per-package work directory
@@ -141,8 +150,9 @@ are a hazard only when the reader cannot tell which one produced the number in f
 ## 6. Enforcement, and the escape hatch
 
 - Sandboxed is the default for both tools.
-- `--no-docker` runs on the host and prints, to stderr, before anything executes, a banner
-  naming the package count and what is in scope.
+- `--no-docker` runs on the host and prints, to stderr, a banner naming the package count and
+  what is in scope. It is written to print before anything executes; what a test checks is the
+  banner's *contents*, not when it is emitted (§10).
 - Docker missing **without** `--no-docker` is a hard error that names the flag. There is no
   silent fallback to the host path: a silent fallback is how a safe default quietly stops
   being the default, and nobody finds out until they read the code.
@@ -200,7 +210,15 @@ and the way it gets a compiler is governed by `NIM_FROM`:
 Compiling is the **fallback**, not the plan. Bootstrapping Nim means compiling roughly eleven
 thousand C files, and there is no reason an arm64 user should pay that when the platforms
 choosenim covers do not. So `.github/workflows/nim-aarch64.yml` builds one, from the source
-tarball already pinned in `pins.toml`, and the result is pinned in turn.
+tarball already pinned in `pins.toml`.
+
+The second half of that — pinning the result — has **not happened yet**, and `auto` therefore
+still compiles on arm64. The workflow uploads the tarball and prints its sha256 with an
+instruction to add the pin by hand; it does not write `pins.toml`, and `pins.toml` has no
+`variant = "binary"` entry, only a comment saying where one goes. That is on purpose for now:
+while this repository is private an unauthenticated fetch of a release asset cannot work, so a
+pin pointing at one would be a pin nobody can use. The intended end state is a binary pin that
+is the primary path, with compiling behind it.
 
 Two of those modes exist for **opposite** reasons and both are legitimate: someone on a slow
 arm64 box wants `binary` and would rather fail than wait, and someone who declines to execute
@@ -239,23 +257,54 @@ image and a stale image cannot be silently reused.
 
 ## 10. Invariants
 
-### INV-SANDBOX-01
-The flex and exam harnesses execute third-party package code only inside a container. The
-host path is opt-in via an explicit flag and prints, before executing anything, a warning
-naming what is about to run and what is in scope.
+`INVARIANTS.md` is the source of truth for both of these and is narrower than this ADR's first
+draft was. What follows is the narrowed form; where the two disagree, that file wins.
 
-*Red-path:* flip the default so the host path runs without the flag, or delete the banner —
-the claiming test goes red on either.
+### INV-SANDBOX-01
+`tools/flex-run.py` and `tools/exam.py` contain no path that executes a built artifact outside
+the sandbox runner — the `subprocess.run([str(exe)], …)` shape appears only inside `HostRunner`
+— and the container argv the runner builds never mounts the docker socket, mounts this
+repository read-only or not at all, gives stranger code no writable host path but the
+per-package work directory, and never mounts the shared cache into a phase where package code
+runs. `sandbox.preflight` raises when docker is unavailable, naming `--no-docker`, rather than
+returning a host fallback, and `sandbox.host_warning` names `$HOME`, SSH keys and credentials.
+
+*Red-path:* mount the docker socket, drop `:ro` from the repository mount, mount the shared
+cache into the run phase, or move the `subprocess.run([str(exe)], …)` line out of `HostRunner`
+— a claiming test goes red on each.
+
+**What is not covered: the call sites.** What is checked is the argv, the shape of two
+functions' output, and the absence of a second execution path. Nothing asserts that the
+harness calls `preflight` before it picks a runner, that the banner is printed before the
+first build rather than after it, or that `DockerRunner` is what gets selected by default.
+This ADR originally said the harnesses "execute third-party package code only inside a
+container" and that the warning prints before anything is built or run. Both were ordinary
+code reading wearing a machine-checked fact's clothes, and both are gone from the Statement.
+Treat the gap as work outstanding, not as a nuance.
 
 ### INV-SANDBOX-02
-A thick binary's verification run is executed with no network interface at all, against a
-cache that has never been used.
+Asked for a run with no network and a cold cache, `sandbox.docker_argv` produces an argv that
+gives the container `--network none` — no interface at all, not a blocked one — and a fresh
+anonymous cache volume rather than the warm shared one; asked for a networked run it produces
+`--network bridge`, never `--network host`.
 
-*Red-path:* change the run phase's `network=False` to `True` for the thick tier, or reuse
-the warm named cache instead of a cold volume. The claiming test reads the argv `docker_argv`
-produces and goes red on either.
+*Red-path:* replace the network expression **inside `docker_argv`** with a constant, or hand
+back the warm named cache for a cold request. The claiming tests read the argv `docker_argv`
+produces and go red on either.
+
+**What is not covered: the call site.** Which runs are the offline ones is decided in
+`tools/flex-run.py` — `network=not offline` and `cache=sandbox.CACHE_COLD` — and no test reads
+either line. The claiming tests pass `network=False, cache=CACHE_COLD` in as their own fixture
+and assert those values came back out, so what is proved is that `docker_argv` is faithful to
+the mode it is handed, not that a thick run is ever handed the offline mode. Change
+`not offline` to `True` and every test in this family stays green while `results.json` keeps
+printing `carried`. Closing it needs a test that reads the call site — the shape
+`test_no_harness_executes_a_built_binary_except_through_the_sandbox` already uses for a
+different rule — or an end-to-end run that watches a thick binary fail to reach the network.
 
 Both are claimed by `tests/test_sandbox.py`, which asserts over `docker_argv()` output and
-needs neither docker nor a network. A call-site test in the style of
-`tests/test_stage_callsites.py` additionally asserts that no harness file executes a built
-binary except through `sandbox`.
+needs neither docker nor a network. Exactly one rule in this section is checked anywhere other
+than the argv builder: `test_no_harness_executes_a_built_binary_except_through_the_sandbox`
+reads the harness files themselves and asserts none of them executes a built binary except
+through `sandbox`. It is deliberately the one that matters most, and it is also the only one,
+which is the shape of the gap described above.

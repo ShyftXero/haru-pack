@@ -63,28 +63,48 @@ The AI row is deliberate too. It is the actor this repo has actual incident hist
 |---|---|---|---|
 | B0 | project source → **build host** | `copytree`, `uv sync --project`, `[[bundle]]` argv | **[V]** *no boundary*: project-controlled code runs, `INV-TRUST-01`/`02` (proposed) |
 | B1 | project source → payload | `shutil.copytree` with an exclusion list | **[V]** filtered by NAME only; symlinks are dereferenced, `INV-PAYLOAD-01` + `INV-TRUST-06` (proposed) |
-| B2 | payload → launcher overlay | append + 68-byte footer | **[V]** build-time digest only, `INV-PAYLOAD-02` |
-| B3 | overlay → running process | launcher reads its own image and stages it | **[V]** *unverified at runtime*, `INV-LAUNCH-01` (proposed) |
-| B4 | environment → launcher behavior | `HARUPACK_DEV_STAGE` (dev-only), `HARU_SECRET` (SECRET-knob canary), `HARUPACK_GEO`, PATH | **[V]** `INV-LAUNCH-02`/`04`, `INV-CANARY-01` |
-| B5 | network → build host | Nim, uv, python-build-standalone downloads | **[V]** TLS only, no digest, `INV-SUPPLY-01` (proposed) |
-| B6 | network → customer machine | `thin` tier fetches uv at runtime | **[V]** TLS only, no digest, `INV-SUPPLY-01` (proposed) |
-| B7 | archive → filesystem | tar/zip extraction on both host and target | **[V]** host filtered (`INV-SUPPLY-03`); target relies on `zippy`, **[R]** unverified here |
-| B8 | secret → key | PBKDF2-HMAC-SHA256, 200k iterations | **[V]** `INV-CRYPTO-03` |
-| B9 | container → plaintext | AES-256-GCM, AAD = fixed magic | **[V]** body authenticated, header not: `INV-CRYPTO-04` (proposed) |
-| B10 | staging cache → execution | `<cache>/<key>/.ready` short-circuit | **[V]** trust-on-first-use, no invariant yet |
+| B2 | payload → launcher overlay | append + footer (68B v1, 116B v2) | **[V]** digest checked at build (`INV-PAYLOAD-02`) and again at launch (`INV-LAUNCH-01`); a footer, not a signature |
+| B3 | overlay → running process | launcher reads its own image and stages it | **[V]** digest verified before staging or executing, `INV-LAUNCH-01`; recomputable from the same footer — `INV-LAUNCH-03` (proposed) is the fix |
+| B4 | environment → launcher behavior | `HARUPACK_DEV_STAGE` (dev-only), the SECRET knob's per-build canary env name, PATH | **[V]** `INV-LAUNCH-02`/`04`, `INV-CANARY-01`/`03`; location reads no env at all (`INV-GEO-01`) |
+| B5 | network → build host | Nim, uv, python-build-standalone downloads | **[V]** the choosenim installer, the zig archive, the uv asset and the interpreter are each pinned by digest in this repo, `INV-SUPPLY-01`; the Nim toolchain choosenim then fetches is verified by choosenim, not here |
+| B6 | network → customer machine | `thin` tier fetches uv at runtime | **[V]** checked against the `uv_sha256` the build baked into the manifest, `INV-SUPPLY-05`/`INV-SUPPLY-01`; TLS unpinned |
+| B7 | archive → filesystem | tar/zip extraction on both host and target | **[V]** host filtered (`INV-SUPPLY-03`); target entry paths refused by our own check before extraction (`INV-STAGE-02`), with `zippy`'s own check behind it |
+| B8 | secret → key | PBKDF2-HMAC-SHA256, 200k iterations | **[V]** `crypto.derive_key`, `KDF_ITERS`; no invariant pins the KDF parameters, so this row is code observation, not contract |
+| B9 | container → plaintext | AES-256-GCM, AAD = the whole header except the tag | **[V]** header and body both authenticated, `INV-CRYPTO-04` |
+| B10 | staging cache → execution | `.ready` token + per-file digests, re-verified every launch | **[V]** `INV-STAGE-01`; no defence against an attacker already running as the same user |
 
 ## What the licensing feature actually does
 
 Stated plainly because the sales-shaped version of this is easy to write and wrong.
 
-- **Machine and user binding are real.** The identity is folded into the KDF, so a
-  different machine id yields a different key and decryption fails. **[V]**
-  `INV-CRYPTO-03`. Caveat: `/etc/machine-id` is a writable file. This binds to a value
-  the target *reports*, not to hardware.
-- **Expiry and geo are not enforcement.** Geo reads `HARUPACK_GEO` — the environment
-  variable of the person being restricted. Expiry reads the local clock, also theirs.
-  Both run after decryption, inside a binary they control. **[V]** They raise the effort
-  bar and make accidental misuse visible. They stop nobody who is trying.
+- **Machine and user binding are both cryptographic, and they are not equally strong.**
+  Each value is folded into the KDF, so a wrong value yields a wrong key and decryption fails
+  outright rather than being checked and waved through. **[V]** `crypto.derive_key` appends
+  each to the PBKDF2 password, and `INV-CRYPTO-03` is what makes a wrong key a hard
+  authentication failure rather than a check something could skip. No invariant pins the KDF
+  parameters themselves. What the two bind *to* is where they diverge, and until 2026-09-15
+  this section hedged `/etc/machine-id` carefully and gave the weaker of the two no hedge at
+  all, which is how a reader concluded the unhedged one was solid:
+  - *Machine.* `/etc/machine-id` on Linux is a root-writable file; on Windows and macOS
+    `cryptbox.machineId` shells out to `reg` and `ioreg` by bare name, so the answer is
+    only as trustworthy as the target's PATH. **[V]** `launcher/cryptbox.nim`. It binds to
+    a value the target *reports*, not to hardware — but reporting a different one takes
+    deliberate work.
+  - *User.* `cryptbox.currentUser()` is `getEnv("USER")` with a `USERNAME` fallback. **[V]**
+    `launcher/cryptbox.nim:83`. That is a string the licensee types: `USER=alice ./app` is
+    the whole attack, with no patching, no root and no debugger. `--user` is a label on the
+    key, not a binding to a person.
+- **Expiry is not enforcement. Geo is enforcement only against someone who is not trying.**
+  Expiry reads the local clock, which belongs to the person being restricted, and runs after
+  decryption inside a binary they control. **[V]** Geo no longer reads an environment
+  variable at all: the `HARUPACK_GEO` bypass is gone, the policy travels inside the
+  ciphertext, and `tests/test_canary.py` fails the build if a launcher source reads a plain
+  `HARU…` env name again (the one whitelisted exception is the dev-only `HARUPACK_DEV_STAGE`,
+  which is not in a release binary). **[V]** `INV-GEO-01`, `INV-CANARY-03`. It resolves online and
+  fails closed offline, which is a real check — but the HTTP call happens on the end user's
+  own machine, so their proxy, CA trust and DNS decide what it returns. Real against a casual
+  user, advisory against a determined one; see `INV-GEO-01`'s honest limit, which is
+  load-bearing. Neither field stops someone who is trying.
 - **The embedded-secret mode is obfuscation.** The secret is XOR'd against a constant
   string published in this repo's source. **[V]** The code says so; make sure the sales
   page does too.
@@ -162,7 +182,8 @@ bypassed (lotek measured a security gate overridden 54 times against 6 successfu
    the first draft of this very section. Both times the id was illustrative rather than
    dishonest, which is the point: the scanner does not need to guess intent.
 3. **`Status: proposed`** — a gap gets an entry with zero claiming tests, rather than
-   silence or an aspirational sentence. Eight of the nineteen entries are proposed.
+   silence or an aspirational sentence. Fourteen of the 113 entries are proposed as of
+   2026-09-15, seven of them the `INV-TRUST-*` family.
 4. **Mandatory Red-path** — an invariant you cannot describe breaking is not an invariant.
    This is the field that converts "we test that" into "here is how you would see it fail."
 5. **`TestGuardCanFail`** — the linkage checker is fed synthetic violating input, so a
@@ -174,21 +195,72 @@ strictly more than this repo had, and strictly less than proof.
 
 ## Known gaps, ranked
 
-1. The launcher does not verify its payload before executing it. `INV-LAUNCH-01`/`03`.
-2. Nothing downloaded is digest-checked, on the build host or the target. `INV-SUPPLY-01`.
-3. `HARUPACK_DEV_STAGE` bypasses staging, decryption, and licensing in release builds.
-   `INV-LAUNCH-02`.
-4. The staging cache is trust-on-first-use and keyed on 64 bits taken from the binary's own
-   footer. No invariant yet.
-5. The Nim launcher has no error handling; malformed manifests surface as raw tracebacks.
-   No invariant yet.
-6. Nim library versions are unpinned, so the shipped crypto implementation is whatever
-   resolved on build day. `INV-SUPPLY-02`.
-7. The project being packaged is trusted absolutely. Its build backend runs during
-   dependency staging, its `[[bundle]]` argv runs unannounced, its symlinks are followed
-   out of the tree, its `index-url` chooses where the shipped wheels come from, and an
-   `app_subdir` of `.` puts its files where the launcher's control files live.
-   `INV-TRUST-01` through `-07`, all proposed, six of the seven demonstrated on
-   2026-09-11 by the `trojan` busybody persona.
-8. No cross-implementation interop test — `INV-CRYPTO-02` compares parsed byte offsets,
-   which catches drift but does not run the Nim decryptor. Needs Nim in CI.
+Re-cut against the tree on 2026-09-15. Three entries that used to sit at the top of this list
+described the repo as it stood before the fixes of 2026-09-09 and are gone: the launcher not
+verifying its payload, a `HARUPACK_DEV_STAGE` bypass in release builds, and the launcher having
+no error handling. `INV-LAUNCH-01`, `-02` and `-06` are all `active` with walked Red-paths. What
+replaces them is narrower, and still real.
+
+1. **The payload digest is not a MAC.** `INV-LAUNCH-01` is active — the launcher refuses to
+   stage or execute a payload whose SHA-256 does not match the digest in its own footer — but
+   that digest lives in the same footer an attacker would edit, so whoever rewrites the payload
+   recomputes the 32 bytes and still executes. What the check buys is detection of corruption,
+   truncation and naive edits, plus a precondition for the real fix. Tamper-evidence needs a
+   signature (`INV-LAUNCH-03`, proposed) or Authenticode over the overlay on Windows; ELF output
+   has no equivalent.
+2. **The project being packaged is trusted absolutely.** Its build backend runs during
+   dependency staging, its `[[bundle]]` argv runs unannounced, its symlinks are followed out of
+   the tree, its `index-url` chooses where the shipped wheels come from, and an `app_subdir` of
+   `.` puts its files where the launcher's control files live. `INV-TRUST-01` through `-07`, all
+   proposed, six of the seven demonstrated on 2026-09-11 by the `trojan` busybody persona. This
+   is the only gap on this list that has been walked end to end by an attacker.
+3. **Digest pinning stops at the first hop.** `INV-SUPPLY-01` names what this repo pins — the
+   choosenim installer, the zig archive, the uv release asset and the python-build-standalone
+   interpreter — and `INV-SUPPLY-05` covers the thin tier's runtime `uv` fetch, so the blanket
+   "nothing is digest-checked" is no longer true. Three things are still unverified *by this
+   repository*, and two of them reach shipped artifacts:
+   - **The Nim compiler, on a host build.** Only the choosenim *installer* is verified against
+     `pins.toml` (`toolchain.py`); choosenim then downloads the whole toolchain on its own terms
+     and verifies it on its own terms, and nothing here hashes what it wrote. Blast radius: that
+     compiler builds the launcher in every binary shipped afterwards. The one exception is the
+     aarch64 docker image, where `docker/install-nim-binary.py` / `install-nim-source.py` fetch a
+     Nim pinned in `pins.toml` and refuse an unpinned one — it exists because choosenim publishes
+     no `linux_arm64` asset at all.
+   - **The nimble libraries linked into the launcher.** `bootstrap.NIM_DEPS` pins zippy, puppy,
+     parsetoml and nimcrypto to exact versions via `nimble install pkg@ver`. A version is not a
+     digest, and a compromised nimble package at the pinned version is fetched and linked.
+   - **The PyPI sdists `tools/exam_fetch.py` downloads**, read straight off `urlopen` with no
+     hash. This one is a dev tool and its bytes do not enter a customer deliverable.
+4. **Those nimble pins are requested, not enforced.** `INV-SUPPLY-02` stays `proposed` for
+   exactly this: `build.compile_launcher` runs a bare `nim c` with no `--nimblePath`, no lockfile
+   and no project `.nimble`, so Nim resolves each import to the HIGHEST version present in the
+   multi-version package directory. Pinning the installer controls which versions arrive, not
+   which one links. Nothing verifies which nimcrypto is inside a shipped launcher, so any
+   statement about the launcher's crypto implementation is about what was requested.
+5. **The staging cache cannot defend against the same user.** `INV-STAGE-01` retired the
+   trust-on-first-use short circuit: a stage is reused only if it is a user-owned, non-group-
+   and non-world-writable directory whose `.ready` names this exact payload digest and whose
+   every recorded file still hashes correctly. Residual and unclosable here — every input to
+   that token is readable from the binary being attacked, so an attacker already running as the
+   same user rewrites the tree and regenerates the token together. Closing it needs an OS
+   boundary, not a checksum. Ownership and mode are POSIX-only; there is no Windows ACL
+   equivalent in the check.
+6. **The Nim side is now run by CI; what is left is how little of it the tests cover.**
+   `tests/test_crypto_hardening.py` compiles `cryptbox.nim` and runs the real decryptor against
+   Python-written containers, and `tests/test_geo_gate.py` compiles and runs the location gate.
+   Both `pytest.skip` when `shutil.which("nim")` is None, which used to mean they skipped on CI.
+   That is fixed: `.github/workflows/ci.yml` has an `install nim` step that runs `haru-pack
+   bootstrap --minimal --yes`, resolves the compiler through `bootstrap.find_nim()`, fails the
+   job if none is findable, and appends its directory to `$GITHUB_PATH`. **[V]** read off the
+   workflow 2026-09-15. A regression to the old state cannot pass as green either:
+   `tests/_invariant_execution.py` fails the session when every selected claimant of an active
+   invariant skipped, and the workflow deliberately does not set `HARUPACK_INVARIANT_SKIPS_OK`.
+   **[V]** Two residuals, neither of them the environment. First, that guard fires only when
+   *all* of an invariant's selected claimants skipped, so one skipped test beside a sibling that
+   ran is invisible to it. Second: what CI now runs is a set of per-behavior slices, not the
+   launcher as a whole — these two files cover the container format, the decryptor and the
+   location gate, and `test_stage_hardening.py`, `test_shred.py`, `test_remote_fetch.py`,
+   `test_ephemeral_safe.py` and `test_launcher_integrity.py` each compile a launcher for their
+   own. No test in the suite builds a binary and runs it end to end — that proof lives in
+   `tools/flex-run.py`, which needs a toolchain and minutes and which CI does not run — and
+   `INV-CRYPTO-02` is still a parse of byte offsets rather than an execution.

@@ -77,8 +77,10 @@ include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproj
 
 [dependency-groups]
 # ruff is pinned EXACTLY, and this pin is the single source of truth — CI and
-# scripts/cut-release.sh both lint via `uv run --group dev ruff`, never via whatever `ruff`
-# happens to be on PATH (INV-CI-01).
+# scripts/cut-release.sh both `sed` the pin out of this file and lint via `uvx "ruff@$pin"`,
+# never via whatever `ruff` happens to be on PATH (INV-CI-01). `uvx` and not
+# `uv run --group dev ruff`: the latter installs the linter into the project environment the
+# tests then run in, so the lint step would mutate what the suite is about to measure.
 #
 # Why exact: ruff's DEFAULT rule set grows between releases, so an unpinned linter fails on
 # code it passed yesterday with no change to the code. Measured on this tree 2026-09-11 —

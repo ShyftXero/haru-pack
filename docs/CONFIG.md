@@ -132,14 +132,27 @@ works here.
 
 ### Changing where bytes come from does not change whether they're checked
 
-Every downloaded artifact is verified against a SHA-256 pinned **in this repository**
-(`bundle.UV_SHA256`, `bundle.PBS_SHA256`), and the pin is chosen by the artifact's
-*upstream* identity before the download point is rewritten. So:
+Every artifact these settings redirect — the `uv` release asset and the
+python-build-standalone interpreter — is verified against a SHA-256 pinned **in this
+repository**, and the pin is chosen by the artifact's *upstream* identity before the download
+point is rewritten (`INV-SUPPLY-01`, `INV-SUPPLY-10`). The pins live in
+`src/haru_pack/pins.toml`, the single source of truth; `src/haru_pack/pins.py` loads it and
+`bundle.py` just holds what `pins.uv_digests()` / `pins.python_digests()` returned. Edit the
+TOML, not a Python constant. So:
 
 - Pointing at a hostile or stale mirror gives you a `DigestMismatch` and a failed build,
   not a compromised binary.
 - An artifact with **no pin is refused rather than downloaded** — haru-pack will not stage
   something unverified into a binary you're about to sign.
+
+Two things this does **not** say. `index_url` points at a package index, and the
+application's own wheels are hash-verified by **uv** against the lockfile's hashes rather than
+by us (`INV-SUPPLY-08`) — a real check, but a delegated one. And the Nim compiler is not pinned
+here at all: haru-pack pins the choosenim *installer*, and choosenim then downloads the Nim
+toolchain from nim-lang.org under its own TLS with nothing in this repository hashing the
+result. There is no mirror setting for it, and `INVARIANTS.md` calls it the widest blast radius
+of any unpinned input in the project. (The aarch64 docker image is the exception — it fetches a
+Nim pinned in `pins.toml` and refuses an unpinned one.)
 
 If a mirror produces a digest mismatch, the mirror is wrong or out of date. **Do not edit
 the pin to make it pass.** Fix the mirror, or set the base back to upstream. Bumping a

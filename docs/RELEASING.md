@@ -25,7 +25,7 @@ script's job is to make sure that commit deserves it.
 
 | Check | Why it blocks a release |
 |---|---|
-| `uv run --group dev ruff check .` | don't tag what you wouldn't merge — and through the **pinned** ruff, because this gate once passed on the exact commit CI rejected (`INV-CI-01`) |
+| `uvx "ruff@$RUFF_PIN" check .` | don't tag what you wouldn't merge — and through the **pinned** ruff, because this gate once passed on the exact commit CI rejected. The pin is `sed`-ed out of `pyproject.toml`, the same single source CI reads, and a missing `ruff==` pin is itself a hard failure. Deliberately not `uv run --group dev ruff`, which would install the linter into the environment the tests below are about to run in (`INV-CI-01`) |
 | `./scripts/self-build.sh` | haru-pack packs haru-pack for linux + windows, and each artifact's payload is verified. If the tool cannot pack itself, the project's central claim is false — better to learn that before a tag exists than after (`INV-CI-02`). `--no-self-build` skips it and says so |
 | `pytest -m invariant` | the invariant contract — see below |
 | the full suite | the obvious one |
@@ -81,8 +81,18 @@ removes it from resolution but the filename is never reusable. Cut `0.2.1`.
 
 ## Bumping a pinned dependency
 
-Pinned digests live in `src/haru_pack/bundle.py` (`UV_SHA256`, `PBS_SHA256`) and pinned Nim
-package versions in `src/haru_pack/bootstrap.py` (`NIM_DEPS`). When you bump one, record the
-**publisher's** digest — from the release's `<asset>.sha256` sidecar, or the release API's
-per-asset digest. Never a value you computed from whatever a mirror happened to serve, and
-never one you generated to make a failing check pass. See `docs/CONFIG.md`.
+Pinned digests live in **`src/haru_pack/pins.toml`** — one `[[artifact]]` table per asset,
+each carrying the digest, the URL, and the publisher channel the digest came from. That is
+the single source of truth: `src/haru_pack/bundle.py` no longer holds dict literals, it calls
+`pins.uv_digests()` / `pins.python_digests()` (they moved out of `bundle.py` on 2026-09-09).
+Pinned Nim *package* versions are the exception and still live in `src/haru_pack/bootstrap.py`
+(`NIM_DEPS`).
+
+Bump a digest with `python tools/add-pin.py <kind> <version> <asset>` (or `--all` for every
+asset haru-pack can target). It fetches the **publisher's** digest — the release's
+`<asset>.sha256` sidecar, else the release API's per-asset digest — and writes it with its
+provenance. Do not hand-edit a digest into `pins.toml` that you computed by downloading the
+artifact and hashing it: that pins whatever the server sent you, which is the thing the pin
+exists to catch. Never edit a digest to make a failing check pass. If neither publisher
+channel offers a digest, the correct outcome is no pin and a refused artifact. See
+`docs/CONFIG.md`.

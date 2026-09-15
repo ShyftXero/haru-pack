@@ -131,8 +131,15 @@ staged file.
 Be precise about what the runtime check buys: it catches **corruption** — a truncated or
 bit-rotted member, a mismatched size sidecar, a decoder bug. It does **not** defeat
 tampering, because the digest sidecar sits next to the member an attacker would be
-rewriting. Payload authenticity as a whole is `INV-LAUNCH-01`, still `proposed`. This
-paragraph said "byte-identical to Astral's release" full stop until 2026-09-11, with
+rewriting. The payload as a whole is covered by `INV-LAUNCH-01`, which has been `active`
+since 2026-09-09: `main.launch` calls `verifyPayloadDigest` and refuses to stage or decrypt a
+payload whose SHA-256 does not match its footer. That is a real check and it is not a MAC —
+the digest lives in the same footer an attacker would be editing, so anyone who rewrites the
+payload can recompute the 32 footer bytes and still execute. Tamper-*evidence* needs a
+signature (`INV-LAUNCH-03`, still `proposed`) or Authenticode over the overlay on a signed
+Windows build.
+
+This paragraph said "byte-identical to Astral's release" full stop until 2026-09-11, with
 nothing at runtime behind it; an adversarial review called that out and `INV-PAYLOAD-04`
 was narrowed to match the code.
 

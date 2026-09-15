@@ -75,11 +75,24 @@ maintainer's library sitting on the download path of every thin binary. Either w
 failed on the customer's Windows machine because zig couldn't find a root CA" is the single
 worst failure this project has, by its own principle.
 
-**Caveat that cuts the other way:** everything haru-pack downloads is **digest-pinned**
-(`pins.toml`, `INV-SUPPLY-01/05`), so TLS here is transport integrity, not the trust root — a
-hostile or broken TLS session yields a *failed pin*, not a compromise. That genuinely lowers the
-stakes of getting TLS perfect. It does not lower the stakes of the fetch simply *failing* on a
-machine we'll never see.
+**Caveat that cuts the other way:** the fetch this section is about — the thin tier's runtime
+uv download — is **digest-pinned**. `INV-SUPPLY-05`: the launcher checks the asset against the
+`uv_sha256` its own payload manifest carries, before anything is extracted or executed. So TLS
+here is transport integrity, not the trust root — a hostile or broken TLS session yields a
+*failed pin*, not a compromise. That genuinely lowers the stakes of getting TLS perfect. It does
+not lower the stakes of the fetch simply *failing* on a machine we'll never see. (One reachable
+exception: a payload built by an *older* haru-pack carries no `uv_sha256`, and for those
+`ensureUv` warns on stderr and proceeds. This version cannot produce such a binary — the build
+fails first.)
+
+Do not stretch that caveat into "everything haru-pack downloads is pinned." It isn't.
+`INV-SUPPLY-01` covers what haru-pack fetches itself — the choosenim installer, the zig
+archive, the uv release asset, the python-build-standalone interpreter — but the Nim **compiler**
+that choosenim then pulls from nim-lang.org is verified by choosenim, not by this repository, and
+`INVARIANTS.md` calls that the widest blast radius of any unpinned input in the project. It
+doesn't weaken the TLS argument above, because it lands on the build host rather than on the
+recipient's machine — but it is the reason the sentence has to say *this* fetch and not *every*
+fetch.
 
 ### Issues we've already hit even using zig only as the C backend
 

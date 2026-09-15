@@ -5,6 +5,11 @@ This does NOT prove any invariant holds. It proves that every `active` invariant
 in the repo cites an invariant id that was never declared. Efficacy is the Red-path's
 job, and the Red-path is checked by a human neutralizing the guard and watching it go red.
 
+One thing beyond linkage is checked, by the hooks in `_invariant_execution.py` that this
+module registers: a claimant that only ever gets SKIPPED does not count as a claim. That
+is weaker than proof, and stronger than what was here before — a regex over test source,
+which could not tell a running test from a commented-out one.
+
 Adopted from lotek's tests/test_invariants_enforced.py.
 """
 from __future__ import annotations
@@ -20,17 +25,58 @@ from _invariants import (
     INVARIANTS_MD,
     REPO,
     REQUIRED_FIELDS,
+    DuplicateInvariantError,
+    Invariant,
     collect_citations,
     collect_markers,
     load_invariants,
 )
 
-INVARIANTS = load_invariants()
+# `_invariant_execution` records which claiming tests actually ran and fails the session when
+# an active invariant's claimants all skipped. Registered from here rather than from
+# conftest.py so the invariant machinery stays together, and because a session that never
+# collects this module has no contract to enforce anyway.
+# `test_the_execution_hooks_are_registered` below is what notices if this line stops working.
+pytest_plugins = ["_invariant_execution"]
+
+# `allow_duplicates=True` on purpose: a duplicated id is a real defect, but raising it at
+# import time would turn one problem into a collection error that takes all ~110 other checks
+# with it. `test_no_invariant_id_is_declared_twice` is where it is refused, as one legible
+# failure naming both line numbers.
+INVARIANTS = load_invariants(allow_duplicates=True)
 MARKERS = collect_markers()
 
 
 def test_invariants_file_parses():
     assert INVARIANTS, f"no invariant entries parsed out of {INVARIANTS_MD}"
+
+
+def test_no_invariant_id_is_declared_twice():
+    """Entries are keyed by id, so a second heading with the same id overwrites the first.
+
+    This is not hypothetical: INVARIANTS.md carried two unrelated `### INV-SECRET-02`
+    entries, 113 headings parsed to 112, and the earlier Statement was discarded unread
+    while ten markers were credited to the survivor. Nothing in this file noticed, because
+    every check ran against the parsed dict.
+    """
+    try:
+        load_invariants()
+    except DuplicateInvariantError as e:
+        pytest.fail(str(e))
+
+
+def test_the_execution_hooks_are_registered(pytestconfig):
+    """The skipped-claimant check is only installed by the `pytest_plugins` line above.
+
+    If a future pytest stops honouring `pytest_plugins` in a test module, that check stops
+    running and every other test in this file still passes — which is the same silent
+    vacuity the check exists to prevent. Fail loudly instead; move the hooks to
+    tests/conftest.py if this ever goes red.
+    """
+    assert pytestconfig.pluginmanager.get_plugin("_invariant_execution") is not None, (
+        "_invariant_execution is not registered, so no invariant's claimants are being "
+        "watched for execution. See the pytest_plugins line at the top of this module."
+    )
 
 
 @pytest.mark.parametrize("inv_id", sorted(INVARIANTS))
@@ -224,11 +270,120 @@ class TestGuardCanFail:
             f"the well-formedness check would not have caught this entry: {missing}"
         )
 
-    def test_marker_regex_actually_matches(self, tmp_path: Path):
+    def test_marker_decorator_is_recognised(self, tmp_path: Path):
         fid = _fake(3)
         t = tmp_path / "test_synthetic.py"
         t.write_text(f'@pytest.mark.invariant("{fid}")\ndef test_x(): pass\n', encoding="utf-8")
         assert fid in collect_markers(tmp_path), (
-            "the marker regex no longer matches the marker syntax the suite uses — every "
+            "collect_markers no longer recognises the marker syntax the suite uses — every "
             "linkage check above would pass vacuously"
         )
+
+    def test_module_level_pytestmark_claim_is_recognised(self, tmp_path: Path):
+        """`pytestmark = pytest.mark.invariant(...)` claims every test in the module, and two
+        files in this suite already use `pytestmark` for skipif, so the form will turn up."""
+        fid = _fake(4)
+        t = tmp_path / "test_synthetic_modmark.py"
+        t.write_text(f'pytestmark = [pytest.mark.invariant("{fid}")]\ndef test_x(): pass\n',
+                     encoding="utf-8")
+        assert fid in collect_markers(tmp_path)
+
+    def test_a_marker_that_is_not_code_is_not_a_claim(self, tmp_path: Path):
+        """Commented out, or quoted in prose, is not a claim.
+
+        collect_markers used to be a regex over file TEXT, so all three of these satisfied
+        the linkage contract identically: an invariant could be "claimed" by a decorator
+        someone commented out while debugging, and the contract stayed green. This module
+        itself quotes the marker syntax twice in its own strings, and escaped being credited
+        for them only because the id in those quotes is an f-string placeholder.
+        """
+        real, commented, quoted = _fake(5), _fake(6), _fake(7)
+        t = tmp_path / "test_synthetic_prose.py"
+        t.write_text(
+            f'"""Docs sometimes quote @pytest.mark.invariant("{quoted}") as an example."""\n'
+            f'# @pytest.mark.invariant("{commented}")\n'
+            f'@pytest.mark.invariant("{real}")\n'
+            'def test_x(): pass\n',
+            encoding="utf-8",
+        )
+        found = collect_markers(tmp_path)
+        assert real in found, "a real decorator stopped being credited"
+        assert commented not in found, "a commented-out marker was credited as a claim"
+        assert quoted not in found, "a marker quoted inside a docstring was credited as a claim"
+
+    def test_duplicate_id_is_detected(self, tmp_path: Path):
+        """The parser must refuse two headings with one id, naming both line numbers.
+
+        A dict cannot hold both, so the survivor answers for a Statement it was never
+        written for. INVARIANTS.md shipped in that state.
+        """
+        fid = _fake(8)
+        md = tmp_path / "INVARIANTS.md"
+        md.write_text(f"### {fid}\nStatus: active\nStatement: first\n\n"
+                      f"### {fid}\nStatus: active\nStatement: second\n", encoding="utf-8")
+        lax = load_invariants(md, allow_duplicates=True)
+        assert lax[fid].fields["Statement"] == "second", (
+            "the lax parse no longer drops the earlier entry, so this guard is demonstrating "
+            "nothing — check that the loader still keys entries by id"
+        )
+        with pytest.raises(DuplicateInvariantError) as exc:
+            load_invariants(md)
+        msg = str(exc.value)
+        assert fid in msg and "line 1" in msg and "line 5" in msg, (
+            f"the refusal must name the id and both heading lines, or it does not say what to "
+            f"fix: {msg!r}"
+        )
+
+
+@pytest.fixture(scope="module")
+def unexecuted_active_claims():
+    """The execution check's decision function, imported here rather than at the top of the
+    module.
+
+    A top-level import would pull `_invariant_execution` in before pytest gets to register
+    it as a plugin, and pytest then warns on every single run of this suite that it can no
+    longer rewrite that module's asserts.
+    """
+    from _invariant_execution import unexecuted_active_claims as fn
+    return fn
+
+
+class TestSkippedClaimIsNotAClaim:
+    """Guard-of-guards for the execution check in `_invariant_execution.py`.
+
+    It is driven through its pure decision function rather than by nesting a pytest session
+    inside a test: what the hooks add is bookkeeping, and what can be wrong is the rule.
+    """
+
+    def _active(self, fid: str) -> dict:
+        return {fid: Invariant(id=fid, status="active")}
+
+    def test_all_claimants_skipped_is_reported(self, unexecuted_active_claims):
+        fid = _fake(9)
+        claims = {fid: {"tests/test_x.py::test_a", "tests/test_x.py::test_b"}}
+        assert unexecuted_active_claims(claims, set(), self._active(fid)) == {
+            fid: ["tests/test_x.py::test_a", "tests/test_x.py::test_b"]
+        }, "an active invariant whose every claimant skipped was not reported"
+
+    def test_one_executed_claimant_is_enough(self, unexecuted_active_claims):
+        fid = _fake(10)
+        claims = {fid: {"tests/test_x.py::test_a", "tests/test_x.py::test_b"}}
+        executed = {"tests/test_x.py::test_b"}
+        assert unexecuted_active_claims(claims, executed, self._active(fid)) == {}, (
+            "one claimant that ran is enough; demanding all of them would fail every "
+            "invariant that has a platform-specific test"
+        )
+
+    def test_proposed_invariant_is_not_judged(self, unexecuted_active_claims):
+        """A `proposed` entry is honestly undefended; `test_proposed_invariant_is_not_claimed`
+        is what has an opinion about it."""
+        fid = _fake(11)
+        claims = {fid: {"tests/test_x.py::test_a"}}
+        invs = {fid: Invariant(id=fid, status="proposed")}
+        assert unexecuted_active_claims(claims, set(), invs) == {}
+
+    def test_an_invariant_nobody_selected_is_not_judged(self, unexecuted_active_claims):
+        """`pytest tests/test_ui.py` must not fail over the hundred invariants it never
+        selected. The cost is the blind spot documented on unexecuted_active_claims."""
+        fid = _fake(12)
+        assert unexecuted_active_claims({}, set(), self._active(fid)) == {}

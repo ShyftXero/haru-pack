@@ -1,8 +1,14 @@
 # haru-pack — pinned artifact digests.
 #
-# Every third-party artifact haru-pack downloads and then executes is verified against a
-# digest recorded here BEFORE it is extracted (INV-SUPPLY-01). An artifact with no entry
-# is refused, not downloaded.
+# Every artifact haru-pack fetches ITSELF is verified against a digest recorded here BEFORE
+# it is extracted or executed (INV-SUPPLY-01), and an artifact with no entry is refused rather
+# than downloaded. That is the choosenim installer, the zig archive, the uv release asset and
+# the python-build-standalone interpreter.
+#
+# It is NOT every artifact that ends up on the build host. choosenim downloads the Nim
+# compiler itself from nim-lang.org, against nothing recorded here — INV-SUPPLY-01 names that
+# as its residual gap, and it is the compiler that builds the launcher inside every shipped
+# binary. Do not restore the older, broader wording of this comment.
 #
 # This file is data, not code, and it is meant to be read and edited by hand. Add an entry
 # with `tools/add-pin.py`, which fetches the digest from the publisher and writes it here

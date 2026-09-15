@@ -16,15 +16,27 @@ This harness downloads code chosen by PyPI download rank — not by audit — an
 at three points: sdist build backends under `uv sync`, the binary the build produces, and
 any `[[bundle]]`/`[[post_install]]` step in the manifest. Every package gets its own
 throwaway containers, so a poisoned one cannot reach `$HOME`, your keys, or the next
-package's result (`INV-SANDBOX-01`, `docs/adr/0005-sandboxed-flex-and-exam-harnesses.md`).
+package's *run* (`INV-SANDBOX-01`, `docs/adr/0005-sandboxed-flex-and-exam-harnesses.md`).
 
 Two containers per package: the **build** gets the network and the shared cache, the **run**
 gets a throwaway cache of its own and — at thick — no network interface at all. The run phase
-never sees the shared cache, so one package cannot leave anything behind for the next one to
-find.
+never sees the shared cache, so nothing a package writes there can reach the next package's
+run.
+
+The build phase is the exception, and it is a real one. That phase needs the uv cache
+read-write, and the cache is shared across packages so a 25-package run does not fetch the
+same toolchain 25 times — which means a malicious sdist build backend can write into a cache a
+later package's **build** reads. So this is not cross-package isolation in general; it is
+isolation of the run phase, plus a shared build cache that is confined to a docker volume and
+never touches your filesystem. `docker volume rm haru-flex-cache` resets it, and running one
+package at a time is the only way to avoid it entirely today.
 
 The image (`docker/flex.Dockerfile`) carries the toolchain and is built on first use. It is
-tagged with a hash of the Dockerfile plus `pins.toml`, so bumping a pin rebuilds it. Your
+tagged with a hash of the Dockerfile, `pins.toml`, `pyproject.toml` and every script in
+`docker/`, so bumping a pin or editing a digest-verifier rebuilds it. `src/` is deliberately
+*not* hashed: the copy baked into the image is overwritten at run time by the read-only `/src`
+mount, so retagging on a source edit would force a multi-minute toolchain rebuild for a file
+the run never reads. Your
 working tree is bind-mounted read-only at `/src`, so flex tests the code you are editing
 rather than a copy baked in whenever the image was last built.
 
@@ -51,11 +63,19 @@ you may want `binary` and prefer a clear failure to a surprise hour of compiling
 rather not execute a compiler *this project* built, you want `source` and will happily wait —
 measured on a 4-core Raspberry Pi, the full bootstrap plus image is roughly 25 minutes.
 
-The prebuilt arm64 Nim is built by `.github/workflows/nim-aarch64.yml` from the source tarball
-pinned in `pins.toml`, and its pin's `provenance` is the **workflow run URL**. That is
-deliberate: pinning a third-party artifact asserts "this is what the publisher published";
-pinning our own asserts "this is what we built", which is worth little if the only evidence is
-that somebody ran a command on hardware nobody else can see. A test enforces it.
+`.github/workflows/nim-aarch64.yml` is what builds the prebuilt arm64 Nim, from the source
+tarball pinned in `pins.toml`. **There is no such pin yet**, so on arm64 `auto` compiles and
+`binary` fails: the workflow uploads the tarball and prints its sha256 with an instruction to
+add the entry by hand, and `pins.toml` carries a comment where the entry will go rather than
+the entry. It is absent on purpose for now — while this repository is private, an
+unauthenticated fetch of a release asset cannot work anyway.
+
+When the pin does land, its `provenance` must be the **workflow run URL**. Pinning a
+third-party artifact asserts "this is what the publisher published"; pinning our own asserts
+"this is what we built", which is worth little if the only evidence is that somebody ran a
+command on hardware nobody else can see.
+`test_any_pinned_nim_binary_cites_a_build_log_as_provenance` enforces that — vacuously today,
+since there is nothing yet for it to check, and waiting for the day there is.
 
 ```sh
 python tools/flex-run.py --require-rootless   # refuse a rootful daemon (docs/ROOTLESS_DOCKER.md)

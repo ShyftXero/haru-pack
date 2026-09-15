@@ -2,9 +2,12 @@
 #
 #   docker build -f docker/flex.Dockerfile -t haru-pack-flex:<tag> .
 #
-# `tools/sandbox.py` builds this for you and tags it with a hash of this file plus
-# `src/haru_pack/pins.toml`, so bumping a pin rebuilds the image and a stale one is never
-# silently reused. See docs/adr/0005-sandboxed-flex-and-exam-harnesses.md.
+# `tools/sandbox.py` builds this for you and tags it with a hash of this file,
+# `src/haru_pack/pins.toml`, `pyproject.toml` and every script in `docker/` — so bumping a pin
+# or editing one of the digest-verifiers rebuilds the image rather than reusing a stale one.
+# `src/` is deliberately NOT hashed: the copy baked in below is overwritten at run time by the
+# read-only /src mount, so hashing it would force a multi-minute toolchain rebuild for a file
+# the run never reads. See docs/adr/0005-sandboxed-flex-and-exam-harnesses.md.
 #
 # WHAT GOES IN HERE AND WHAT DOES NOT
 #
@@ -74,17 +77,42 @@ RUN python3 -m venv /opt/venv \
 # uv is the one piece that cannot come from `haru bootstrap`: a thick build shells out to
 # `uv sync`, so it must be on PATH before haru-pack runs at all. It is deliberately NOT the
 # upstream curl|sh installer — see docker/install-uv.py for why a second, unpinned artifact
-# acquisition path is the thing being avoided. Nim and zig go through haru-pack's own
-# digest-verified path for the same reason.
+# acquisition path is the thing being avoided. zig goes through haru-pack's own
+# digest-verified path (`toolchain.install_zig`) for the same reason.
+#
+# Nim is the exception, and WHICH PATH RUNS decides how far the pin reaches. On the default
+# amd64 build — x86_64 with NIM_FROM=auto, which is what every amd64 image build takes — the
+# step below runs `haru-pack bootstrap`. That pins and verifies the choosenim INSTALLER and
+# then lets choosenim download the compiler itself from nim-lang.org, unverified by this
+# repository: INV-SUPPLY-01's named residual gap, and `haru_pack.toolchain`'s own docstring
+# says the same at the code. The aarch64 and NIM_FROM=binary|source routes go through
+# acquire-nim.sh, where the Nim ARTIFACT is pinned in pins.toml and an unpinned one is
+# refused. So "digest-verified" covers uv and zig on every build, and covers Nim on every
+# route EXCEPT the amd64 default. Do not collapse that back into one sentence: the comment
+# that stood here until 2026-09-15 claimed the property for Nim and zig alike, which reads as
+# a promise the image most people build does not keep.
 #
 # /opt/haru is world-WRITABLE, not merely readable: it is HOME at run time and both nim and
 # nimble write under it during a build. Those writes land in the container's own ephemeral
-# layer and die with `--rm`, so this does not let one package's code reach the next one's
-# toolchain. Only the /cache volume persists, and the run phase mounts that read-only.
+# layer and die with `--rm`, so one package's code cannot reach the next one's toolchain.
+#
+# The /cache volume is what persists, and the run phase does NOT mount it read-only: there is
+# no read-only mode (`tools/sandbox.py`: `CACHE_MODES = (CACHE_RW, CACHE_COLD)`, and a test
+# asserts its absence). `:ro` was the first design and is unimplementable — a thick binary
+# stages into $XDG_CACHE_HOME before it can execute, so the first real end-to-end run died
+# with `OSError: Read-only file system`. The run phase gets an ANONYMOUS volume instead
+# (`-v /cache`), which docker creates empty and `--rm` destroys, so stranger code never sees
+# the shared cache in either direction. That is stronger than `:ro`, which would still have
+# let a package READ what the last one left. The BUILD phase is the other half and is not
+# isolated: it shares the named cache read-write across packages, so a malicious sdist build
+# backend can write into a cache a later package's build reads (INV-SANDBOX-01, Note). The
+# isolation described here is the RUN phase's, not a general cross-package one.
+#
 # NIM_FROM is the escape hatch, and it applies to every architecture:
 #
-#   auto     (default) whatever is fastest and pinned: choosenim where upstream publishes a
-#            binary, otherwise our prebuilt one, otherwise compile from the pinned source
+#   auto     (default) whatever is fastest: choosenim where upstream publishes a binary —
+#            the one route whose compiler this repo does not hash, see above — otherwise our
+#            pinned prebuilt one, otherwise compile from the pinned source
 #   binary   a pinned binary only — FAIL rather than quietly compiling for an hour
 #   source   compile from the pinned source; never run a Nim binary this project published
 #   system   use the nim already in the image; fetch and compile nothing
@@ -92,6 +120,11 @@ RUN python3 -m venv /opt/venv \
 # Two of those exist for opposite reasons and both are legitimate: someone on a slow arm64
 # box wants `binary` and would rather fail than wait, and someone who declines to execute a
 # compiler this project built wants `source` and would rather wait than trust it.
+#
+# It is a `docker build --build-arg` knob only: `sandbox.ensure_image` passes no build args,
+# so a harness-driven build is always `auto`. The image tag does NOT include NIM_FROM (see the
+# header for what it does hash) — if you hand-build with a non-default mode, tag it yourself
+# rather than letting it sit under the name the harness expects to own.
 ARG NIM_FROM=auto
 
 COPY docker/install-uv.py docker/install-nim-binary.py docker/install-nim-source.py \
@@ -124,9 +157,11 @@ from haru_pack import toolchain; print(toolchain.install_zig())"; \
 # A build-time smoke test, as the kind of uid the harness will actually use. Without it a
 # permission mistake in the layer above surfaces minutes into someone's first flex run,
 # as a compiler error rather than as a broken image.
-# `doctor` rather than `nim --version`: neither nim nor zig is on PATH — haru-pack locates
-# them itself — so asking haru-pack is both the honest check and the one that matches how a
-# build actually resolves the toolchain.
+# `doctor` rather than `nim --version`: zig is never on PATH (haru-pack installs it under its
+# own data directory and locates it itself), and nim is on PATH only on the acquire-nim.sh
+# routes, which symlink it into /usr/local/bin — on the default amd64 path choosenim leaves it
+# under $HOME. Asking haru-pack is both the honest check and the one that matches how a build
+# actually resolves the toolchain.
 USER 65534:65534
 RUN haru-pack version && uv --version && haru-pack doctor \
  || (echo "the image is not usable by a non-root uid" && exit 1)

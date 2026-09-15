@@ -481,3 +481,68 @@ def test_the_cache_budget_is_enforced_before_the_matrix_not_during_it():
     assert callers == {"choose_runner"}, (
         f"the cache budget must be enforced once, before the run starts; called from {callers}"
     )
+
+
+# ──────────────────────────────────── INV-SANDBOX-01: `extra` cannot undo the containment
+
+# Docker takes the LAST value of a repeated single-value flag, and `extra` is spliced in after
+# every containment flag. So until 2026-09-15 a caller could hand `docker_argv` a sequence that
+# silently beat the sandbox: the module docstring claimed "the docker socket is never mounted,
+# for any arguments" while `extra=("-v", "/var/run/docker.sock:/var/run/docker.sock")` mounted
+# it. No test passed `extra` at all, and the AST check below it only reads string literals
+# INSIDE docker_argv, so nothing could see the hole.
+OVERRIDES = [
+    pytest.param(("--network", "host"), id="network-host"),
+    pytest.param(("--net=host",), id="network-host-alias"),
+    pytest.param(("-u", "0:0"), id="uid-drop"),
+    pytest.param(("--privileged",), id="privileged"),
+    pytest.param(("-v", "/var/run/docker.sock:/var/run/docker.sock"), id="docker-socket"),
+    pytest.param(("-v", "/:/host"), id="host-root"),
+    pytest.param(("--mount", "type=bind,src=/,dst=/host"), id="mount-host-root"),
+    pytest.param(("--cap-add", "SYS_ADMIN"), id="cap-add"),
+    pytest.param(("--security-opt", "seccomp=unconfined"), id="security-opt"),
+    pytest.param(("--pid", "host"), id="pid-host"),
+    pytest.param(("--userns", "host"), id="userns-host"),
+]
+
+
+@pytest.mark.invariant("INV-SANDBOX-01")
+@pytest.mark.parametrize("extra", OVERRIDES)
+def test_extra_cannot_undo_a_containment_flag(extra):
+    """Red-path: drop the `_check_extra` call from `docker_argv` and splice `extra` raw.
+
+    Every one of these is accepted by docker and every one defeats a property the module
+    docstring promises. They must be refused at the boundary, not documented as caller
+    discipline — `extra` exists so busybody can pass `--read-only` and `-m 512m`, and a
+    caller reaching for one of those is not thinking about flag precedence.
+    """
+    with pytest.raises(ValueError) as exc:
+        argv_for(extra=extra)
+    assert extra[0].split("=")[0] in str(exc.value), (
+        "the error must name the token it refused, or the caller cannot act on it"
+    )
+
+
+@pytest.mark.invariant("INV-SANDBOX-01")
+def test_the_flags_extra_exists_for_are_still_allowed():
+    """The guard must not be so tight that it breaks what `extra` is for.
+
+    `tools/busybody_docker.py` passes `--read-only` and `-m 512m` to run artifacts under real
+    limits. An allowlist that refused those would push callers to bypass `docker_argv`, which
+    is strictly worse than the hole it closes.
+    """
+    argv = argv_for(extra=("--read-only", "-m", "512m", "--pids-limit", "128"))
+    for token in ("--read-only", "-m", "512m", "--pids-limit", "128"):
+        assert token in argv
+    # Inline form is the same flag, and must not be read as an unknown one.
+    assert "-m=512m" in argv_for(extra=("-m=512m",))
+
+
+@pytest.mark.invariant("INV-SANDBOX-01")
+def test_the_image_argument_cannot_smuggle_a_flag():
+    """`image` is positional, so `image="--privileged"` was parsed by docker as a FLAG, with
+    the first element of `cmd` promoted to the image name. Found while closing the `extra`
+    hole; the same claim covers it. Red-path: remove the leading-dash guard."""
+    with pytest.raises(ValueError):
+        sandbox.docker_argv("--privileged", cmd=["true"], work=WORK, network=False,
+                            cache=sandbox.CACHE_COLD, uid=1000, gid=1000)
