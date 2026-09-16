@@ -2929,6 +2929,34 @@ benefit, against a real ergonomic win of one less post-install step and no sudo.
 Territory: src/haru_pack/toolchain.py, src/haru_pack/build/, src/haru_pack/targets.py,
 src/haru_pack/pins.toml, tests/test_zig_provider.py
 
+### INV-TOOL-03
+Status: active
+Statement: Installing Nim is ONE code path with two host-selected implementations, chosen by
+`choosenim_asset()`, not by a flag: where choosenim publishes a binary it is used (digest-pinned);
+where it does not — notably linux aarch64, a Raspberry Pi you build ON — `install_nim` BUILDS Nim
+from source with haru-pack's own managed `zig cc` (a `cc`/`gcc` shim that execs the managed zig,
+so no host gcc, no apt, no sudo). It never dead-ends on "unsupported host" for a host haru-pack can
+actually build for. The source build is pinned to the `v<NIM_VERSION>` git tag (Nim itself is not
+haru-digest-pinned on either path — see the toolchain module docstring).
+Actors: someone who ran `uv tool install haru-pack` on an arm64 board (a Pi) and wants to build
+there. Before this they hit a wall — choosenim has no arm64 binary — and had to install Nim by
+hand; now the tool provisions itself.
+Assets: whether an arm64 Linux box is a first-class BUILD host with nothing to set up. zig already
+covers every C-compiler need without sudo (INV-TOOL-02); this extends the same one-artifact,
+no-sudo story to the Nim compiler itself, so the Pi needs neither a system gcc nor a hand-built Nim.
+Red-path: Restore the `raise ToolchainError(... build on a supported host ...)` in the `if not
+asset` branch of `install_nim` and `test_no_choosenim_binary_builds_nim_from_source` goes red —
+install_nim raises instead of building, and the Pi has no way to get Nim. Separately, make
+`_host_zig_cc_shim` exec a bare `cc` instead of the managed zig and
+`test_source_build_shim_runs_the_managed_zig` goes red (the build would need a system compiler).
+Note: Verified end to end on an arm64 Pi 2026-09-14 — `install_nim`/`build_nim_from_source` cloned
+Nim v2.2.6 and built csources + `koch boot` + `koch tools` entirely through the managed zig cc,
+producing a working `nim`. (First proven by hand the same day: 6321 zig-cc invocations, zero system
+gcc.)
+Source: Asked for 2026-09-14 — make zig the way to compile Nim on a Pi, one code path, automatic
+where choosenim has no binary. docs/ZIG_TOOLCHAIN.md.
+Territory: src/haru_pack/toolchain.py, src/haru_pack/nim_source.py, tests/test_zig_provider.py
+
 ## TRUST — the project being packaged is an input, not an author
 
 Every other section here treats the operator's project as trusted and asks what happens to

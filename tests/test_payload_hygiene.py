@@ -86,3 +86,28 @@ def test_ssh_directory_is_excluded_wholesale(leaky_project, tmp_path):
     payload = assemble_payload(leaky_project, manifest, "thin", "host", "3.12",
                                tmp_path / "asm")
     assert not list(payload.rglob(".ssh")), "a .ssh directory was copied into the payload"
+
+
+def test_a_file_with_a_pre_1980_timestamp_still_packs(tmp_path):
+    """A payload file whose mtime predates 1980 — an sdist shipped with mtime 0, a zeroed
+    vendored artifact — must not fail the build. Zip's DOS date cannot encode a year < 1980 and
+    ZipFile.write dies on it; build_payload_zip clamps the date instead and keeps the exec bit.
+
+    Red-path: restore `z.write(p, arc)` in build_payload_zip and this raises ValueError."""
+    import os
+    import stat as _stat
+    (tmp_path / "manifest.toml").write_text('name = "t"\nkind = "script"\n')
+    old = tmp_path / "old.py"
+    old.write_text("x = 1\n")
+    os.utime(old, (0, 0))                       # 1970 — pre-1980
+    exe = tmp_path / "vendor" / "uv"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    os.utime(exe, (0, 0))
+    blob = build_payload_zip(tmp_path)          # must not raise
+    z = zipfile.ZipFile(io.BytesIO(blob))
+    assert "old.py" in z.namelist()
+    info = z.getinfo("vendor/uv")
+    assert info.date_time >= (1980, 1, 1, 0, 0, 0), "pre-1980 dates must be clamped to the epoch"
+    assert (info.external_attr >> 16) & _stat.S_IXUSR, "the exec bit must survive the clamp"
