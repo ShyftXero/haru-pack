@@ -77,6 +77,11 @@ haru-pack ./myproject --target windows -o app.exe  # cross-compile from Linux
 haru-pack ./myproject --target linux-aarch64       # Raspberry Pi
 ```
 
+![Pack once, run offline: Python project → haru pack → bundle uv + CPython + warmed cache → native binary → first-run stage (extract, verify, link) → uv run --offline](docs/media/haru-lifecycle.png)
+
+The build host needs the network; the target never does. The offline run works because the
+cache is warmed with the **same pinned uv the binary runs** — see [`docs/TIERS.md`](docs/TIERS.md).
+
 ### default vs `--thick`
 
 Both give you one file that needs no Python on the target. They differ in what is *inside* it,
@@ -97,6 +102,10 @@ bundles nothing and fetches uv too.) [`docs/TIERS.md`](docs/TIERS.md).
 Same shape at every tier: a real native executable, with a zip stapled to the end and a footer
 that says where it is. The OS only ever executes the first part. Byte offsets below are the
 `hello` binaries from the recording above — read them with `haru-pack verify <exe>`.
+
+![What is actually in the packed file: the byte layout is launcher stub · payload zip · stub-config · footer; inside the payload zip are manifest.toml, app/, vendor/uv.xz, vendor/python/, .haru-links, and vendor/cache/](docs/media/haru-file-anatomy.png)
+
+The exact bytes (from the `hello` binaries above):
 
 ```
   default (15,083,249 B)                       thick (50,425,885 B)
