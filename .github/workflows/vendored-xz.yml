@@ -37,15 +37,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.13
+      - run: uv venv --python 3.13
 
+      # The check that reaches OUTSIDE this repository. Stdlib only — no install needed, and
+      # deliberately so: the thing proving what ships is upstream's code should not itself
+      # depend on a resolved dependency tree.
       - name: vendored xz is byte-identical to upstream
-        run: python tools/verify-vendored-xz.py --tags
+        run: uv run --no-project python tools/verify-vendored-xz.py --tags
 
+      # And the in-repo half (INV-PAYLOAD-05), so a scheduled run reports on both at once —
+      # ci.yml covers this on pushes, but nothing runs it on the weeks nobody pushes.
+      # `--group dev` for the reason spelled out in ci.yml: it pins the env the tests run in.
+      - run: uv pip install -e . --group dev
       - name: the in-repo digest record also agrees
         run: |
-          python -m pip install -q -e .
-          python -m pytest tests/test_uv_compression.py \
+          uv run python -m pytest tests/test_uv_compression.py \
             -k the_vendored_decoder_matches_its_recorded_digests -q
