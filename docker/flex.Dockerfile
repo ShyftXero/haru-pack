@@ -59,8 +59,13 @@ RUN mkdir -p /opt/haru/data /opt/haru/buildcache /w /cache
 # rich, cryptography et al. are present and so `haru-pack` is on PATH.
 COPY pyproject.toml README.md /tmp/pkg/
 COPY src /tmp/pkg/src
-RUN python3 -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir /tmp/pkg
+# The venv must be Python >=3.12 (haru-pack's floor). Debian 12's `python3` is 3.11, so build
+# the venv with a uv-provided 3.12 instead of the distro interpreter — install the pinned uv
+# first (it is re-used for the toolchain layer below) and let it fetch the interpreter.
+COPY docker/install-uv.py /tmp/install-uv.py
+RUN python3 /tmp/install-uv.py /tmp/pkg/src/haru_pack/pins.toml /usr/local/bin \
+ && uv venv --python 3.12 /opt/venv \
+ && uv pip install --no-cache-dir --python /opt/venv/bin/python /tmp/pkg
 
 # uv, Nim and zig — acquired and made world-accessible in ONE layer.
 #

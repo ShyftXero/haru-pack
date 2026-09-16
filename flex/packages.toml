@@ -9,7 +9,7 @@
 # Verify:      python tools/gen-package-manifest.py --check
 
 schema_version = 1
-top_n = 25
+top_n = 50
 
 [source]
 name = "Top PyPI Packages"
@@ -290,6 +290,206 @@ name = "aiobotocore"
 list = "top25"
 rank = 25
 import_name = "aiobotocore"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "annotated-types"
+list = "top25"
+rank = 26
+import_name = "annotated_types"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "h11"
+list = "top25"
+rank = 27
+import_name = "h11"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "attrs"
+list = "top25"
+rank = 28
+import_name = "attrs"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "typing-inspection"
+list = "top25"
+rank = 29
+import_name = "typing_inspection"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "protobuf"
+list = "top25"
+rank = 30
+import_name = "protobuf"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "fsspec"
+list = "top25"
+rank = 31
+import_name = "fsspec"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "httpx"
+list = "top25"
+rank = 32
+import_name = "httpx"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "markupsafe"
+list = "top25"
+rank = 33
+import_name = "markupsafe"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "httpcore"
+list = "top25"
+rank = 34
+import_name = "httpcore"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "s3transfer"
+list = "top25"
+rank = 35
+import_name = "s3transfer"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "python-dotenv"
+list = "top25"
+rank = 36
+import_name = "python_dotenv"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "platformdirs"
+list = "top25"
+rank = 37
+import_name = "platformdirs"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "pandas"
+list = "top25"
+rank = 38
+import_name = "pandas"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "jinja2"
+list = "top25"
+rank = 39
+import_name = "jinja2"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "pathspec"
+list = "top25"
+rank = 40
+import_name = "pathspec"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "grpcio-status"
+list = "top25"
+rank = 41
+import_name = "grpcio_status"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "filelock"
+list = "top25"
+rank = 42
+import_name = "filelock"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "pip"
+list = "top25"
+rank = 43
+import_name = "pip"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "pyjwt"
+list = "top25"
+rank = 44
+import_name = "pyjwt"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "starlette"
+list = "top25"
+rank = 45
+import_name = "starlette"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "uvicorn"
+list = "top25"
+rank = 46
+import_name = "uvicorn"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "litellm"
+list = "top25"
+rank = 47
+import_name = "litellm"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "aiohttp"
+list = "top25"
+rank = 48
+import_name = "aiohttp"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "tqdm"
+list = "top25"
+rank = 49
+import_name = "tqdm"
+tier = "default"
+python = "3.12"
+
+[[package]]
+name = "jmespath"
+list = "top25"
+rank = 50
+import_name = "jmespath"
 tier = "default"
 python = "3.12"
 
