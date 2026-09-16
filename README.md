@@ -52,11 +52,24 @@ haru yourscript.py           # -> ./yourscript, a single native binary
 ./yourscript
 ```
 
+![Packing a script and running the binary](docs/media/02-pack-a-script.gif)
+
+That is a real recording, not a mock-up: `docs/tapes/02-pack-a-script.tape` is the script it
+was made from, and `docs/tapes/record.sh` regenerates every GIF in this README from a live
+build. The `file` line at the end is there because it is the part people do not believe — the
+output is an ordinary native ELF, not a self-extracting shell wrapper.
+
 `haru` and `haru-pack` are the same program — both are installed, so use whichever you feel
 like typing. The rest of this README says `haru-pack` because that is the package name, and
 the tool prints back whichever one you actually used.
 
 That is the whole thing. Point it at a script or a project directory and a binary appears.
+
+The build above took about twenty seconds. The first one on a new machine takes roughly two
+minutes longer: haru-pack compresses `uv` with XZ at preset 9 once per uv version and caches
+the result, which is the `compressing 55.6 MB` line you will see and then never see again.
+The recording is a machine that already has it — `reusing cached xz` is that same line after
+the one time it costs you.
 
 What you get: one file, no Python required on the target, runs from whatever folder it is
 in. Ship it like a compiled program.
@@ -82,6 +95,15 @@ uv tool install haru-pack        # or:  pip install haru-pack / uvx haru-pack ..
 haru-pack bootstrap              # Nim via choosenim + the pinned zig compiler
 haru-pack init ./myproject       # optional: write a haru_pack.toml you can edit
 ```
+
+`haru-pack doctor` tells you what the machine can actually build, and is the first thing to
+run when a build fails for a reason that sounds like a toolchain:
+
+![haru-pack doctor](docs/media/01-doctor.gif)
+
+`can build for` is the useful line. Anything listed under `not set up` is a target you can
+have, with the exact command that installs it — cross-compiling to Windows or ARM needs that
+target's C toolchain on this host, nothing on the target machine.
 
 `bootstrap` installs Nim **and** the default C compiler — a pinned `zig` — into haru-pack's
 own directory. They are not verified the same way, and the difference is worth knowing: the
@@ -319,6 +341,16 @@ run = ["playwright", "install", "firefox"]
 `open("file.txt")` follows the process cwd like a native binary; use `cwd_policy = "exe"`
 to make relative paths always resolve next to the shipped exe. Never use `__file__` for
 user data — the code lives in the stage dir.
+
+Those three lines are easier to see than to read:
+
+![Where a packed app thinks it lives](docs/media/04-run-in-place.gif)
+
+`cwd` is where the user ran the binary. `__file__` is somewhere else entirely — inside the
+stage directory, under a content hash, and it will be a different path after the next build.
+`HARUPACK_EXE_DIR` is the one that answers "where is my config file", because it points at
+the folder the executable is sitting in. Code that reaches for `__file__` to find a data file
+works in development and then ships broken; this is the failure that produces it.
 
 ## Docs
 - [INVARIANTS.md](INVARIANTS.md) — properties that must not regress, each with a red-path.

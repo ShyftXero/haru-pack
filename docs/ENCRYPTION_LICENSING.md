@@ -46,6 +46,26 @@ haru-pack build ./app --encrypt --secret-prompt --machine <id> --user alice
 # embed the secret in the exe (WEAKEST — no runtime secret needed):
 haru-pack build ./app --encrypt --secret-prompt --embed-secret
 ```
+End to end, with the right secret and then the wrong one:
+
+![encrypt, run, and fail to run](media/05-encrypt.gif)
+
+The second run is the one worth watching. `wrong secret / not authorized for this machine /
+tampered payload` names three causes in one message because the launcher cannot tell them
+apart. The key is `PBKDF2-HMAC-SHA256(secret [+ machine id] [+ user], salt, iters)`, so a
+wrong secret and — when machine binding is on — the wrong machine both derive the wrong key,
+and a wrong key and an edited payload both surface as the same GCM tag mismatch. There is one
+`quit` after a constant-time tag compare in `cryptbox.nim`, and the message is the full extent
+of what the code knows at that point, not a redaction of something it knows more precisely.
+(This build is not machine-bound, so here the cause is the wrong passphrase.)
+
+Note what the recording does **not** show, because it cannot: that a licensee who owns the
+machine is kept out. They are not. Everything after the payload decrypts runs on hardware
+they control, which is what the rest of this page is about — read "What this does not do"
+below before you price anything on it. The passphrase on screen is a throwaway that exists
+only in `docs/tapes/05-encrypt.tape`, and it is passed with `--secret-env` rather than
+`--secret` for the reason in the next paragraph.
+
 `--secret <literal>` also works and is the sharp edge: it puts key material in shell
 history and in `ps` output for the life of the build. The invariant about what a build
 emits (`INV-SECRET-03`: no secret in a manifest, receipt or kit) says so itself — "a
