@@ -13,6 +13,7 @@ type
   Manifest* = object
     name*: string
     kind*: AppKind
+    payloadFormat*: int         # manifest `payload_format` (INV-PAYLOAD-07); 0 = legacy/absent
     appSubdir*: string
     entrypoint*: seq[string]
     uvRunArgs*: seq[string]
@@ -34,6 +35,11 @@ proc gs(t: TomlValueRef, k, d: string): string =
   if t.contains(k): t[k].getStr(d) else: d
 proc gb(t: TomlValueRef, k: string, d: bool): bool =
   if t.contains(k): t[k].getBool(d) else: d
+proc gi(t: TomlValueRef, k: string, d: int): int =
+  # A missing key returns the default (0 = legacy), and getInt itself returns the default for
+  # a present-but-non-integer value — so a corrupt `payload_format` degrades to legacy/accept
+  # rather than faulting, matching the "no key is accepted" backward-compat rule (INV-PAYLOAD-07).
+  if t.contains(k): t[k].getInt(d) else: d
 proc strSeq(t: TomlValueRef, k: string): seq[string] =
   if not t.contains(k): return
   let v = t[k]
@@ -46,6 +52,10 @@ proc parseManifest*(path: string): Manifest =
   let t = parsetoml.parseFile(path)
   result.name = gs(t, "name", "app")
   result.kind = if gs(t, "kind", "script") == "project": akProject else: akScript
+  # payload_format (INV-PAYLOAD-07): the format version of the payload's CONTENTS. Absent on a
+  # pre-#44 payload, which reads back as 0 (legacy) and is accepted; main.launch refuses only a
+  # value ABOVE this launcher's MaxSupportedPayloadFormat.
+  result.payloadFormat = gi(t, "payload_format", 0)
   result.appSubdir = gs(t, "app_subdir", "app")
   result.entrypoint = strSeq(t, "entrypoint")
   result.uvRunArgs = strSeq(t, "uv_run_args")

@@ -213,22 +213,6 @@ def test_every_supported_build_host_has_a_pinned_choosenim():
         assert len(table[asset]["sha256"]) == 64
 
 
-@pytest.mark.invariant("INV-BUILD-05")
-def test_an_unsupported_build_host_explains_the_cross_compile_route(monkeypatch, tmp_path):
-    """ARM Linux is a TARGET, not a build host. The error has to say so, and say what to
-    do instead — otherwise it reads as 'haru-pack does not support your Pi'."""
-    from haru_pack import toolchain
-    monkeypatch.setattr(toolchain, "host_os", lambda: "linux")
-    monkeypatch.setattr(toolchain, "host_arch", lambda: "aarch64")
-    monkeypatch.setattr(toolchain, "toolchain_dir", lambda: tmp_path / "tc")
-
-    with pytest.raises(toolchain.ToolchainError) as ei:
-        toolchain.install_nim(force=True, log=lambda *_: None)
-    msg = str(ei.value)
-    assert "--target linux-aarch64" in msg, "the error does not name the cross-compile route"
-    assert "linux-x86_64" in msg, "the error does not say which hosts work"
-
-
 @pytest.mark.invariant("INV-SUPPLY-01")
 def test_nim_is_installed_into_haru_packs_own_directory(monkeypatch, tmp_path):
     """Never into ~/.nimble or a system path. A packaging tool must not take over a
@@ -240,21 +224,6 @@ def test_nim_is_installed_into_haru_packs_own_directory(monkeypatch, tmp_path):
         "choosenim is not confined to haru-pack's toolchain dir; it would write to "
         "~/.choosenim and ~/.nimble"
     )
-
-
-@pytest.mark.invariant("INV-SUPPLY-01")
-def test_there_is_exactly_one_way_to_install_nim():
-    """Red-path: add an archive or source fallback back into toolchain.py.
-
-    Not a style rule. Every additional acquisition path is another way for one build host
-    to end up with a different compiler than another, which is precisely the class of
-    difference this project keeps discovering the hard way.
-    """
-    import inspect
-    from haru_pack import toolchain
-    src = inspect.getsource(toolchain)
-    for banned in ("koch boot", "build.sh", "_install_from_source", "_install_via_archive"):
-        assert banned not in src, f"a second Nim install path is back: {banned}"
 
 
 # ---------- site 2: uv ----------

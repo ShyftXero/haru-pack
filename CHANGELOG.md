@@ -25,6 +25,23 @@ idlelib, pydoc_data. The new **opt-in** `--thick --slim-python` removes that fix
   runtime, must NOT use `--slim-python` — it is opt-in because that safety cannot be proven
   statically. See `docs/SLIM.md`. Closes #43.
 
+### The payload now declares its format, and the launcher refuses one it is too old to read
+
+`manifest.toml` carries a new integer, `payload_format` (current value **1**), and the Nim
+launcher refuses any payload whose declared format exceeds `MaxSupportedPayloadFormat` — exit 12,
+"this payload's format (N) is newer than this launcher understands (1); rebuild with a matching
+haru-pack". A payload with *no* key is treated as legacy/0 and still accepted, so nothing built
+before this changes.
+
+The skew this closes (#44): the footer's `format_ver` describes the footer's *layout*, not the
+payload's *contents*, so before this an OLD launcher handed a NEW payload had nothing to check.
+A launcher predating `.haru-links` (#40) stages that member as a plain text file and the ~1000
+aliases it lists silently never appear — `bin/python` goes missing with no error. haru-pack
+compiles the launcher from source on every build, so no supported path pairs the two today; the
+gate closes the class before a cached, vendored, or `--launcher <path>` prebuilt launcher makes
+it reachable. Mirrors `overlay.footerSizeFor` and `expandCompressedMembers`, which already refuse
+an unknown version rather than guess. See `INV-PAYLOAD-07`.
+
 ### Four README claims checked against the code; four were wrong
 
 Eli asked whether two paragraphs of the "Decisions" section were accurate. Reading every

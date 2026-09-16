@@ -2166,6 +2166,54 @@ symlinks only as a *correctness* note the launcher tolerates, never as a size.
 Territory: src/haru_pack/payload.py, src/haru_pack/launcher/stage.nim,
 tests/test_payload_symlinks.py, tests/test_stage_hardening.py
 
+### INV-PAYLOAD-07
+Status: active
+Statement: Every payload declares its format. `assemble_payload` stamps `payload_format` (an
+integer, current value **1**) into `manifest.toml`, and the launcher REFUSES a payload whose
+declared format exceeds `MaxSupportedPayloadFormat` (also 1) — exit `ExitPayloadFormat` (12),
+with "this payload's format (N) is newer than this launcher understands (1); rebuild with a
+matching haru-pack". A payload with NO `payload_format` key reads back as 0 (legacy) and is
+ACCEPTED, so every payload built before this field existed keeps launching. This mirrors the
+instinct already in `overlay.footerSizeFor` (an unknown footer version is refused, not guessed)
+and `stage.expandCompressedMembers` (a member with no `.size` sidecar is refused as "not produced
+by a matching haru-pack") — but points it at the OTHER skew: not a malformed payload, an older
+launcher handed a newer one.
+Actors: whoever caches, vendors, or `--launcher <path>`s a prebuilt launcher instead of the one
+this repo compiles during every build — the moment the "always build both at once" coincidence
+that makes the skew unreachable today stops holding; the recipient who would otherwise run a
+silently broken staged tree.
+Assets: the guarantee that a launcher matches the payload it stages. The concrete failure is
+`.haru-links` (#40, `INV-PAYLOAD-06`): a launcher predating `materialiseLinks` stages the ~1000-
+entry link table as an ordinary ~60 KB text file, so `bin/python` and every other alias silently
+never appear and the app runs against a tree missing its interpreter — a confusing runtime error
+or a silent misbehaviour depending on which alias something reaches for. A one-integer version
+gate gives every FUTURE payload member the same protection at once, instead of re-litigating it
+per feature the first time a prebuilt-launcher path exists — which is the wrong time.
+Note — where the check sits, stated plainly: the format lives inside the payload's own
+`manifest.toml`, so the launcher can only read it after `stageZip` has extracted the tree. The
+refusal therefore fires just after `parseManifest`, BEFORE `findUv` and any execution — it
+prevents RUNNING a mis-staged tree, which is the harm, not the staging into the private cache
+(which `--reap` cleans). A corrupt/non-integer `payload_format` degrades to 0/legacy via
+`getInt`'s default, matching the "no key is accepted" rule rather than faulting.
+Red-path: two, both walked 2026-09-16:
+(0) bump `MaxSupportedPayloadFormat` in `launcher/main.nim` from 1 to 999 (neutralise the gate)
+and rebuild. Observed: `test_payload_format_newer_than_supported_is_refused` and
+`test_a_far_future_format_is_also_refused` flipped green-to-red — the format-2 and format-99
+payloads ran all the way to their bundled uv (`PAYLOAD_UV_RAN` on stdout, exit **0** instead of
+12), while the legacy and current-format accept tests stayed green. Restored to 1;
+(1) comment out `manifest["payload_format"] = PAYLOAD_FORMAT` in `build/assemble.py` (drop the
+stamp). Observed: `test_build_stamps_the_current_payload_format` flipped green-to-red — the
+written manifest carried no `payload_format` at all (`None == 1`), i.e. the launcher's gate would
+have nothing to check and the guarantee would rest entirely on "always build both at once".
+Restored.
+Source: filed by Eli as #44 while landing #40 — noticed that the thing making the old-launcher/
+new-payload skew unreachable is a coincidence (haru-pack compiles the launcher from source every
+build), not a check, and that `manifest.toml` carried no format version while the footer's
+`format_ver` describes only the footer layout, not the payload's contents.
+Territory: src/haru_pack/payload.py, src/haru_pack/build/assemble.py,
+src/haru_pack/launcher/manifest.nim, src/haru_pack/launcher/main.nim,
+tests/test_payload_format.py
+
 ### INV-BUILD-08
 Status: active
 Statement: A bare console-script entrypoint is checked as far as the tier allows: refused
@@ -2908,6 +2956,34 @@ system-GCC-by-default to avoid changing existing setups, which is inertia rather
 benefit, against a real ergonomic win of one less post-install step and no sudo.
 Territory: src/haru_pack/toolchain.py, src/haru_pack/build/, src/haru_pack/targets.py,
 src/haru_pack/pins.toml, tests/test_zig_provider.py
+
+### INV-TOOL-03
+Status: active
+Statement: Installing Nim is ONE code path with two host-selected implementations, chosen by
+`choosenim_asset()`, not by a flag: where choosenim publishes a binary it is used (digest-pinned);
+where it does not — notably linux aarch64, a Raspberry Pi you build ON — `install_nim` BUILDS Nim
+from source with haru-pack's own managed `zig cc` (a `cc`/`gcc` shim that execs the managed zig,
+so no host gcc, no apt, no sudo). It never dead-ends on "unsupported host" for a host haru-pack can
+actually build for. The source build is pinned to the `v<NIM_VERSION>` git tag (Nim itself is not
+haru-digest-pinned on either path — see the toolchain module docstring).
+Actors: someone who ran `uv tool install haru-pack` on an arm64 board (a Pi) and wants to build
+there. Before this they hit a wall — choosenim has no arm64 binary — and had to install Nim by
+hand; now the tool provisions itself.
+Assets: whether an arm64 Linux box is a first-class BUILD host with nothing to set up. zig already
+covers every C-compiler need without sudo (INV-TOOL-02); this extends the same one-artifact,
+no-sudo story to the Nim compiler itself, so the Pi needs neither a system gcc nor a hand-built Nim.
+Red-path: Restore the `raise ToolchainError(... build on a supported host ...)` in the `if not
+asset` branch of `install_nim` and `test_no_choosenim_binary_builds_nim_from_source` goes red —
+install_nim raises instead of building, and the Pi has no way to get Nim. Separately, make
+`_host_zig_cc_shim` exec a bare `cc` instead of the managed zig and
+`test_source_build_shim_runs_the_managed_zig` goes red (the build would need a system compiler).
+Note: Verified end to end on an arm64 Pi 2026-09-14 — `install_nim`/`build_nim_from_source` cloned
+Nim v2.2.6 and built csources + `koch boot` + `koch tools` entirely through the managed zig cc,
+producing a working `nim`. (First proven by hand the same day: 6321 zig-cc invocations, zero system
+gcc.)
+Source: Asked for 2026-09-14 — make zig the way to compile Nim on a Pi, one code path, automatic
+where choosenim has no binary. docs/ZIG_TOOLCHAIN.md.
+Territory: src/haru_pack/toolchain.py, src/haru_pack/nim_source.py, tests/test_zig_provider.py
 
 ## TRUST — the project being packaged is an input, not an author
 
