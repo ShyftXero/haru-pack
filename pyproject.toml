@@ -50,8 +50,11 @@ Issues = "https://github.com/ShyftXero/haru-pack/issues"
 haru-pack = "haru_pack.cli:main"
 haru = "haru_pack.cli:main"
 
-[tool.hatch.version]
-path = "src/haru_pack/__init__.py"
+# The version is git-derived at build time (YYYYMMDDHHMMSS, bare — PyPI rejects the +g<hash> local
+# segment). hatchling loads hatch_build.py because `version` is in project.dynamic and this hook is
+# declared. src/haru_pack/_version.py is the single formatter; a checkout shows the +g<hash> at runtime.
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/haru_pack"]
@@ -72,7 +75,8 @@ include = [
 ]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproject.toml"]
+# hatch_build.py ships in the sdist so a source rebuild can still compute the version.
+include = ["src/haru_pack", "examples", "docs", "research", "README.md", "pyproject.toml", "hatch_build.py"]
 
 [dependency-groups]
 # ruff is pinned EXACTLY, and this pin is the single source of truth — CI and

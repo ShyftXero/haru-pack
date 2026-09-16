@@ -24,7 +24,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
-VERSION_FILE="src/haru_pack/__init__.py"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -56,8 +55,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$VERSION_FILE")"
-[ -n "$VERSION" ] || die "could not read __version__ from $VERSION_FILE"
+# ASKED OF THE CODE, not scraped: the version is git-derived (src/haru_pack/_version.py), so there
+# is no static line to sed. The bare 14-digit form (no +g<hash>) names the artifact, matching the
+# release tag and the PyPI version.
+VERSION="$(uv run --quiet python -c 'import pathlib; from haru_pack._version import git_build_id; print(git_build_id(pathlib.Path("'"$ROOT"'"), with_hash=False) or "")' 2>/dev/null || true)"
+[ -n "$VERSION" ] || die "could not derive the version from git (haru_pack._version.git_build_id).
+Release artifacts are named for the commit being released; guessing a version is how a release
+ships mislabelled."
 
 # Use the haru-pack from THIS tree, not one on PATH — the point is to demonstrate the
 # commit being released, and a stale global install would quietly demonstrate something else.

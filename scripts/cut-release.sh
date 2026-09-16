@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Cut a haru-pack release: verify a commit, stamp its version, tag it, push the tag.
+# Cut a haru-pack release: verify a commit, derive its version, tag it, push the tag.
 #
-#   ./scripts/cut-release.sh 0.2.0            # verify, stamp, tag, and offer to push
-#   ./scripts/cut-release.sh 0.2.0 --dry-run  # do everything except write anything
+#   ./scripts/cut-release.sh                  # verify, tag the current commit, and offer to push
+#   ./scripts/cut-release.sh --dry-run        # do everything except write anything
 #   ./scripts/cut-release.sh --check          # just run the release gate, tag nothing
-#   ./scripts/cut-release.sh 0.2.0 --no-self-build   # skip building the release binaries
+#   ./scripts/cut-release.sh --no-self-build  # skip building the release binaries
+#
+# The version is NOT passed in — it is DERIVED from the commit being tagged: the HEAD committer date
+# in UTC as a single 14-digit segment, YYYYMMDDHHMMSS (src/haru_pack/_version.py, the one formatter).
+# The tag is vYYYYMMDDHHMMSS. Nothing to stamp or mistype; a release is fully determined by its
+# commit. PyPI rejects the +g<hash> local segment, so the published version is the bare timestamp
+# (a git checkout still shows the hash at runtime via `haru-pack version`).
 #
 # The gate packs haru-pack WITH haru-pack for linux-x86_64 and windows-x86_64, verifies each
 # payload, smoke-runs what this host can run, and — once the tag is pushed — attaches them to
@@ -38,7 +44,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-VERSION_FILE="src/haru_pack/__init__.py"
 MAIN_BRANCH="main"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
@@ -52,7 +57,6 @@ usage() {
 }
 
 # ---------------------------------------------------------------- arguments
-VERSION=""
 DRY_RUN=0
 CHECK_ONLY=0
 SELF_BUILD=1
@@ -63,20 +67,10 @@ for arg in "$@"; do
         --no-self-build) SELF_BUILD=0 ;;
         -h|--help) usage 0 ;;
         -*)        die "unknown flag: $arg (try --help)" ;;
-        *)         [ -n "$VERSION" ] && die "version given twice: $VERSION and $arg"
-                   VERSION="$arg" ;;
+        *)         die "unexpected argument '$arg'. The version is derived from the commit
+(HEAD committer date, YYYYMMDDHHMMSS); do not pass one. See --help." ;;
     esac
 done
-[ "$CHECK_ONLY" -eq 0 ] && [ -z "$VERSION" ] && usage 1
-
-if [ -n "$VERSION" ]; then
-    # PEP 440 / semver-ish. Deliberately strict: a typo'd version becomes a permanent
-    # filename on PyPI.
-    printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([ab]|rc)?[0-9]*$' \
-        || die "version '$VERSION' is not N.N.N (optionally with a/b/rc suffix)"
-fi
-
-TAG="v${VERSION}"
 
 # ---------------------------------------------------------------- repo state
 info "== repo state =="
@@ -85,6 +79,24 @@ SHA="$(git rev-parse HEAD)"
 SHORT="$(git rev-parse --short HEAD)"
 echo "branch : $BRANCH"
 echo "commit : $SHORT"
+
+# The version is DERIVED from the commit, not passed in: the HEAD committer date (UTC) as a single
+# 14-digit segment. src/haru_pack/_version.py is the one formatter — the release tag, the wheel
+# metadata (hatch_build.py) and the runtime `haru-pack version` all route through it. The bare form
+# (no +g<hash>) goes to the tag and PyPI, which refuses local versions.
+VERSION="$(python3 - "$REPO_ROOT" <<'PYEOF'
+import importlib.util, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("_hv", root / "src" / "haru_pack" / "_version.py")
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+print(mod.git_build_id(root, with_hash=False) or "")
+PYEOF
+)"
+[ -n "$VERSION" ] || die "could not derive a version from HEAD (is this a git checkout?)"
+TAG="v${VERSION}"
+echo "version: $VERSION (derived)"
+echo "tag    : $TAG"
 
 # --check is a pure verification mode: it is meant to be runnable on a PR branch, before
 # the merge that would make a release possible. Only the tagging path demands a clean main.
@@ -112,8 +124,10 @@ a tag pointing at a commit nobody else has is not a release."
     fi
 fi
 
-if [ -n "$VERSION" ] && git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-    die "tag $TAG already exists. Releases are immutable; pick the next version."
+if [ "$CHECK_ONLY" -eq 0 ] && git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+    die "tag $TAG already exists — this commit's timestamp is already released. Releases are
+immutable and the version is derived from the commit, so to cut another you need a new commit
+(the timestamp advances with it)."
 fi
 
 # ---------------------------------------------------------------- the gate
@@ -205,21 +219,20 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------- stamp + tag
-CURRENT="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$VERSION_FILE")"
-[ -n "$CURRENT" ] || die "could not read __version__ from $VERSION_FILE"
+# ---------------------------------------------------------------- tag
+# Nothing is stamped: the version is derived from the commit (hatch_build.py bakes it into the wheel
+# at build time; _version.py computes it at runtime). So there is no version-bump commit — the tag
+# alone marks the release, and it points at a commit that is already on origin/main (checked above).
 
 info ""
 info "== release plan =="
-echo "version : $CURRENT -> $VERSION"
+echo "version : $VERSION (derived from the commit; nothing to stamp)"
 echo "tag     : $TAG"
 echo "commit  : $SHORT ($(git log -1 --format=%s))"
 echo ""
 echo "this will:"
-echo "  1. set __version__ = \"$VERSION\" in $VERSION_FILE"
-echo "  2. commit that as 'release: $VERSION'"
-echo "  3. tag $TAG"
-echo "  4. ask before pushing the tag (pushing the tag triggers PyPI publish)"
+echo "  1. tag $TAG at $SHORT (annotated)"
+echo "  2. ask before pushing the tag (pushing the tag triggers PyPI publish)"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     info ""
@@ -231,27 +244,13 @@ printf '\nproceed? [y/N] '
 read -r reply
 case "$reply" in [yY]*) ;; *) die "aborted by user; nothing written." ;; esac
 
-if [ "$CURRENT" != "$VERSION" ]; then
-    tmp="$(mktemp)"
-    sed "s/^__version__ = \".*\"$/__version__ = \"$VERSION\"/" "$VERSION_FILE" > "$tmp"
-    mv "$tmp" "$VERSION_FILE"
-    grep -q "^__version__ = \"$VERSION\"$" "$VERSION_FILE" \
-        || die "failed to write the version into $VERSION_FILE — check it by hand"
-    git add "$VERSION_FILE"
-    git commit -q -m "release: $VERSION"
-    green "committed version bump"
-else
-    info "version already $VERSION; no bump commit needed"
-fi
-
 git tag -a "$TAG" -m "haru-pack $VERSION"
 green "tagged $TAG at $(git rev-parse --short HEAD)"
 
-printf '\npush %s and the release commit to origin? [y/N] ' "$TAG"
+printf '\npush %s to origin? [y/N] ' "$TAG"
 read -r reply
 case "$reply" in
     [yY]*)
-        git push origin "$MAIN_BRANCH"
         git push origin "$TAG"
         green "pushed. The publish workflow runs CI again on the tag, then uploads to PyPI."
 
@@ -285,8 +284,8 @@ tool, importable, one small wheel." \
         ;;
     *)
         info "not pushed. When ready:"
-        echo "    git push origin $MAIN_BRANCH && git push origin $TAG"
+        echo "    git push origin $TAG"
         info "to undo locally:"
-        echo "    git tag -d $TAG && git reset --hard HEAD~1"
+        echo "    git tag -d $TAG"
         ;;
 esac
