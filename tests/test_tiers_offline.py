@@ -97,6 +97,24 @@ def test_the_thick_path_stages_script_dependencies():
 
 
 @pytest.mark.invariant("INV-TIER-01")
+def test_the_cache_is_warmed_with_the_pinned_uv_not_the_host():
+    """Red-path (#53): drop the `uv_bin=` argument from either warm call, so the cache is
+    warmed by the build host's `uv` on PATH. uv keys its cache buckets by its OWN schema
+    version (`simple-vNN`, `wheels-vNN`), so a cache warmed by a newer host uv is unreadable
+    to the bundled (pinned) uv at offline run time — the wheels are present but the run can't
+    resolve them. Verified 2026-09-16 on a box whose host uv (0.12.12) != pinned (0.10.4): the
+    payload cache carried `simple-v24` and the offline run died "wasn't found in the cache";
+    with the pinned uv it carries `simple-v20` and resolves. Both warm paths must resolve the
+    PINNED uv via `bundle_uv` and pass it as `uv_bin`."""
+    from haru_pack.build import thick as thick_mod
+    for fn in (thick_mod._warm_on_host, thick_mod._stage_script_dependencies):
+        src = inspect.getsource(fn)
+        assert "bundle_uv(" in src and "uv_bin=" in src, (
+            f"{fn.__name__} does not warm with the pinned uv; a thick binary's offline claim "
+            f"would then hold only when the build host's uv equals the pinned uv (#53)")
+
+
+@pytest.mark.invariant("INV-TIER-01")
 def test_warming_uses_uvs_script_mode():
     """`uv sync --script` is what resolves PEP 723 inline metadata. Resolving the script as
     if it were a project would either fail or silently stage the wrong dependency set."""
