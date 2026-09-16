@@ -134,7 +134,8 @@ Until then: Nim for the source, `zig cc` for the cross-compile. Two tools, two s
 ## "Where's the Rust? How is this a modern Python project written mostly in something else?"
 
 Answered in the README intro ("Why is this even here") — short version: uv does the Python part,
-the launcher is a ~500-line signable native stub, and Nim compiles-to-C + cross-compiles from
+the launcher is a small signable native stub (~2 400 lines of Nim, most of it staging and
+verification, plus the vendored XZ decoder's C), and Nim compiles-to-C + cross-compiles from
 Linux without a Windows machine, which is the actual requirement. Not everything needs to be Rust.
 
 ## "Why not just use PyInstaller / Nuitka?"

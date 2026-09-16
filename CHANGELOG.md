@@ -5,6 +5,49 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### Four README claims checked against the code; four were wrong
+
+Eli asked whether two paragraphs of the "Decisions" section were accurate. Reading every
+paragraph against the source turned up four that were not. None of the code changed — these
+were all cases of prose drifting past what the code does, which is the exact failure
+`INVARIANTS.md` exists to catch and which prose about prose does not.
+
+- **The pinning list left out `zig`.** It named uv, the Python interpreter and the choosenim
+  installer. `install_zig` verifies against `pins.toml` exactly like the others, and zig is
+  the *default* C compiler in every bootstrap — so the README was understating its own
+  guarantee, and contradicting its Install section three paragraphs earlier.
+
+- **The nimble gap was described too gently.** "Pinned to exact versions but never
+  digest-checked" implies the pinned version is what ships. `bootstrap.ensure_nim_deps`
+  installs `zippy`/`puppy`/`parsetoml`/`nimcrypto` at exact versions, but `compile_launcher`
+  runs a bare `nim c` with no lockfile, no project `.nimble` and no `--nimblePath`, so Nim
+  links the *highest* version present in the package directory regardless. The code comment
+  said so already (`INV-SUPPLY-02`, `proposed`); the README did not.
+
+- **"a ~500-line stub" was out by about 5x.** `main.nim` is 392 lines, but the launcher is
+  ~2 400 lines of Nim across seven modules, most of it staging and verification, plus ~3 400
+  lines of vendored C. The figure was doing argumentative work — it is the answer to "why is
+  a packaging tool written in Nim" — so it is now the real one. Also fixed in
+  `docs/COMMON_CRITIQUES.md`, which repeated it.
+
+- **"five active invariants defended by nothing that ran" was fourteen.** Re-measured by
+  pointing `XDG_DATA_HOME` at an empty directory and stripping `PATH` so no Nim is
+  resolvable, then running the claimants: `INV-CANARY-01`, `CRYPTO-06`, `EPHEMERAL-03`,
+  `GATE-01`, `GEO-01`, `LAUNCH-01`, `-02`, `-04`, `-05`, `-06`, `-08`, `-09`, `REMOTE-01`,
+  `STUB-01`. The *other* five in that sentence is right — the 2026-09-09 review did find five
+  documented, dated "Verified" claims that were unimplemented — and the two numbers had been
+  collapsed into one.
+
+Also corrected, in `toolchain.py`'s own module docstring: "The system's Nim is ignored" is
+true of installing and false of resolving. `bootstrap.find_nim` prefers the managed Nim and
+then falls back to `PATH`, which is precisely what makes the README's "bring your own Nim"
+promise work on an arm64 host.
+
+Verified accurate and left alone: the three-users principle, uv-does-the-Python-part,
+encryption-at-rest, one-code-path, the ARM-Linux paragraph in full, mirrors (the digest is
+looked up by upstream URL before the rewrite), the uv compression figures, `--shake`, and
+refuses-instead-of-guessing.
+
 ### A thick binary was 40% duplicate bytes: 85.4 MB -> 50.4 MB
 
 `hello.py` at `--thick` is now **50,425,885 bytes**, down from **85,405,022**. Nothing was
