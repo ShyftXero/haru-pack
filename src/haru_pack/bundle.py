@@ -274,9 +274,16 @@ def bundle_python(target: str, vendor_dir: Path, version: str = "3.13",
 
 
 def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path,
-                        sources: Sources | None = None) -> None:
+                        sources: Sources | None = None, uv_bin: str = "uv") -> None:
     """Populate a bundled uv cache with the project's RUNTIME deps (+ write uv.lock) using
     a THROWAWAY env outside the payload, so the runtime can build its venv offline.
+
+    `uv_bin` MUST be the same uv the launcher will run at the target — the pinned/bundled uv,
+    not the build host's `uv` on PATH. uv keys its cache buckets by its OWN schema version
+    (`simple-vNN`, `wheels-vNN`, …): a cache warmed by a newer host uv writes, say, `simple-v24`,
+    which the bundled 0.10.4 uv cannot read (it looks in `simple-v20`), so the "offline" run
+    fails to resolve deps whose bytes are right there in the cache. Warming with the pinned uv
+    makes the buckets match on any build host, instead of only when host uv == pinned uv (#53).
 
     `--no-dev` is load-bearing, not tidiness (INV-PAYLOAD-03). `uv sync` installs the
     *default* dependency groups, and `dev` is one of them, so this call used to warm the
@@ -294,7 +301,7 @@ def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path,
                UV_PYTHON_DOWNLOADS="never", UV_PROJECT_ENVIRONMENT=str(tmp_env))
     # `uv sync` resolves from uv.lock, which carries per-wheel hashes that uv verifies,
     # so this path is hash-checked by uv itself (INV-SUPPLY-08).
-    subprocess.run(["uv", "sync", "--project", str(app_dir), "--no-dev",
+    subprocess.run([uv_bin, "sync", "--project", str(app_dir), "--no-dev",
                     *(sources or Sources()).uv_index_args()],
                    env=env, check=True, capture_output=True, text=True)
 
@@ -357,7 +364,7 @@ def py_of(env_dir: Path) -> Path:
 
 
 def warm_cache_for_script(script: Path, py: Path, cache_dir: Path,
-                          sources: Sources | None = None) -> None:
+                          sources: Sources | None = None, uv_bin: str = "uv") -> None:
     """Stage a PEP 723 script's declared dependencies into the bundled uv cache.
 
     `uv sync --script` resolves the inline metadata and downloads into UV_CACHE_DIR, which
@@ -368,7 +375,7 @@ def warm_cache_for_script(script: Path, py: Path, cache_dir: Path,
     """
     env = dict(os.environ, UV_CACHE_DIR=str(cache_dir), UV_PYTHON=str(py),
                UV_PYTHON_DOWNLOADS="never")
-    _run(["uv", "sync", "--script", str(script),
+    _run([uv_bin, "sync", "--script", str(script),
           *(sources or Sources()).uv_index_args()], env=env)
 
 

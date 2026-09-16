@@ -1,4 +1,4 @@
-## haru-pack staging: per-user, content-addressed, atomic, verified on every reuse.
+## haru-pack staging: per-user, content-addressed, atomic, verified on every reuse, self-evicting.
 ##
 ## THREAT MODEL boundary B10. The staged tree is what the launcher executes, so whoever
 ## can populate `<cache>/<key>/` before we do gets code execution under the launcher's
@@ -55,6 +55,14 @@ const
   ## rewritten table can make the launcher write.
   MaxLinkEntries* = 16384
   KeyChars = {'0'..'9', 'a'..'f', 'A'..'F'}
+  ## Stage-dir eviction (retention). `.lastrun` is TOUCHED on every launch (touchStage) and is
+  ## isRuntimeMutable, so it is written AFTER recordTree and never enters `.stage-files` — it
+  ## cannot break verifyTree on reuse (INV-STAGE-01). `.ready` (ReadyName) is what marks a dir
+  ## as a fully-staged eviction candidate; a half-written `<key>.tmp-<pid>` or the `uv-cache`
+  ## sibling carries none, so neither is ever considered.
+  UseMarker* = ".lastrun"       # touched every launch; drives LRU-by-time eviction
+  DefaultKeepDays* = 30         # evict stage dirs unused this long; 0 disables
+  DefaultKeepMax* = 3           # always retain this many most-recent stage dirs
 
 proc baseDir*(): string =
   ## regenerable tree -> LOCALAPPDATA (win) / XDG_CACHE_HOME (linux) / Caches (mac)
@@ -635,7 +643,7 @@ proc isRuntimeMutable*(rel: string): bool =
   ## exception: verification checks the recorded files and ignores unrecorded ones.
   let parts = rel.split('/')
   let base = parts[^1]
-  if base in [ReadyName, FilesName, ".preinstall-done", ".postinstall-done",
+  if base in [ReadyName, FilesName, UseMarker, ".preinstall-done", ".postinstall-done",
               "uv.lock", ".DS_Store"]: return true
   for part in parts:
     if part == ".venv": return true
@@ -756,13 +764,17 @@ proc materialiseLinks(root: string) =
   ## payload, since DEFLATE cannot dedupe across members. Now it stores each once and lists
   ## the aliases in `.haru-links`.
   ##
-  ## They are re-created as COPIES, not symlinks, and that is deliberate. `recordTree`
-  ## walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
-  ## `pcLinkToFile`: a symlink here would be absent from `.stage-files`, and `verifyTree`
-  ## only checks what was recorded (see `isRuntimeMutable`'s note). Staging a symlink would
-  ## buy disk at the cost of leaving the interpreter's own name unverified on every reuse.
-  ## So the staged tree is byte-identical to one from a payload built before this existed,
-  ## the saving is in the shipped binary, and INV-STAGE-01 is untouched.
+  ## On POSIX they are re-created as relative SYMLINKS, so the alias costs a link entry
+  ## rather than a full copy — the on-disk dedup (INV-STAGE-04), ~90 MB per staged thick
+  ## payload. That is only safe because `recordTree` now yields `pcLinkToFile` and records
+  ## each alias as a `symlink:<target> <rel>` line, and `verifyTree` re-checks on every reuse
+  ## that the path is still a symlink still pointing at the SAME in-stage target — whose own
+  ## bytes are hash-verified by its regular-file line. So the alias stays inside `.stage-files`
+  ## and INV-STAGE-01 holds; a copy would only have been a way to get it recorded at all.
+  ##
+  ## On Windows, creating a symlink is privileged, so the alias stays a COPY and is recorded
+  ## as an ordinary file. The two platforms' staged trees differ in size, not in content, and
+  ## each is verified against a manifest generated on the same machine that staged it.
   ##
   ## Same ordering rule as `expandCompressedMembers`, for the same reason: this runs before
   ## `recordTree`, so the copies are inside the sealed manifest rather than written after it.
@@ -799,25 +811,65 @@ proc materialiseLinks(root: string) =
         "payload contains both " & linkRel & " and a " & LinksName & " entry for it; " &
         "refusing to choose")
     createDir(parentDir(linkPath))
-    # Permissions come with it: `bin/python` is only useful if it is still executable.
-    copyFileWithPermissions(targetPath, linkPath)
+    when defined(posix):
+      # A RELATIVE symlink, so the staged tree stays relocatable (the cache dir can move) and
+      # the alias is deduplicated on disk instead of copied. recordTree records it as a symlink
+      # line; verifyTree re-checks it still points here. (INV-STAGE-04)
+      createSymlink(relativePath(targetPath, parentDir(linkPath)), linkPath)
+    else:
+      # Windows: symlink creation is privileged, so keep the copy. Permissions come with it —
+      # `bin/python` is only useful if it is still executable — and recordTree records it as an
+      # ordinary file.
+      copyFileWithPermissions(targetPath, linkPath)
   removeFile(table)
 
 proc recordTree(root: string): tuple[manifest: string, count: int] =
   var rels: seq[string]
-  for p in walkDirRec(root, relative = true):
+  # `pcLinkToFile` too, now that materialiseLinks stages aliases as symlinks on POSIX: a
+  # symlink absent from `.stage-files` would go unverified, which is exactly the hole the copy
+  # path used to avoid. `followFilter` stays default (`{pcDir}`), so real directories are
+  # recursed and symlinked directories are not.
+  for p in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile}, relative = true):
     let rel = p.replace('\\', '/')
     if isRuntimeMutable(rel): continue
     rels.add rel
   sort(rels)
   var sb = ""
   for rel in rels:
+    # The manifest is one entry per line, space-separated; a newline in a path would forge a
+    # second entry. Real payload paths never contain one — refuse rather than record ambiguously.
+    if '\n' in rel or '\r' in rel:
+      raise newException(StageError, "refusing to record a path containing a newline: " & rel)
+    let full = root / rel
     when defined(posix):
+      if symlinkExists(full):
+        # A deduplicated alias (INV-STAGE-04). Record it AS a symlink and its in-stage target,
+        # not the followed bytes: the target is itself a recorded, hash-verified regular file,
+        # so "still a symlink, still pointing here" is what keeps the alias accountable without
+        # storing the bytes a second time. `expandSymlink` returns the relative value we wrote.
+        let tgtRel = normalizedPath(parentDir(rel) / expandSymlink(full)).replace('\\', '/')
+        # The target is the first space-separated field of the line; a space or newline in it
+        # would forge or corrupt an entry. Real payload targets carry neither — refuse at record
+        # time with a clear message rather than write a manifest that only breaks on verify.
+        if '\n' in tgtRel or '\r' in tgtRel or ' ' in tgtRel:
+          raise newException(StageError,
+            "refusing to record a symlink target with a space or newline: " & rel)
+        # The target MUST be a recorded, hash-verified member. recordTree records exactly the
+        # non-`isRuntimeMutable` files, so an alias pointing at a runtime-mutable path (a `.venv`
+        # file, `uv.lock`, a `vendor/uv-dl-*` scratch file) would name a target no `.stage-files`
+        # line hashes — the interpreter's bytes would go unverified. Refuse, so INV-STAGE-04's
+        # "the target is itself hash-verified" holds by construction, not by payload convention.
+        if isRuntimeMutable(tgtRel):
+          raise newException(StageError,
+            "refusing an alias whose target is runtime-mutable and so unrecorded: " &
+            rel & " -> " & tgtRel)
+        sb.add "symlink:" & tgtRel & " " & rel & "\n"
+        continue
       try:
-        let perms = getFilePermissions(root / rel)
-        setFilePermissions(root / rel, perms - {fpGroupWrite, fpOthersWrite})
+        let perms = getFilePermissions(full)
+        setFilePermissions(full, perms - {fpGroupWrite, fpOthersWrite})
       except OSError: discard
-    sb.add sha256File(root / rel) & " " & rel & "\n"
+    sb.add sha256File(full) & " " & rel & "\n"
   result = (sb, rels.len)
 
 proc verifyTree(root, manifest: string) =
@@ -825,12 +877,51 @@ proc verifyTree(root, manifest: string) =
     if line.len == 0: continue
     let sp = line.find(' ')
     if sp <= 0: raise newException(StageError, "malformed " & FilesName & " entry: " & line)
-    let want = line[0 ..< sp]
+    let tok = line[0 ..< sp]
     let rel = line[sp + 1 .. ^1]
     let full = root / rel
+    if tok.startsWith("symlink:"):
+      # A deduplicated alias (INV-STAGE-04). Three things must still hold, and none of them is
+      # "follow it and hash whatever is there" — that silent follow is how this class of bug
+      # comes back. `fileExists`/`sha256File` both follow symlinks, so a bare content check
+      # would accept a file swapped in for the link, or a link repointed at matching bytes.
+      let tgtRel = tok["symlink:".len .. ^1]
+      when defined(posix):
+        # (1) still a symlink — not a regular file (or dir) swapped in where the alias was.
+        if not symlinkExists(full):
+          raise newException(StageError, "staged alias is no longer a symlink: " & rel)
+        # (2) still pointing at the SAME in-stage target. Recompute the stage-relative target
+        #     from the link exactly as recordTree did; reject a repoint (at `/etc`, `..`, or a
+        #     different member). `unsafeEntryPath` rejects any target that escapes the stage.
+        let got = normalizedPath(parentDir(rel) / expandSymlink(full)).replace('\\', '/')
+        if unsafeEntryPath(tgtRel) or got != tgtRel:
+          raise newException(StageError,
+            "staged alias points somewhere new: " & rel & " -> " & got &
+            " (recorded " & tgtRel & ")")
+        # (3) the target is a RECORDED regular file — present, not itself a symlink, and not
+        #     `isRuntimeMutable`. That last clause is what makes "its own line hash-verifies it"
+        #     true: recordTree records exactly the non-runtime-mutable files, so a target that is
+        #     runtime-mutable would have no hash line and the alias would resolve to unverified
+        #     bytes. recordTree already refuses to record such an alias; verifyTree refuses it too,
+        #     so a hand-crafted `.stage-files` cannot smuggle one past on reuse.
+        let tgtFull = root / tgtRel
+        if symlinkExists(tgtFull) or not fileExists(tgtFull) or isRuntimeMutable(tgtRel):
+          raise newException(StageError,
+            "staged alias target is missing, unrecorded, or not a regular file: " &
+            rel & " -> " & tgtRel)
+      else:
+        # materialiseLinks never stages a symlink on Windows (it copies), so a symlink line here
+        # is a manifest from another platform — refuse rather than guess at its meaning.
+        raise newException(StageError, "unexpected symlink record on this platform: " & rel)
+      continue
     if not fileExists(full):
       raise newException(StageError, "staged file is missing: " & rel)
-    if sha256File(full) != want:
+    when defined(posix):
+      # Recorded as a regular file but now a symlink: the file->symlink swap, refused before the
+      # hash check (which would follow the link and could be satisfied by matching bytes).
+      if symlinkExists(full):
+        raise newException(StageError, "staged file is now a symlink: " & rel)
+    if sha256File(full) != tok:
       raise newException(StageError, "staged file was modified since staging: " & rel)
 
 # ---------------------------------------------------------------- .ready token
@@ -923,3 +1014,58 @@ proc stageZip*(payload: string, key: string, root = baseDir()): string =
   # code returned it unexamined.
   verifyStagedDir(final, key.toLowerAscii, payloadDigest)
   return final
+
+proc touchStage*(dir: string) =
+  ## Record last-use. Called on EVERY launch, including the fast verified-reuse path, so a
+  ## stage dir that is still in regular use never looks stale to the evictor. `.lastrun` is
+  ## isRuntimeMutable, so it is written AFTER recordTree sealed `.stage-files` and is never a
+  ## recorded member — it cannot break verifyTree on the next run (INV-STAGE-01).
+  try: writeFile(dir / UseMarker, $getTime().toUnix)
+  except CatchableError: discard      # a read-only cache dir is not fatal
+
+proc lastUse(dir: string): times.Time =
+  ## Prefer the launch marker; fall back to the `.ready` token for dirs written by an older
+  ## haru-pack that predates `.lastrun`. `times.Time` is qualified because `std/posix` (pulled
+  ## in on POSIX for the ownership checks) also exports a `Time`.
+  for marker in [UseMarker, ReadyName]:
+    try:
+      if fileExists(dir / marker): return getLastModificationTime(dir / marker)
+    except OSError: discard
+  result = fromUnix(0)
+
+proc evictStale*(keepDir: string, keepDays = DefaultKeepDays, keepMax = DefaultKeepMax) =
+  ## Delete stage dirs unused for `keepDays`, always retaining the live one and the
+  ## `keepMax` most-recently-used. `keepDays <= 0` disables eviction entirely.
+  ##
+  ## Scope is the SIBLINGS of the live stage dir — `keepDir.parentDir`, i.e. the resolved
+  ## staging root main.nim actually staged into (the per-user cache, a RAM-backed root, or a
+  ## BASE_PATH). Deriving the sweep root from the live dir rather than a hardcoded `baseDir()`
+  ## is what keeps eviction correct now that a build can stage outside the cache (docs/adr/0004,
+  ## 0007): an --ephemeral run garbage-collects only its own RAM-backed siblings and never
+  ## reaches into the persistent cache.
+  ##
+  ## Only directories carrying a `.ready` (ReadyName) token are candidates, which keeps the
+  ## sibling `uv-cache` tree and any half-written `<key>.tmp-<pid>` dir out of scope. Removal is
+  ## by `removeDir`, which UNLINKS an in-tree relative symlink (an INV-STAGE-04 dedup alias)
+  ## rather than following it, so eviction can only ever delete inside a stage tree — never a
+  ## link target outside it. Removal failures are swallowed: on Windows a dir belonging to a
+  ## concurrently running instance is locked, and retrying on a later launch is the right call.
+  if keepDays <= 0: return
+  let
+    live = keepDir.absolutePath.normalizedPath
+    base = keepDir.parentDir
+    cutoff = getTime() - initDuration(days = keepDays)
+  var cands: seq[tuple[used: times.Time, path: string]]
+  try:
+    for kind, path in walkDir(base):
+      if kind != pcDir: continue
+      if not fileExists(path / ReadyName): continue
+      if path.absolutePath.normalizedPath == live: continue
+      cands.add (lastUse(path), path)
+  except OSError: return                      # cache dir vanished mid-scan; nothing to do
+  cands.sort(proc (a, b: tuple[used: times.Time, path: string]): int = cmp(b.used, a.used))
+  for i, c in cands:
+    if i < keepMax: continue                  # newest keepMax are always retained
+    if c.used > cutoff: continue              # still within the age window
+    try: removeDir(c.path)
+    except CatchableError: discard
