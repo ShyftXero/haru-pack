@@ -1735,9 +1735,11 @@ bytes they can swap after verification (a TOCTOU the copy never exposed), or swa
 regular file for a link to matching content.
 Assets: ~90 MB of duplicate on-disk bytes per staged thick payload, and INV-STAGE-01's integrity
 chain extended over the alias — the launcher must never execute a `bin/python` that now points
-somewhere it did not record. The target is required to be a present, non-symlink regular file, so
-the alias can only resolve to a member the manifest itself hash-verifies.
-Red-path: two, both walked 2026-09-16 on this linux host:
+somewhere it did not record. The target is required to be a present, non-symlink regular file that
+is **not `isRuntimeMutable`** — recordTree records exactly those, so the alias can only resolve to a
+member the manifest itself hash-verifies. Both recordTree and verifyTree enforce it, so neither a
+crafted payload nor a hand-edited `.stage-files` can name a runtime-mutable (unrecorded) target.
+Red-path: three, all walked 2026-09-16 on this linux host:
 (0) drop the `got != tgtRel` target-equality check in `verifyTree`'s symlink branch — rebuild,
 stage, then repoint `vendor/alias.bin` at `/etc/hostname` and at another in-stage member. Both
 `test_an_alias_repointed_outside_the_stage_is_refused` and
@@ -1745,7 +1747,12 @@ stage, then repoint `vendor/alias.bin` at `/etc/hostname` and at another in-stag
 the tampered stage (exit 0 instead of 3);
 (1) force `materialiseLinks` back to `copyFileWithPermissions` on POSIX (`when false and ...`) —
 `test_a_deduped_alias_is_staged_as_a_symlink_and_reused` went red (`is_symlink()` false) and the
-on-disk saving disappeared. Both reverted before commit.
+on-disk saving disappeared;
+(2) neuter both `isRuntimeMutable(tgtRel)` guards (recordTree + verifyTree) — a payload aliasing
+`bin/python` at `uv.lock` then staged clean (exit 0) and
+`test_an_alias_to_a_runtime_mutable_target_is_refused` went green-to-red, i.e. an interpreter whose
+bytes no `.stage-files` line hashes was accepted. All three reverted before commit. Finding from
+Acid_Burn's adversarial review of this change.
 Source: INV-PAYLOAD-06 took the *shipped-binary* saving 2026-09-15 and left the ~186 MB *staged*
 footprint as "a separate question [that] would have to solve the recording problem first" — a
 symlink was absent from `.stage-files` and so unverified. Issue #42 is that follow-up: recordTree

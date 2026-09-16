@@ -674,3 +674,19 @@ def test_an_alias_repointed_at_a_different_member_is_refused(harness, tmp_path):
     r2 = run(harness, "stage", str(tmp_path / "p.zip"), SYMLINK_KEY, cache=cache)
     assert r2.returncode == 3, f"an in-stage repoint was reused: {r2.stdout!r}"
     assert "points somewhere new" in r2.stderr, r2.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks are the POSIX materialisation")
+@pytest.mark.invariant("INV-STAGE-04")
+def test_an_alias_to_a_runtime_mutable_target_is_refused(harness, tmp_path):
+    """The alias's target must be a RECORDED (hashed) member. `recordTree` skips
+    `isRuntimeMutable` paths (`uv.lock`, `.venv/…`, `vendor/uv-dl-*`), so an alias pointing at
+    one would resolve to bytes no `.stage-files` line verifies — the interpreter running
+    unhashed. Staging refuses it at record time, so INV-STAGE-04's "the target is itself
+    hash-verified" holds by construction, not by payload convention."""
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip",
+                 linked_payload(b"vendor/pyalias\tuv.lock\n", {"uv.lock": b"lock = 1\n"}))
+    r = run(harness, "stage", str(z), SYMLINK_KEY, cache=cache)
+    assert r.returncode == 3, f"an alias to a runtime-mutable target was staged: {r.stdout!r}"
+    assert "runtime-mutable" in r.stderr, r.stderr

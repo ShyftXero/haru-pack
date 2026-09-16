@@ -840,8 +840,21 @@ proc recordTree(root: string): tuple[manifest: string, count: int] =
         # so "still a symlink, still pointing here" is what keeps the alias accountable without
         # storing the bytes a second time. `expandSymlink` returns the relative value we wrote.
         let tgtRel = normalizedPath(parentDir(rel) / expandSymlink(full)).replace('\\', '/')
-        if '\n' in tgtRel or '\r' in tgtRel:
-          raise newException(StageError, "refusing to record a symlink target with a newline: " & rel)
+        # The target is the first space-separated field of the line; a space or newline in it
+        # would forge or corrupt an entry. Real payload targets carry neither — refuse at record
+        # time with a clear message rather than write a manifest that only breaks on verify.
+        if '\n' in tgtRel or '\r' in tgtRel or ' ' in tgtRel:
+          raise newException(StageError,
+            "refusing to record a symlink target with a space or newline: " & rel)
+        # The target MUST be a recorded, hash-verified member. recordTree records exactly the
+        # non-`isRuntimeMutable` files, so an alias pointing at a runtime-mutable path (a `.venv`
+        # file, `uv.lock`, a `vendor/uv-dl-*` scratch file) would name a target no `.stage-files`
+        # line hashes — the interpreter's bytes would go unverified. Refuse, so INV-STAGE-04's
+        # "the target is itself hash-verified" holds by construction, not by payload convention.
+        if isRuntimeMutable(tgtRel):
+          raise newException(StageError,
+            "refusing an alias whose target is runtime-mutable and so unrecorded: " &
+            rel & " -> " & tgtRel)
         sb.add "symlink:" & tgtRel & " " & rel & "\n"
         continue
       try:
@@ -877,12 +890,17 @@ proc verifyTree(root, manifest: string) =
           raise newException(StageError,
             "staged alias points somewhere new: " & rel & " -> " & got &
             " (recorded " & tgtRel & ")")
-        # (3) the target is a real, present regular file — its own manifest line hash-verifies
-        #     its bytes, so the alias inherits that guarantee.
+        # (3) the target is a RECORDED regular file — present, not itself a symlink, and not
+        #     `isRuntimeMutable`. That last clause is what makes "its own line hash-verifies it"
+        #     true: recordTree records exactly the non-runtime-mutable files, so a target that is
+        #     runtime-mutable would have no hash line and the alias would resolve to unverified
+        #     bytes. recordTree already refuses to record such an alias; verifyTree refuses it too,
+        #     so a hand-crafted `.stage-files` cannot smuggle one past on reuse.
         let tgtFull = root / tgtRel
-        if symlinkExists(tgtFull) or not fileExists(tgtFull):
+        if symlinkExists(tgtFull) or not fileExists(tgtFull) or isRuntimeMutable(tgtRel):
           raise newException(StageError,
-            "staged alias target is missing or not a regular file: " & rel & " -> " & tgtRel)
+            "staged alias target is missing, unrecorded, or not a regular file: " &
+            rel & " -> " & tgtRel)
       else:
         # materialiseLinks never stages a symlink on Windows (it copies), so a symlink line here
         # is a manifest from another platform — refuse rather than guess at its meaning.
