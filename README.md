@@ -55,25 +55,15 @@ haru yourscript.py           # -> ./yourscript, a single native binary
 
 ![Packing a script and running the binary](docs/media/02-pack-a-script.gif)
 
-That is a real recording, not a mock-up: `docs/tapes/02-pack-a-script.tape` is the script it
-was made from, and `docs/tapes/record.sh` regenerates every GIF in this README from a live
-build. The `file` line at the end is there because it is the part people do not believe — the
-output is an ordinary native ELF, not a self-extracting shell wrapper.
+A real recording, not a mock-up — the tape that made it is `docs/tapes/`, and
+`docs/tapes/record.sh` rebuilds every GIF here from a live build. The `file` line is the part
+people do not believe: the output is an ordinary native ELF, not a self-extracting wrapper.
+That build took ~20 s; the *first* one on a machine takes about two minutes longer, because
+uv gets XZ-compressed once per uv version and cached (`reusing cached xz` is the recording
+enjoying someone else having paid that).
 
-`haru` and `haru-pack` are the same program — both are installed, so use whichever you feel
-like typing. The rest of this README says `haru-pack` because that is the package name, and
-the tool prints back whichever one you actually used.
-
-That is the whole thing. Point it at a script or a project directory and a binary appears.
-
-The build above took about twenty seconds. The first one on a new machine takes roughly two
-minutes longer: haru-pack compresses `uv` with XZ at preset 9 once per uv version and caches
-the result, which is the `compressing 55.6 MB` line you will see and then never see again.
-The recording is a machine that already has it — `reusing cached xz` is that same line after
-the one time it costs you.
-
-What you get: one file, no Python required on the target, runs from whatever folder it is
-in. Ship it like a compiled program.
+`haru` and `haru-pack` are the same program. Point either at a script or a project directory
+and one file appears — no Python needed on the target, runs from whatever folder it is in.
 
 ```sh
 haru-pack ./myproject                              # project dir with a pyproject.toml
@@ -81,6 +71,65 @@ haru-pack ./myproject --thick                      # bundle everything, zero net
 haru-pack ./myproject --target windows -o app.exe  # cross-compile from Linux
 haru-pack ./myproject --target linux-aarch64       # Raspberry Pi
 ```
+
+### default vs `--thick`
+
+Both give you one file that needs no Python on the target. They differ in what is *inside* it,
+and the choice is about what the target machine is allowed to reach — not about size.
+
+| | bundled | first run | offline | sharing |
+|---|---|---|---|---|
+| **default** (~15 MB) | `uv` | downloads Python + your deps, then caches them | needs a network once | two of your apps share one copy of a heavy dep |
+| **`--thick`** (~85 MB) | `uv` + Python + deps | nothing to fetch | **yes, always** | none — two thick torch apps are two copies |
+
+Default is the right answer when your users are online: first launch costs a few seconds,
+every launch after is instant. Reach for `--thick` when the target has no internet, or must
+not depend on anything already installed on it. (`--thin`, ~0.4 MB, is the third option — it
+bundles nothing and fetches uv too.) [`docs/TIERS.md`](docs/TIERS.md).
+
+### What is actually in the file
+
+Same shape at every tier: a real native executable, with a zip stapled to the end and a footer
+that says where it is. The OS only ever executes the first part. Byte offsets below are the
+`hello` binaries from the recording above — read them with `haru-pack verify <exe>`.
+
+```
+  default (15,078,929 B)                       thick (85,405,022 B)
++--------------------------------+ 0        +--------------------------------+ 0
+| Nim launcher                   |          | Nim launcher                   |
+|   native ELF/PE, ~900 KB       |          |   byte-identical to default    |
+|   the only part the OS runs    |          |   the only part the OS runs    |
++--------------------------------+ 903,632  +--------------------------------+ 903,632
+| payload (zip)     14,175,076 B |          | payload (zip)     84,501,169 B |
+|                                |          |                                |
+|  app/           your code      |          |  app/           your code      |
+|  manifest.toml  entrypoint,    |          |  manifest.toml  + offline=true |
+|                 tier, cwd      |          |  vendor/uv.xz   uv, XZ'd       |
+|  vendor/uv.xz   uv, XZ'd       |          |  vendor/python/ CPython,       |
+|                 14.2 MB        |          |                 186 MB unzipped|
+|                 + .sha256/.size|          |  vendor/cache/  your deps *    |
++--------------------------------+          +--------------------------------+
+| stub-config          105 B     |          | stub-config          105 B     |
+|   cleartext knobs + canaries   |          |   cleartext knobs + canaries   |
++--------------------------------+          +--------------------------------+
+| footer               116 B     |          | footer               116 B     |
++--------------------------------+ EOF      +--------------------------------+ EOF
+```
+
+\* `vendor/cache` is uv's cache for your dependencies. It is empty in this example because
+`hello.py` has none — which is also why a thick `hello` is 85 MB rather than the hundreds a
+real project reaches. The launcher is byte-identical between the two binaries: the tier
+changes only what got stapled on.
+
+The footer is `HARUPACK` … `KCAPURAH` around a payload offset, a length, and a SHA-256, found
+by scanning **backward** from EOF so an Authenticode certificate appended after signing does
+not hide it. The launcher checks that digest before it stages anything (`INV-LAUNCH-01`) —
+though note it is not a MAC; see [Status](#status). `--encrypt` replaces the zip with an
+AES-256-GCM container and sets a flag bit in the footer; nothing else about the shape changes.
+
+Everything after the launcher is inert data, which is why the result signs like an ordinary
+program. At run time the payload is unpacked into a content-addressed stage directory — not
+next to the exe, and not into your cwd.
 
 If a project declares more than one console script, haru-pack stops and asks rather than
 guessing but you can also specify its entry-point:
@@ -102,30 +151,21 @@ run when a build fails for a reason that sounds like a toolchain:
 
 ![haru-pack doctor](docs/media/01-doctor.gif)
 
-`can build for` is the useful line. Anything listed under `not set up` is a target you can
-have, with the exact command that installs it — cross-compiling to Windows or ARM needs that
-target's C toolchain on this host, nothing on the target machine.
+`can build for` is the useful line. Anything under `not set up` is a target you can have,
+with the command that installs it — cross-compiling needs that target's C toolchain on *this*
+host, nothing on the target machine.
 
-`bootstrap` installs Nim **and** the default C compiler — a pinned `zig` — into haru-pack's
-own directory. They are not verified the same way, and the difference is worth knowing: the
-`zig` archive is checked against a digest pinned in this repository before it is extracted,
-while for Nim what haru-pack pins is the `choosenim` *installer* — the compiler choosenim
-then downloads from nim-lang.org is verified by choosenim, not by this repository
-(`INV-SUPPLY-01`). Either way, your system Nim, your `~/.nimble`, and your system compilers
-are left alone, and neither install needs sudo. That is the point of the zig default:
-`uv tool install haru-pack && haru-pack bootstrap` is the whole setup, with nothing for the
-package manager to do (`INV-TOOL-02`).
+`bootstrap` installs Nim and a pinned `zig` (the default C compiler) into haru-pack's own
+directory. No sudo, and your system Nim, `~/.nimble`, and system compilers are left alone —
+so `uv tool install haru-pack && haru-pack bootstrap` is the whole setup (`INV-TOOL-02`).
+The two are **not verified the same way**: the `zig` archive is checked against a digest
+pinned in this repo, while for Nim the pin covers the `choosenim` *installer* — the compiler
+it then fetches from nim-lang.org is verified by choosenim, not by us (`INV-SUPPLY-01`).
 
-You only reach for sudo if you opt out with `--cc system`: then the host C compiler, the
-cross toolchains, and wine are ordinary system packages. Those are still worked out first,
-so bootstrap asks once and shows you the exact command before running it.
-
-By default it installs **everything this host can**: that is the point of the kitchen sink,
-and it means you do not discover a missing cross-compiler three commands into a release.
-None of it is compulsory — see the flags below, or `haru-pack bootstrap --list` to look
-first. `INV-TOOL-01`.
-
-Building for another machine? Ask for it up front and the same single prompt covers it:
+Opting out with `--cc system` is the only path that wants sudo; bootstrap works out what is
+needed and shows you the exact command first. By default it installs **everything this host
+can**, so you don't discover a missing cross-compiler three commands into a release. None of
+it is compulsory (`INV-TOOL-01`):
 
 ```sh
 haru-pack bootstrap                            # everything this host can install
@@ -139,117 +179,78 @@ haru-pack bootstrap --list                     # see what is available and what 
 
 Short version of why this works the way it does.
 
-**User ergonomics is of the utmost importance — and "user" means three people.** Whoever
-works on haru-pack; the developer running `haru-pack build`; and the person who receives the
-packed executable and has never heard of uv, Python, or this tool. The third is the one who
-gets no error message — only "it worked" or "it didn't" — and they are why every decision
-below leans on refusing at build time rather than failing on their machine. When the three
-conflict, the last one wins. Full statement: [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md).
+**"User" means three people, and the third one wins.** Whoever works on haru-pack; the
+developer running `haru-pack build`; and the person who receives the packed executable and
+has never heard of uv or Python. The third gets no error message — only "it worked" or "it
+didn't" — which is why everything below leans on refusing at build time rather than failing
+on their machine. [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md).
 
-**uv does the Python part.** Interpreters, dependency resolution, and virtualenvs are
-solved problems. haru-pack stages a `uv` binary and gets out of the way, rather than
-reimplementing an installer.
+**uv does the Python part.** Interpreters, resolution, and virtualenvs are solved problems.
+haru-pack stages a `uv` binary and gets out of the way.
 
-**The launcher is Nim.** It has to be a real native executable that Windows will let you
+**The launcher is Nim.** It has to be a real native executable Windows will let you
 Authenticode-sign, and it has to cross-compile from Linux without a Windows machine. Nim
-compiles to C and does both. It is a ~500-line stub, not an application. Why not port it to Zig, since a `zig cc` is already pinned for cross-compiling? Costed and declined in [`docs/COMMON_CRITIQUES.md`](docs/COMMON_CRITIQUES.md).
-
-**Three tiers, because "one binary" means different things.** `--thin` bundles nothing and
-fetches on first run. Default bundles `uv` and fetches Python + deps once. `--thick`
-bundles everything and touches no network at all. Pick by what your target is allowed to
-reach, not by what is smallest.
+compiles to C and does both, in a ~500-line stub. Why not rewrite it in Zig, given a `zig cc`
+is already pinned? Costed and declined in [`docs/COMMON_CRITIQUES.md`](docs/COMMON_CRITIQUES.md).
 
 **Encryption protects the binary at rest; it cannot protect a secret from someone who runs
 it.** The launcher stages the payload to disk in plaintext so the interpreter can run it, and
-any user who can run the binary can read that staged source from their own cache. `--obfuscate`
-(pyarmor by default, modular) raises the *cost* of reading it — it is not a confidentiality
-boundary. A secret that must never leak must never be shipped in an artifact the client holds;
-put it behind a server the client authenticates to. haru-pack states this plainly rather than
-implying that "encrypted binary" means the embedded key is safe. See INV-SECRET-02 / INV-OBF-01
-and the busybody `reverse_engineer` persona, which proves each edge rather than asserting it.
+anyone who can run the binary can read that staged source from their own cache. `--obfuscate`
+raises the *cost* of reading it; it is not a confidentiality boundary. A secret that must
+never leak must never ship in an artifact the client holds — put it behind a server they
+authenticate to. `INV-SECRET-02` / `INV-OBF-01`, and the busybody `reverse_engineer` persona
+proves each edge rather than asserting it.
 
-**One code path, not two.** Host and cross builds download the same artifacts the same way.
-Where there used to be a fork — a "fast path" for the host — the fast path was the
-unverified one, and it was the path almost everyone took. `haru-pack bootstrap` installs Nim
-exactly one way (choosenim); it has no archive fallback and no build-from-source fallback.
-The flex sandbox **container image** is the one exception, and only because choosenim
-publishes no linux-aarch64 binary: [`docker/acquire-nim.sh`](docker/acquire-nim.sh) takes
-`NIM_FROM=auto|binary|source|system`. `source` compiles a pinned Nim tarball
-([`docker/install-nim-source.py`](docker/install-nim-source.py)); `binary` installs a pinned
-prebuilt Nim archive ([`docker/install-nim-binary.py`](docker/install-nim-binary.py)) —
-except that **`src/haru_pack/pins.toml` carries no `variant = "binary"` nim entry today, for
-any platform**. The artifact it would name is a release asset of this repository, and this
-repository is still private, so an unauthenticated fetch of it cannot work. Until that entry
-exists, `NIM_FROM=binary` fails everywhere and `auto` always falls through to the source
-build — which on arm64 means an hour of bootstrapping, not a download. It becomes the primary
-path once the asset is publishable, and its `provenance` must then be the workflow run URL
-that produced it, not a person. Those fallbacks are the image's; they are not reachable from
-the CLI.
+**One code path, not two.** Host and cross builds fetch the same artifacts the same way.
+There used to be a "fast path" for the host; it was the *unverified* one, and it was the path
+almost everyone took. `haru-pack bootstrap` installs Nim exactly one way (choosenim) — no
+archive fallback, no source fallback. The one exception is the flex sandbox container image,
+which needs `NIM_FROM` because choosenim publishes no linux-aarch64 binary; those fallbacks
+are the image's and are not reachable from the CLI. [`docs/FLEX.md`](docs/FLEX.md).
+
+**ARM Linux is a target; `bootstrap` will not make it a build host.** No choosenim binary
+exists for it, so bootstrap on a bare arm64 box refuses and points you at an x86_64 machine
+with `--target linux-aarch64`. You need no toolchain on the Pi to get a Pi binary. (Bring your
+own Nim and haru-pack will use it — then it is yours to maintain.)
 
 **Every artifact haru-pack fetches with its own downloader is pinned.** `uv`, the Python
 interpreter, and the choosenim *installer* are each checked against a SHA-256 in
-[`src/haru_pack/pins.toml`](src/haru_pack/pins.toml) before they are unpacked. No pin means
-the build refuses — it does not fall back to trusting TLS. Digests come from the publisher's
-own sidecar or release API, never from hashing whatever a server happened to send.
-`tools/add-pin.py` does this for you. What that sentence does **not** cover, because
-haru-pack does not fetch it: the Nim compiler itself, which the verified choosenim binary
-then downloads from nim-lang.org on its own terms; the nimble libraries linked into every
-shipped launcher (`zippy`, `puppy`, `parsetoml`, `nimcrypto`), which are pinned to exact
-versions but never digest-checked; and the PyPI sdists `tools/exam_fetch.py` pulls for the
-flex harness. The first of those three builds the launcher in every customer binary, so it
-is the gap that matters most.
+[`pins.toml`](src/haru_pack/pins.toml) before unpacking. No pin means the build refuses; it
+does not fall back to trusting TLS. Three things that does **not** cover, because haru-pack
+does not fetch them: the Nim compiler itself (choosenim's business), the PyPI sdists the flex
+harness pulls, and — the gap that matters, because it is in every customer binary — the nimble
+libraries linked into the launcher, which are pinned to exact versions but never
+digest-checked.
 
-**Mirrors change where, never whether.** If you cannot reach github.com, point `[sources]`
-at a mirror. The pin is chosen by the artifact's upstream identity *before* the URL is
+**Mirrors change where, never whether.** Point `[sources]` at a mirror if you cannot reach
+github.com. The pin is chosen by the artifact's upstream identity *before* the URL is
 rewritten, so a hostile mirror gets you a failed build, not a compromised one.
 
-**ARM Linux is a target; `bootstrap` will not make it a build host.** choosenim publishes no
-ARM Linux binary, so `haru-pack bootstrap` on a bare arm64 Linux box refuses with a message
-pointing you at an x86_64 machine and `--target linux-aarch64`. You do not need a toolchain
-on the Pi to get a Pi binary. (Bring your own Nim and haru-pack will use it — but then it is
-yours to maintain.) The flex sandbox container image is a separate story: it *does* build on
-arm64 — today via the source fallback above, which compiles Nim (about 25 minutes on a
-4-core Pi). The pinned-archive route is built but has nothing to fetch yet: no
-`variant = "binary"` nim entry exists in `pins.toml`, so `NIM_FROM=binary` fails and `auto`
-compiles.
+**The bundled uv is compressed, not packed.** uv ships XZ-compressed (55.59 → 14.17 MB, vs
+22.25 deflated by the payload zip) — about 8 MB off every default and thick binary. The
+launcher expands it at stage time and checks the result against the digest the build recorded,
+so what runs is the publisher's own binary. That is exactly why this is not UPX, which would
+rewrite the executable, destroy uv's signature, match no publisher digest, trip AV heuristics,
+and pay the cost on every launch instead of once. [`docs/TIERS.md`](docs/TIERS.md).
 
-**The bundled uv is compressed, not packed.** `uv` is the biggest thing in any non-thin
-payload and the payload zip only has DEFLATE, so uv ships XZ-compressed (55.59 → 14.17 MB
-vs 22.25 MB deflated) and the launcher expands it during staging — about 8 MB off every
-default and thick binary. The launcher expands it and checks the result against the digest
-the build recorded, refusing a mismatch — so what runs is the publisher's binary, and
-recorded in the stage manifest like everything else, which is precisely why this is not UPX:
-packing modifies the executable, destroying uv's own signature, matching no publisher digest,
-tripping AV packer heuristics, and paying the cost on every launch instead of once. The
-decoder is decoder-only vendored C from xz-embedded, no target-side library.
-[`docs/TIERS.md`](docs/TIERS.md).
-
-**Thick can be shaken, on evidence, never on a guess.** `--shake` runs the project's own
-test suite under a file-access tracer, keeps the bundled files it touched, then rebuilds the
-environment from the pruned payload and re-runs the suite — and fails the build if that
-does not pass. The observation is syscall-level rather than line coverage, because the
-megabytes are in shared libraries `dlopen`ed from C extensions and in data files, neither of
-which coverage can see. It refuses to run without a declared test command, keeps the static
-closure of every lazy import, and writes down every file it removed. A passing suite is
-evidence about the suite, not the program, so this is opt-in and the receipt is the point.
-[`docs/SHAKE.md`](docs/SHAKE.md).
+**Thick can be shaken, on evidence, never on a guess.** `--shake` runs your test suite under a
+file-access tracer, keeps the bundled files it touched, rebuilds from the pruned payload and
+re-runs the suite — failing the build if that does not pass. Syscall-level rather than line
+coverage, because the megabytes are in shared libraries `dlopen`ed from C extensions and in
+data files, which coverage cannot see. A passing suite is evidence about the suite, not the
+program, so this is opt-in and the receipt is the point. [`docs/SHAKE.md`](docs/SHAKE.md).
 
 **It refuses instead of guessing.** Ambiguous entrypoint, missing digest, unknown target,
-malformed `--entry-point`: all of these stop the build. A wrong guess here compiles
-cleanly, exits 0, and fails on the customer's machine — which is the worst place to find
-out.
+malformed `--entry-point` — all stop the build. A wrong guess compiles cleanly, exits 0, and
+fails on the customer's machine, which is the worst place to find out.
 
 **Claims are tested, not asserted.** [`INVARIANTS.md`](INVARIANTS.md) lists what must not
-regress, each with a *red-path*: the exact edit that makes its test fail. The gate is two
-commands, and CI runs both: `pytest tests/test_invariants_enforced.py` enforces the linkage
-— every `active` entry is claimed by a test, every `proposed` entry is not — and `pytest -m
-invariant` runs the claiming tests themselves. It takes both because `-m invariant` selects
-only tests that *claim* an invariant and so deselects the linkage checks, which carry no
-marker; run alone it would not notice a claiming test that had been deleted. A claiming test
-that **skips** also fails the gate, which is what makes a green run mean something: a CI job
-with no Nim installed used to exit 0 with five active invariants defended by nothing that
-ran. This exists because an audit found five documented, dated "Verified" security claims
-in this repo that were never implemented.
+regress, each with a *red-path*: the exact edit that makes its test fail. CI enforces both
+halves — that every `active` entry is claimed by a test, and that the claiming tests actually
+run. A claiming test that **skips** fails the gate too, which is what makes a green run mean
+something: a CI job with no Nim installed used to exit 0 with five active invariants defended
+by nothing that ran. This exists because an audit found five documented, dated "Verified"
+security claims here that were never implemented.
 
 ## Commands
 | Command | What |
@@ -289,21 +290,18 @@ in this repo that were never implemented.
 
 `bootstrap` takes repeatable `--target`, plus `--yes` and `--force`. `doctor` takes `--target`.
 
-## Tiers
-| Tier | Bundled | Fetched on target | Offline | Cross-compile |
-|---|---|---|---|---|
-| `--thin` | nothing | uv + Python + deps | no | yes |
-| default | uv | Python + deps | no | yes |
-| `--thick` | uv + Python (+deps/browsers) | nothing | **yes** | wheel-only ✓ / exec-steps: build on target |
+## Tiers and cross-compiling
 
-**Thick cross-compile (Linux → Windows) — supported for wheel-only projects.**
-`haru-pack build ./proj --target windows --thick` bundles a Windows standalone Python
-(python-build-standalone), Windows uv, and Windows wheels (`uv pip install
---python-platform windows --only-binary :all:`), and the venv builds at first run on
-Windows from the bundled cache. Verified end-to-end under wine (offline). The remaining
-limit: bundle/`post_install` steps that must **execute target-native code**
-(`playwright install firefox`, C/Rust source builds) can't be produced cross — build those
-on the target OS (or run them under wine / fetch the binaries by URL).
+What each tier bundles is in [default vs `--thick`](#default-vs---thick) above; all three
+cross-compile. Full detail, including the Playwright example: [`docs/TIERS.md`](docs/TIERS.md).
+
+The one limit worth knowing up front: **thick cross-compile (Linux → Windows) works for
+wheel-only projects.** `--target windows --thick` bundles a Windows standalone Python,
+Windows uv, and Windows wheels, and the venv builds at first run on Windows from the bundled
+cache — verified end-to-end under wine, offline. What cannot be produced cross is a
+bundle/`post_install` step that must **execute target-native code** (`playwright install
+firefox`, C/Rust source builds); build those on the target OS, under wine, or fetch the
+binaries by URL.
 
 ## haru_pack.toml (optional declarations)
 haru-pack discovers most things from your project. Add a `haru_pack.toml` at the project
@@ -343,96 +341,72 @@ run = ["playwright", "install", "firefox"]
 to make relative paths always resolve next to the shipped exe. Never use `__file__` for
 user data — the code lives in the stage dir.
 
-Those three lines are easier to see than to read:
+Easier to see than to read:
 
 ![Where a packed app thinks it lives](docs/media/04-run-in-place.gif)
 
-`cwd` is where the user ran the binary. `__file__` is somewhere else entirely — inside the
-stage directory, under a content hash, and it will be a different path after the next build.
-`HARUPACK_EXE_DIR` is the one that answers "where is my config file", because it points at
-the folder the executable is sitting in. Code that reaches for `__file__` to find a data file
-works in development and then ships broken; this is the failure that produces it.
+`cwd` is where the user ran the binary. `__file__` is inside the stage directory under a
+content hash, and will be a different path after the next build. `HARUPACK_EXE_DIR` is the one
+that answers "where is my config file". Code that reaches for `__file__` to find a data file
+works in development and then ships broken.
 
 ## Docs
-- [INVARIANTS.md](INVARIANTS.md) — properties that must not regress, each with a red-path.
-  `pytest -m invariant` checks that every `active` one is claimed by a test.
+
+Read these two before relying on anything:
+
+- [INVARIANTS.md](INVARIANTS.md) — what must not regress, each with a *red-path*: the exact
+  edit that makes its test fail.
 - [THREAT_MODEL.md](THREAT_MODEL.md) — assets, actors, trust boundaries, and what the
-  licensing feature does and does not actually enforce
-- [docs/PRINCIPLES.md](docs/PRINCIPLES.md) — the one guiding principle, who the three
-  "users" are when they conflict, and the no-god-modules rule that falls out of the first
-  of them
-- [docs/CONFIG.md](docs/CONFIG.md) — haru_pack.toml reference + discovery
-- [docs/TIERS.md](docs/TIERS.md) — bundling tiers + the Playwright example
-- [docs/SHAKE.md](docs/SHAKE.md) — `--shake`: pruning a thick payload on traced evidence,
-  and what a passing test suite does and does not prove
-- [docs/SIGNING.md](docs/SIGNING.md) — Windows Authenticode code signing (cross-platform)
-- [docs/ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) — `--encrypt` + license checks
-- [docs/FLEX.md](docs/FLEX.md) — the flex harness: top-25 breadth + hard targets
-- [docs/BUSYBODY.md](docs/BUSYBODY.md) — chaos testing: the personas and how to read a report
-- [docs/BUSYBODY-SCHEMA.md](docs/BUSYBODY-SCHEMA.md) — the on-disk contract for what a
-  chaos run writes: journal line, finding record, ledger rollup
-- [docs/BUSYBODY-PROTOCOLS.md](docs/BUSYBODY-PROTOCOLS.md) — what this harness would need
-  from a shared core, and the assumptions it makes that one would have to allow
-- [docs/BUSYBODY-TRANSFER.md](docs/BUSYBODY-TRANSFER.md) — the append-only log of ideas
-  moved between this harness and lotek's, including the declined ones
-- [docs/BUSYBODY-SHRINKING-SPIKE.md](docs/BUSYBODY-SHRINKING-SPIKE.md) — a costed and
-  **declined** `ddmin`, kept for the two findings that outlived the verdict
-- [docs/RELEASING.md](docs/RELEASING.md) — cutting a release (`./scripts/cut-release.sh`)
-- [docs/PUBLISHING.md](docs/PUBLISHING.md) — publishing to PyPI
-- [docs/adr/](docs/adr/) — architecture decision records (stub-config + canary, reap +
-  RAM staging)
-- [docs/UV_FREE_THICK.md](docs/UV_FREE_THICK.md) — a costed and **declined** design, kept so
-  it is not rediscovered from scratch
-- [docs/ZIG_TOOLCHAIN.md](docs/ZIG_TOOLCHAIN.md) — why the **default** compiler is one bundled
-  `zig cc` instead of four system cross-compilers: the evidence, the shim, the byte-for-byte KAT
-- [docs/COMMON_CRITIQUES.md](docs/COMMON_CRITIQUES.md) — fair objections answered once with
-  evidence: why Nim **and** the zig compiler (not a Zig rewrite), where's the Rust, why not PyInstaller
-- [docs/PLAN.md](docs/PLAN.md) · [docs/SHARP_CORNERS.md](docs/SHARP_CORNERS.md) · [docs/BRAINSTORM.md](docs/BRAINSTORM.md) · [research/](research/)
+  licensing feature does and does not enforce.
+
+Then, as you need them: [CONFIG.md](docs/CONFIG.md) (haru_pack.toml) ·
+[TIERS.md](docs/TIERS.md) · [SIGNING.md](docs/SIGNING.md) (Windows Authenticode) ·
+[ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) · [SHAKE.md](docs/SHAKE.md) ·
+[SHARP_CORNERS.md](docs/SHARP_CORNERS.md) ·
+[COMMON_CRITIQUES.md](docs/COMMON_CRITIQUES.md) (why Nim *and* zig, where's the Rust, why not
+PyInstaller).
+
+The rest of [`docs/`](docs/) is for people working *on* haru-pack — test harnesses, ADRs,
+release process, and a couple of costed-and-declined designs kept so they are not
+rediscovered from scratch.
 
 ## Status
-Alpha. Core exercised on Linux (host + Windows cross-compile): run-in-place UX, CLI
-fidelity, all three tiers, signable output, offline Playwright+Firefox, and encryption
-+ license checks.
 
-Read [THREAT_MODEL.md](THREAT_MODEL.md) before relying on `--encrypt` for anything
-commercial. What the licensing feature does and does not enforce:
+Alpha. Core exercised on Linux (host + Windows cross-compile): run-in-place UX, CLI fidelity,
+all three tiers, signable output, offline Playwright+Firefox, encryption + license checks.
 
-- **Machine and user binding are cryptographic.** The identity is folded into the KDF, so a
-  different machine id yields a different key and decryption fails. Note that
-  `/etc/machine-id` is a writable file, so this binds to a value the target *reports*.
-  `--user` is weaker still: the launcher reads `$USER` (`$USERNAME` on Windows), so
-  `USER=alice ./app` presents a different seat with no patching and no privilege. Both are
-  cryptographic in the sense that a wrong value never decrypts; neither is an attestation.
+**Read [THREAT_MODEL.md](THREAT_MODEL.md) before relying on `--encrypt` for anything
+commercial.** The short version of what licensing does and does not enforce:
+
+- **Machine and user binding are cryptographic, but they are not attestation.** The identity
+  is folded into the KDF, so a wrong value never decrypts. It binds to what the target
+  *reports*: `/etc/machine-id` is a writable file, and `--user` reads `$USER`, so
+  `USER=alice ./app` presents a different seat with no patching and no privilege.
 - **`--expires` is not enforcement.** It reads the target's clock, after decryption, inside a
   binary they control.
-- **`--geo` is a network call to a third party on every launch.** The old `HARUPACK_GEO`
-  environment bypass is gone; the gate now resolves the caller's IP and country from online
-  resolvers (default `https://ipwho.is/`, an unaffiliated free service) and **fails closed**
-  when fewer than the required consensus answer or agree. Two things follow that a buyer must
-  weigh before shipping one: every run sends the customer's IP to that service, and if the
-  service is down, rate-limits, or disappears, every geo-gated binary in the field stops
-  running. It is also an IP check, not a presence check — a VPN exiting in an allowed country
-  passes.
-- **The launcher verifies its payload digest before staging or executing**
-  ([`INV-LAUNCH-01`](INVARIANTS.md)), but that digest is **not a MAC**: it lives in the same
-  footer an attacker would edit, so someone who modifies the payload can recompute it. Real
-  tamper-evidence needs a signature ([`INV-LAUNCH-03`](INVARIANTS.md), not yet implemented),
-  or Authenticode on a signed Windows build.
+- **`--geo` is a network call to a third party on every launch.** It resolves the caller's IP
+  and country from online resolvers (default `https://ipwho.is/`, unaffiliated) and **fails
+  closed**. So: every run sends your customer's IP to that service, and if the service dies
+  or rate-limits, every geo-gated binary in the field stops running. It is an IP check, not a
+  presence check — a VPN exiting in an allowed country passes.
+- **The payload digest is not a MAC.** The launcher verifies it before staging
+  ([`INV-LAUNCH-01`](INVARIANTS.md)), but it lives in the same footer an attacker would edit,
+  so whoever modifies the payload can recompute it. Real tamper-evidence needs a signature
+  ([`INV-LAUNCH-03`](INVARIANTS.md), not yet implemented) or Authenticode.
 
 ### Packing a tree you did not write is running it
 
-`haru-pack build .` is not a read-only operation on your source. At `--thick` it resolves
-and installs your project, which calls its build backend. A `[[bundle]]` step in
-`haru_pack.toml` runs at build time with your environment. A symlink in the tree is followed
-out of it. A `[tool.uv] index-url` in the project decides where the wheels inside your signed
-binary came from.
+`haru-pack build .` is not a read-only operation on your source. At `--thick` it resolves and
+installs your project, which calls its build backend. A `[[bundle]]` step runs at build time
+with your environment. A symlink is followed out of the tree. A `[tool.uv] index-url` in the
+project decides where the wheels inside your signed binary came from.
 
-All of that is fine for your own repository and is how the features work. It is **not** fine
-for a repository you cloned, a branch that arrived in CI, or an application an agent wrote
-that nobody read. Today there is no boundary there at all: `INV-TRUST-01` through `-07` are
-`proposed`, six of the seven were demonstrated by the busybody `trojan` persona on
-2026-09-11, and none of them are defended yet. Treat packing an untrusted tree the way you
-would treat running its `setup.py` — because you are.
+That is all fine for your own repository and is how the features work. It is **not** fine for
+a repo you cloned, a branch that arrived in CI, or an app an agent wrote that nobody read.
+There is no boundary there today: `INV-TRUST-01` through `-07` are `proposed`, six of the
+seven were demonstrated by the busybody `trojan` persona on 2026-09-11, and none are defended
+yet. Treat packing an untrusted tree the way you would treat running its `setup.py` — because
+you are.
 
 ## Prior art
 haru-pack is not the first tool to stage `uv` from a native launcher.
