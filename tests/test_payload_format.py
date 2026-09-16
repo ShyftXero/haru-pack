@@ -14,11 +14,10 @@ version gate that never ran a binary would be exactly the vacuity INVARIANTS.md 
 """
 from __future__ import annotations
 
-import os
 import shutil
 import stat
 import subprocess
-import tomllib
+from haru_pack import tomlio
 from pathlib import Path
 
 import pytest
@@ -110,7 +109,7 @@ def test_build_stamps_the_current_payload_format(tmp_path):
     (proj / "hello.py").write_text("print('hi')\n")
     manifest = {"app_subdir": "app", "kind": "script", "entrypoint": ["hello.py"]}
     payload = assemble_payload(proj, manifest, "thin", "host", "3.13", tmp_path / "asm")
-    written = tomllib.loads((payload / "manifest.toml").read_text())
+    written = tomlio.load(payload / "manifest.toml")
     assert written.get("payload_format") == PAYLOAD_FORMAT == 1, (
         "manifest.toml did not carry the current payload_format", written)
 
