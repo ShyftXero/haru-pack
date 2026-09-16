@@ -7,7 +7,7 @@ name = "haru-pack"
 dynamic = ["version"]
 description = "Pack a Python project (PEP 723 script or full project) into a single, EV-signable native launcher with Windows as a first-class target and primary deployment goal."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "ShyftXero" }]
 keywords = ["packaging", "uv", "pep723", "executable", "nim", "single-file", "pyinstaller", "distribution"]
@@ -19,7 +19,6 @@ dependencies = [
   "rich>=13",
   "platformdirs>=4",
   "tomli-w>=1",
-  "tomli>=2; python_version < '3.11'",
   "cryptography>=42",
 ]
 classifiers = [
