@@ -2907,7 +2907,7 @@ producing a working `nim`. (First proven by hand the same day: 6321 zig-cc invoc
 gcc.)
 Source: Asked for 2026-09-14 — make zig the way to compile Nim on a Pi, one code path, automatic
 where choosenim has no binary. docs/ZIG_TOOLCHAIN.md.
-Territory: src/haru_pack/toolchain.py, tests/test_zig_provider.py
+Territory: src/haru_pack/toolchain.py, src/haru_pack/nim_source.py, tests/test_zig_provider.py
 
 ## TRUST — the project being packaged is an input, not an author
 
