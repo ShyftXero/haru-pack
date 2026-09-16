@@ -479,3 +479,100 @@ def test_uv_fetch_declares_a_timeout_and_a_cap():
     assert src.count("timeout = FetchTimeoutSecs") >= 2, "a request went out without a timeout"
     assert "MaxUvArchiveBytes" in src
     assert "fetch(url)" not in src, "the unbounded, untimed puppy fetch() is back"
+
+
+# ------------------------------------------------------- .haru-links materialisation
+#
+# The build stores a file symlink's bytes once and lists the aliases in `.haru-links`
+# (payload.build_payload_zip). `stage.materialiseLinks` re-creates them as COPIES, before
+# `recordTree`, so the staged tree is byte-identical to one from a payload built before
+# this existed and every name is inside the sealed manifest.
+#
+# Both halves of every entry come out of the payload, which is checked against a digest
+# that is not a MAC — so the table is untrusted input, and a rewritten one must not become
+# an arbitrary-file-write, or a read of something outside the stage.
+
+LINKS = ".haru-links"
+
+
+def linked_payload(links: bytes, extra: dict[str, bytes] | None = None) -> dict[str, bytes]:
+    return {**GOOD_PAYLOAD, "vendor/real.bin": b"REALBYTES\n",
+            **(extra or {}), LINKS: links}
+
+
+def staged_root(out: str) -> Path:
+    return Path(out.strip())
+
+
+@pytest.mark.invariant("INV-PAYLOAD-06")
+def test_a_link_entry_is_materialised_as_a_real_copy(harness, tmp_path):
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip", linked_payload(b"vendor/alias.bin\tvendor/real.bin\n"))
+    r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
+    assert r.returncode == 0, r.stderr
+    root = staged_root(r.stdout)
+    assert (root / "vendor" / "alias.bin").read_bytes() == b"REALBYTES\n"
+    assert (root / "vendor" / "real.bin").read_bytes() == b"REALBYTES\n"
+    assert not (root / LINKS).exists(), "the link table was left in the staged tree"
+
+
+@pytest.mark.invariant("INV-PAYLOAD-06")
+def test_a_materialised_copy_is_inside_the_recorded_manifest(harness, tmp_path):
+    """The whole reason these are copies, not symlinks: walkDirRec skips pcLinkToFile, so a
+    symlink here would be absent from .stage-files and verifyTree would never check it."""
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip", linked_payload(b"vendor/alias.bin\tvendor/real.bin\n"))
+    r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
+    assert r.returncode == 0, r.stderr
+    recorded = (staged_root(r.stdout) / ".stage-files").read_text()
+    assert "vendor/alias.bin" in recorded, (
+        "the alias is not in .stage-files, so verifyTree would never check it:\n" + recorded)
+
+
+@pytest.mark.invariant("INV-PAYLOAD-06")
+@pytest.mark.parametrize("table", [
+    b"../escape.bin\tvendor/real.bin\n",       # write outside the stage
+    b"vendor/alias.bin\t../../etc/passwd\n",   # read outside the stage
+    b"/etc/cron.d/x\tvendor/real.bin\n",       # absolute link path
+    b"vendor/alias.bin\t/etc/passwd\n",        # absolute target
+])
+def test_a_link_table_cannot_reach_outside_the_stage(harness, tmp_path, table):
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip", linked_payload(table))
+    r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
+    assert r.returncode == 3, f"materialiseLinks accepted {table!r}: {r.stdout!r}"
+    assert "REFUSED" in r.stderr
+    assert not (tmp_path / "escape.bin").exists()
+
+
+@pytest.mark.invariant("INV-PAYLOAD-06")
+def test_a_link_to_a_member_the_payload_does_not_have_is_refused(harness, tmp_path):
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip", linked_payload(b"vendor/alias.bin\tvendor/ghost.bin\n"))
+    r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
+    assert r.returncode == 3 and "does not contain" in r.stderr, r.stderr
+
+
+@pytest.mark.invariant("INV-PAYLOAD-06")
+def test_a_link_colliding_with_a_real_member_is_refused(harness, tmp_path):
+    """Same rule expandCompressedMembers uses: two sources for one path, refuse to choose."""
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip",
+                 linked_payload(b"vendor/dup.bin\tvendor/real.bin\n",
+                                {"vendor/dup.bin": b"I WAS HERE FIRST\n"}))
+    r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
+    assert r.returncode == 3 and "refusing to choose" in r.stderr, r.stderr
+
+
+def test_a_malformed_link_line_is_refused(harness, tmp_path):
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip", linked_payload(b"no-tab-here\n"))
+    r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
+    assert r.returncode == 3 and "malformed" in r.stderr, r.stderr
+
+
+def test_a_payload_with_no_link_table_still_stages(harness, tmp_path):
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip", GOOD_PAYLOAD)
+    r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
+    assert r.returncode == 0, r.stderr

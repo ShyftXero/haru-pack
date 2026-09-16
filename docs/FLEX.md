@@ -10,15 +10,183 @@ python tools/flex-run.py --dry-run          # what would run
 Results land in `flex/out/results.json` and a summary table on stdout. Exit code is
 non-zero if anything came out other than expected.
 
+## It runs in a container, because it runs strangers' code
+
+This harness downloads code chosen by PyPI download rank — not by audit — and executes it,
+at three points: sdist build backends under `uv sync`, the binary the build produces, and
+any `[[bundle]]`/`[[post_install]]` step in the manifest. Every package gets its own
+throwaway containers, so a poisoned one cannot reach `$HOME`, your keys, or the next
+package's *run* (`INV-SANDBOX-01`, `docs/adr/0005-sandboxed-flex-and-exam-harnesses.md`).
+
+Two containers per package: the **build** gets the network and the shared cache, the **run**
+gets a throwaway cache of its own and — at thick — no network interface at all. The run phase
+never sees the shared cache, so nothing a package writes there can reach the next package's
+run.
+
+The build phase is the exception, and it is a real one. That phase needs the uv cache
+read-write, and the cache is shared across packages so a 25-package run does not fetch the
+same toolchain 25 times — which means a malicious sdist build backend can write into a cache a
+later package's **build** reads. So this is not cross-package isolation in general; it is
+isolation of the run phase, plus a shared build cache that is confined to a docker volume and
+never touches your filesystem. `docker volume rm haru-flex-cache` resets it, and running one
+package at a time is the only way to avoid it entirely today.
+
+The image (`docker/flex.Dockerfile`) carries the toolchain and is built on first use. It is
+tagged with a hash of the Dockerfile, `pins.toml`, `pyproject.toml` and every script in
+`docker/`, so bumping a pin or editing a digest-verifier rebuilds it. `src/` is deliberately
+*not* hashed: the copy baked into the image is overwritten at run time by the read-only `/src`
+mount, so retagging on a source edit would force a multi-minute toolchain rebuild for a file
+the run never reads. Your
+working tree is bind-mounted read-only at `/src`, so flex tests the code you are editing
+rather than a copy baked in whenever the image was last built.
+
+### Where the compiler comes from — `NIM_FROM`
+
+Both linux/amd64 and linux/arm64 are supported, but they get to Nim differently: choosenim
+publishes binaries for linux x86_64, macOS x86_64/arm64 and Windows, and **nothing for linux
+aarch64**. Both ends up on the same Nim version regardless, so an arm64 result and an amd64
+result are comparable rather than merely both green.
+
+```sh
+docker build -f docker/flex.Dockerfile --build-arg NIM_FROM=source -t haru-pack-flex:mine .
+```
+
+| `NIM_FROM` | what it does |
+|---|---|
+| `auto` (default) | choosenim where upstream publishes for it; else our pinned prebuilt binary; else compile from the pinned source |
+| `binary` | a pinned binary only — **fails** rather than quietly compiling for an hour |
+| `source` | compile from the pinned source; never run a Nim binary this project published |
+| `system` | use the Nim already present; fetch and compile nothing |
+
+`binary` and `source` exist for opposite reasons and both are reasonable. On a slow arm64 box
+you may want `binary` and prefer a clear failure to a surprise hour of compiling. If you would
+rather not execute a compiler *this project* built, you want `source` and will happily wait —
+measured on a 4-core Raspberry Pi, the full bootstrap plus image is roughly 25 minutes.
+
+`.github/workflows/nim-aarch64.yml` is what builds the prebuilt arm64 Nim, from the source
+tarball pinned in `pins.toml`. **There is no such pin yet**, so on arm64 `auto` compiles and
+`binary` fails: the workflow uploads the tarball and prints its sha256 with an instruction to
+add the entry by hand, and `pins.toml` carries a comment where the entry will go rather than
+the entry. It is absent on purpose for now — while this repository is private, an
+unauthenticated fetch of a release asset cannot work anyway.
+
+When the pin does land, its `provenance` must be the **workflow run URL**. Pinning a
+third-party artifact asserts "this is what the publisher published"; pinning our own asserts
+"this is what we built", which is worth little if the only evidence is that somebody ran a
+command on hardware nobody else can see.
+`test_any_pinned_nim_binary_cites_a_build_log_as_provenance` enforces that — vacuously today,
+since there is nothing yet for it to check, and waiting for the day there is.
+
+```sh
+python tools/flex-run.py --require-rootless   # refuse a rootful daemon (docs/ROOTLESS_DOCKER.md)
+python tools/flex-run.py --no-docker          # run it on THIS host; prints what that risks
+```
+
+There is no silent fallback: if docker is missing and you did not pass `--no-docker`, flex
+stops and tells you. The first hard thing to get right about a safe default is that it stays
+the default.
+
 ## What it does
 
-For each package: build a tiny project that depends on it, whose `flexapp/__main__.py`
-imports it and does one small real thing, then **run the resulting binary** and require it
-to print `FLEX_OK`. The entrypoint is `python -m flexapp`, so stdout comes from a module
-that had to be importable inside the packaged environment.
+For each package: build a tiny project that depends on it, then **run the resulting binary**
+and require it to print `FLEX_OK`. The entrypoint is `python -m flexapp`, so stdout comes
+from a module that had to be importable inside the packaged environment.
 
 Running it is the point. A binary that builds and then dies on startup is a failure, and
 only executing it catches that.
+
+## Three rungs, and flex owns the first two
+
+| style | what a pass proves | how |
+|---|---|---|
+| `importable` | the payload carries a library that **imports** | default |
+| `smoke` | the library does one small **real thing** | `--style smoke` |
+| `suite` | the library passes its **own test suite** | `tools/exam.py` |
+
+`importable` is the default because it has exactly one failure mode, and it is the one this
+harness exists to detect. The `smoke` bodies are hand-written per package in
+`flex/curation.toml`, which makes each one a second thing that can break for reasons that
+have nothing to do with packaging — an API moved, a keyword was removed, the package wants a
+display. When that happened the run said "flex failed" and somebody had to read a traceback
+to find out whether haru-pack had done anything wrong at all.
+
+That is a narrowing, and it costs something real: a default run no longer exercises the
+library. `--style smoke` and `tools/exam.py` are still there when you want the stronger claim.
+
+The style is recorded in `flex/out/results.json` and printed in the summary header. An
+`importable` pass and a `smoke` pass are different claims, and results that do not say which
+one they hold invite comparing two runs that were never asking the same question.
+
+## The import name is discovered, never guessed
+
+`pip install pillow` gives you `import PIL`. Nothing recovers that from the name, which is
+why `flex/curation.toml` used to carry eight hand-written `import_name` entries — eight human
+guesses, each able to go stale without anyone noticing.
+
+The `importable` probe asks the installed distribution instead, from inside the binary, where
+it actually exists. Three routes, best first, and **the route is reported** so a guess never
+reads as a fact:
+
+| route | means |
+|---|---|
+| `packages_distributions` | exact: installed metadata, inverted. 3.10+ |
+| `top_level.txt` | the wheel said so. Back to 3.8; absent from some wheels |
+| `guess` | `name.replace("-", "_")`. Wrong for pillow, and it says so |
+
+Curated `import_name` values are now **assertions**, not inputs: the harness checks each one
+against what the binary found and fails the package on a mismatch, naming both and saying the
+manifest is what is stale (`INV-FLEX-03`). They cannot steer the probe — if they could,
+checking the probe against them would be a tautology.
+
+```
+resolved pyyaml -> _yaml, yaml (via packages_distributions)
+successfully imported _yaml
+successfully imported yaml
+```
+
+Each module is attempted in its own `try/except/finally`: the `except` prints the **full
+traceback**, because that output is the only artefact left to dig into once the container is
+gone, and per-module means a package with several top-level modules tells you *which* one
+broke rather than just that something did.
+
+## Keeping the caches off your disk
+
+```sh
+python tools/flex-run.py --cache-info            # what is using what
+python tools/flex-run.py --flush-cache sandbox   # remove the harness's docker volume
+python tools/flex-run.py --flush-cache host      # `uv cache prune` on the shared host cache
+python tools/flex-run.py --max-cache-gb 20 ...   # prune the volume before a run if over
+```
+
+Measured on the dev box, which moved this design — the sandbox volume was **not** the problem:
+
+| what | size |
+|---|---|
+| `~/.cache/uv` | **18.9 GB** |
+| `haru-flex-cache` (sandbox volume) | 13.5 MB |
+| `~/.cache/haru-pack` | 273 MB |
+| anonymous run volumes | 0 — `--rm` reaps them |
+
+The volume stays small because `warm_cache_and_lock` points `UV_CACHE_DIR` at the payload's
+own bundled cache inside the build tree, not at ours.
+
+Ownership decides what may be reclaimed automatically. The volume is the harness's own and
+rebuildable, so `--max-cache-gb` may remove it. `~/.cache/uv` is shared with every project on
+the machine and most of it has nothing to do with flex, so it is only ever reported, and only
+ever *pruned*, and only when you type `--flush-cache host`. `--max-cache-gb` never touches it.
+
+**That volume is small and expensive, not small and idle.** It holds haru-pack's
+XZ-compressed uv (55.6 MB → 14.2 MB at preset 9), which is recomputed if it is gone. Measured
+across a top25 matrix:
+
+| sandbox cache | build time |
+|---|---|
+| cold (volume removed) | 207–213 s |
+| warm | 70–83 s |
+
+About 140 s per build, paid by every build that runs before the first one repopulates it — to
+reclaim 13.5 MB. So `--max-cache-gb` refuses a budget under 1 GB and says what it would have
+cost; `--flush-cache sandbox` still empties it, because that one is you saying you meant it.
 
 ## Proving the payload carries its dependencies
 
@@ -30,15 +198,23 @@ At the **default** tier the dependency is fetched on first run, so a green resul
 packaging path and nothing about what the binary contains. At `--thick` the payload is
 supposed to carry uv, the interpreter and every dependency.
 
-`--offline-check` runs the thick binary a second time with a **pristine cache directory**
-and uv forced offline. The pristine part is load-bearing: with a warm `~/.cache/haru-pack`
-the staged tree is reused and the run succeeds no matter what the payload holds. The summary
-column reads `carried` or `FETCHED`.
+`--offline-check` runs the thick binary a second time in a container with **no network
+interface** and a **cache volume that has never been used**. The pristine cache is
+load-bearing: with a warm one the staged tree is reused and the run succeeds no matter what
+the payload holds. The summary column reads `carried` or `FETCHED`.
 
-What this does *not* prove: it forces uv offline and points the proxy variables at a dead
-port, which blocks the dependency-fetch path. It is not a network namespace, so it does not
-stop a package from opening a socket of its own. A green offline check means "the
-dependencies came from the payload", not "this binary makes no network calls".
+This is a real network namespace (`INV-SANDBOX-02`). It used to force uv offline and point
+the proxy variables at a dead port, and this page used to say so: that blocked the
+dependency-fetch path but did not stop a package opening a socket of its own. `--network
+none` does.
+
+A green offline check still means "the dependencies came from the payload", not "this binary
+makes no network calls" — the second is a claim about the package's behaviour, and this
+harness does not measure it.
+
+Run with `--no-docker` and the offline check falls back to the old approximation, because
+the host cannot create a network namespace. Those results print as `carried*` rather than
+`carried`, so the weaker evidence is not read as the stronger.
 
 Measured here, `certifi` at each tier:
 
@@ -211,6 +387,13 @@ See `INV-FLEX-01` and `INV-FLEX-02` in [INVARIANTS.md](../INVARIANTS.md).
 ## First full hard-target run — 2026-09-09
 
 This box: linux-x86_64, all thick unless noted, `--offline-check`.
+
+> **Smoke-era, and on the host.** These numbers predate two changes and are not directly
+> comparable with a run from today. They were produced with the hand-written `smoke` bodies,
+> which is now `--style smoke` rather than the default; and before the harness ran in
+> containers, so the `offline` column here is the old `UV_OFFLINE`-plus-dead-proxy
+> approximation rather than a real network namespace (`INV-SANDBOX-02`). The findings below
+> stand — they are about package *shapes*, which have not changed.
 
 | package | tier | verdict | size | build | run | offline |
 |---|---|---|---|---|---|---|

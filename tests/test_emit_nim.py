@@ -240,7 +240,7 @@ def test_emit_failure_does_not_fail_the_build(stub_toolchain, script_project, tm
     assert "simulated kit failure" in info.get("emit_nim_error", "")
 
 
-@pytest.mark.invariant("INV-SECRET-02")
+@pytest.mark.invariant("INV-SECRET-03")
 def test_emit_kit_never_contains_the_build_secret(stub_toolchain, script_project, tmp_path):
     """W1: an --encrypt build's kit must not leak the key. The secret is used to derive the
     encryption key and is never stored (no --embed-secret), so it must appear in NO kit file."""

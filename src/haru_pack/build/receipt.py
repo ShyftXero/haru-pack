@@ -5,7 +5,12 @@ play, whether the binary reaps its stage, or whether the encryption they asked f
 actually applied. Two rules govern everything recorded here:
 
 * **Nothing secret.** The canary map is env-name prefixes, the staging knobs are policy,
-  and the sources are URLs. The secret VALUE lands in no artifact (INV-SECRET-02).
+  and the sources are URLs. The secret VALUE lands in no artifact the build produces,
+  this receipt included (INV-SECRET-03). That citation said INV-SECRET-02 until
+  2026-09-15, when two entries that had been sharing the id were split apart:
+  INV-SECRET-02 is now the claim about what a customer who RUNS the binary can recover
+  from their own staging cache, which says nothing about what the build writes on the
+  packager's disk — which is what a receipt is.
 * **Effective values only.** `reap` is the value after the `--ephemeral` coupling, not the
   flag the operator typed, so the receipt can never claim a cleanup the binary will not do
   (INV-EPHEMERAL-02, INV-BUILD-01).

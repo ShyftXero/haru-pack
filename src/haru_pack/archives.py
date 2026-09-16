@@ -2,12 +2,27 @@
 
 Two invariants live in this module.
 
-**INV-SUPPLY-01** — every artifact haru-pack downloads and then executes is checked
-against a digest pinned *in this repository* before it is extracted. `fetch_verified`
-is the only download entry point the rest of the package may use, and it refuses to
-fetch an artifact it has no pin for rather than falling back to "TLS said it was
-fine". TLS authenticates a host, not a file: it says nothing about a mutable release
-asset, a compromised publisher account, or a mirror.
+**INV-SUPPLY-01** — the artifacts haru-pack itself fetches over the network — the
+`choosenim` installer, the `zig` toolchain archive, the `uv` release asset, and the
+python-build-standalone interpreter — are verified against a digest pinned *in this
+repository* before they are extracted or executed, and an artifact with no pin is
+refused rather than fetched.
+
+This module owns the mechanical half of that. `fetch_verified` is the only download
+entry point the rest of the package may use; it hashes what it received and compares
+against the pin, and when there is no pin it raises `UnpinnedArtifact` *before* any
+network call rather than falling back to "TLS said it was fine". TLS authenticates a
+host, not a file: it says nothing about a mutable release asset, a compromised
+publisher account, or a mirror.
+
+It does **not** cover everything haru-pack ends up executing, and the invariant no
+longer says it does. The named gap is the Nim compiler: we pin the choosenim
+INSTALLER, choosenim then downloads the Nim toolchain from nim-lang.org over its own
+TLS, and nothing in this repository hashes what it wrote. This docstring used to open
+with "every artifact haru-pack downloads and then executes", which is the exact
+formulation INVARIANTS.md narrowed away from on 2026-09-15 — it read as a promise that
+covered that compiler, the one input whose substitution would reach every binary we
+ship. See INV-SUPPLY-01's gap Note and `toolchain.py`'s docstring.
 
 **INV-SUPPLY-03** — no extraction may write outside the destination directory.
 `tarfile.extractall(filter="data")` is the right answer, but it only exists on 3.12+

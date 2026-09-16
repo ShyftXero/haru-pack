@@ -37,16 +37,22 @@ way to distinguish a test that would go red along the red-path from one that cou
 That is why the Red-path field is mandatory and why neutralize-then-observe-red is the
 expected workflow before marking an invariant `active`.
 
-`INV-LAUNCH-03` and `INV-SUPPLY-02` are deliberately `proposed`. The behavior is **not implemented**, or is only
-partly implemented and the entry says which part. They are written down so the gap is
-legible, not so it looks covered.
+Fourteen entries are deliberately `proposed` as of 2026-09-15 — `INV-LAUNCH-03`,
+`INV-SUPPLY-02`, the whole `INV-TRUST-*` family and others; `grep '^Status: proposed'` for the
+current list, which this paragraph will otherwise fall behind. The behavior is **not
+implemented**, or is only partly implemented and the entry says which part. They are written
+down so the gap is legible, not so it looks covered.
 
-**Every `active` entry below was promoted by walking its Red-path** — neutralize the guard,
-observe the claiming test go red, restore — on 2026-09-09. Where an adversarial verifier
-subsequently proved a claiming test *vacuous* (green with the guard removed), the entry was
-not promoted until the test was fixed; two were. Two further entries had their **Statement
-narrowed** because verification showed the original wording claimed more than the code does.
-Those narrowings are recorded in the entries themselves rather than quietly applied.
+**Each `active` entry records in its own Red-path field how it was promoted.** The entries dated
+2026-09-09 were promoted by walking it — neutralize the guard, observe the claiming test go red,
+restore. Later entries give their own date, and some say plainly what was NOT walked:
+`INV-SANDBOX-01` and `INV-SANDBOX-02` were walked against the argv builder only, not against the
+call site that decides which mode the builder is handed. Where an adversarial verifier
+subsequently proved a claiming test *vacuous* (green with the guard removed), the entry was not
+promoted until the test was fixed; two were. Several entries have had their **Statement
+narrowed** because verification showed the original wording claimed more than the code does —
+most recently `INV-SUPPLY-01`, `INV-SANDBOX-01` and `INV-SANDBOX-02` on 2026-09-15. Those
+narrowings are recorded in the entries themselves rather than quietly applied.
 
 ---
 
@@ -386,8 +392,12 @@ Territory: tools/busybody*.py, tests/test_busybody_ledger.py
 ### INV-CHAOS-07
 Status: active
 Statement: A declaration that cannot be honoured as written is refused at build time, with a
-message naming both sides of the contradiction. haru-pack never resolves a config conflict
-silently and hands back an artifact whose damage is discovered on the target.
+message naming both sides of the contradiction — for the conflicts the build-time validators
+cover (`build/validate.py`, `build/declare.py`, `build/geo.py`). Within that scope haru-pack
+does not resolve a config conflict silently and hand back an artifact whose damage is
+discovered on the target. The scope is a list of named checks, not a universal property: a
+conflict nobody wrote a check for still resolves silently, and one such case is known and
+unfixed — see the Note on `--thin --thick`.
 Actors: whoever edits `haru_pack.toml` — often by copying a block from another project — and
 whoever receives the binary that edit produced.
 Assets: the operator's ability to predict an artifact from its config. Every other guard in
@@ -424,6 +434,18 @@ entrypoint — so neither had reached the wedge it claimed to test. That is the 
 tamper detection. `REFUSED-UNRELATED` now names it: the build refused without mentioning
 either side of the conflict, so the case missed its target and is a note against busybody
 rather than a pass for haru-pack.
+Note: **Known uncovered instance — contradictory CLI tier flags.** `--thin --thick` builds a
+thick binary and says nothing. `cli/builddriver._resolve_tier` runs `if thin: tier = "thin"`
+and then `if thick or chonky: tier = "thick"` — two unguarded ifs, so whichever is written
+second wins. Nothing in the tree states that thick beats thin, so that is an accident of
+ordering rather than a documented precedence (unlike the config ladder, which states its
+order). Measured by busybody's `contradictory_tier_flags` case in
+`tools/busybody_cases_directives.py`; reported in docs/BUSYBODY.md and not yet fixed. It is
+outside the Statement because the validators above see a DECLARATION, and flag-vs-flag
+conflicts have already collapsed into a single `tier` value before `build()` is called —
+there is nothing left for them to contradict. That is an explanation of why the check is
+missing, not a reason it should be: the honest wording is the narrowed Statement plus this
+note, not a "never" the tier flags falsify.
 Note: `SILENT-WEDGE` is in `FATAL`. `WARNED` deliberately is not — resolving a conflict and
 saying which side lost is the behaviour this invariant asks for, not a defect.
 Note: Wedge cases are `per_fixture=False`. They build their own artifact and say nothing
@@ -710,6 +732,47 @@ direction.
 Note: These tests do not build anything. `tools/flex-run.py` does that, and it needs a
 toolchain and several minutes; the invariants here are about the LIST, not the builds.
 Territory: flex/curation.toml, src/haru_pack/scaffold.py, tests/test_flex.py
+
+### INV-FLEX-03
+Status: active
+Statement: The import name the flex harness exercises is one the INSTALLED distribution
+actually provides, discovered from its metadata rather than derived from its name. A curated
+`import_name` in `flex/curation.toml` is an assertion checked against that discovery, never an
+input to it, and the probe reports which of its three resolution routes produced the answer so
+a guess can never read as a fact.
+Actors: whoever adds a package to the matrix and has to decide what it imports as; the
+maintainer six months later reading a green run and concluding the package imports; any
+distribution that renames, splits or merges its top-level modules between releases.
+Assets: the meaning of a flex pass. "The payload carries an importable library" is the whole
+claim of the `importable` style, and it is worth nothing if the harness imported a module name
+it invented rather than the one the distribution ships.
+Red-path: Three, each walked 2026-09-14. (1) Point a curated `import_name` at a module the
+distribution does not provide — `test_a_stale_curated_import_name_is_a_failure_that_blames_the_manifest`
+goes red, and the message must blame the MANIFEST rather than the package. (2) Generate the
+probe body from `pkg["import_name"]` —
+`test_the_probe_does_not_consult_the_curated_import_name` goes red, because a curated value
+that can steer the probe makes checking the probe against it a tautology. (3) Return the
+last-resort guess without labelling it —
+`test_the_last_resort_guess_is_labelled_as_a_guess` goes red.
+Source: 2026-09-14, issue #33. `flex/curation.toml` carried eight hand-written `import_name`
+entries — `pyyaml` -> `yaml`, `python-dateutil` -> `dateutil`, and six more. Every one was a
+human guess that could go stale silently, and `pillow` -> `PIL` is the shape that makes
+guessing structurally wrong: nothing recovers `PIL` from `pillow`. The exact answer already
+exists in the installed metadata, and the probe runs inside the binary where that metadata is.
+Note: Normalisation is PEP 503 — `typing-extensions`, `typing_extensions` and
+`Typing.Extensions` are one distribution. Comparing raw names silently resolves nothing for
+every distribution whose name contains `-` or `.`, which is most of them, and the failure mode
+is a silent fall-through to the guess rather than an error.
+Note: Three routes, best first: `packages_distributions()` (exact, 3.10+), `top_level.txt`
+(the wheel said so, works back to 3.8, absent from some wheels), then
+`name.replace("-", "_")`. The route is RETURNED and recorded in `flex/out/results.json`. That
+is the whole defence against this becoming curation again by another name.
+Note: This governs the `importable` style only. The `smoke` style still honours
+`import_name`, because a hand-written smoke body is hand-written throughout and the curated
+name is part of it — conflating the two would either break the existing bodies or make this
+check vacuous.
+Territory: tools/flex_probes.py, tools/flex-run.py, flex/curation.toml,
+tests/test_flex_probes.py
 
 ---
 
@@ -1006,13 +1069,20 @@ Status: active
 Statement: `overlay.verify()` reports `sha_ok=False` for any modification to the attached
 payload; the build-time integrity check is not decorative.
 Actors: anyone tampering with a distributed binary; the operator running `haru-pack verify`.
-Assets: the only integrity signal haru-pack offers on unsigned (ELF) output.
+Assets: the integrity signal haru-pack offers to someone holding an unsigned (ELF) binary
+who wants to check it WITHOUT running it. (The launcher checks the same digest at startup
+under `INV-LAUNCH-01`; that one only helps you if you already trust the binary enough to
+execute it.)
 Red-path: Make `verify()` return `sha_ok=True` unconditionally, or compare the digest against
 itself. The claiming test mutates one payload byte and goes red.
 Source: Adversarial review 2026-09-09, findings C2/C3.
-Note: This invariant covers the **build-time** check only. The **runtime** launcher does not
-perform it at all — see `INV-LAUNCH-01`, which is `proposed` for exactly that reason. Do not
-read this entry as evidence that shipped binaries self-verify. They do not.
+Note: This invariant covers the **build-time** check only — `overlay.verify()`, which is what
+`haru-pack verify` runs on a binary you already have. The runtime check is a separate promise
+under `INV-LAUNCH-01`, which is now `active`: `main.launch` calls `verifyPayloadDigest` before
+staging (main.nim:251). Neither one is tamper-evidence. Both compare the payload against a
+digest that lives in the same attacker-writable footer, so whoever rewrites the payload can
+recompute the digest beside it; read `INV-LAUNCH-01`'s Note before citing either as an
+anti-tamper claim.
 Territory: src/haru_pack/overlay.py
 
 ### INV-PAYLOAD-03
@@ -1231,10 +1301,12 @@ Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/manifest.nim
 
 ### INV-SUPPLY-01
 Status: active
-Statement: Every artifact haru-pack downloads **directly** — the Nim toolchain, the `uv`
-release asset, and the python-build-standalone interpreter — is verified against a digest
-pinned in this repository before it is extracted or executed, and an artifact with no pin is
-refused rather than fetched.
+Statement: Every artifact haru-pack itself fetches over the network — the `choosenim`
+installer, the `zig` toolchain archive, the `uv` release asset, and the python-build-standalone
+interpreter — is verified against a digest pinned in this repository before it is extracted or
+executed, and an artifact with no pin is refused rather than fetched. The Nim compiler is **not**
+in that list. haru-pack pins the choosenim INSTALLER; the Nim toolchain choosenim then downloads
+from nim-lang.org is verified by choosenim, not by this repository. See the gap Note below.
 Actors: anyone who can serve or tamper with a release asset; a compromised upstream account.
 Assets: the build host's toolchain, and every binary it subsequently produces. The staged
 interpreter ends up inside a signed customer deliverable.
@@ -1255,13 +1327,32 @@ executes" to "downloads directly".** The original wording was false and an adver
 proved it. The two gaps it found — `bundle_python(target="host")` shelling out to
 `uv python install`, and `warm_cache_windows` discarding the lockfile's hashes — have since been
 closed by `INV-SUPPLY-07` and `INV-SUPPLY-08`, and `bundle_uv`'s PATH shortcut by
-`INV-SUPPLY-06`. The narrow wording is kept anyway: it says what THIS entry proves, and the
+`INV-SUPPLY-06`. The narrow scope is kept anyway: it says what THIS entry proves, and the
 distinction between a direct download and a delegated one is exactly what went unnoticed the
-first time.
-Note: No digest is pinned for Nim `linux_arm64` — upstream publishes no such artifact for 2.2.6.
-The table entry is deliberately absent and `install_nim` raises `UnpinnedArtifact` on that
-platform. No value was invented to make the check pass.
-Territory: src/haru_pack/archives.py, src/haru_pack/bootstrap.py, src/haru_pack/bundle.py
+first time. **Reworded again 2026-09-15**, because "directly" had become a word doing hidden
+work: it excluded the Nim toolchain while the same sentence listed the Nim toolchain as its
+first example, so the Statement contradicted itself and read as a stronger promise than the code
+makes. The list is now literal and the delegated fetch is named below instead of implied by an
+adverb.
+Note: **Residual gap, named rather than covered: the Nim compiler on a host build.**
+`install_nim` verifies the choosenim installer against `pins.toml`
+(`src/haru_pack/toolchain.py:433`) and then executes it (`:440`); choosenim downloads the whole
+Nim toolchain from nim-lang.org over its own TLS, and nothing in this repository hashes what it
+wrote. The pin chain stops at the installer. This is the widest blast radius of any unpinned
+input in the project, because that compiler builds the launcher embedded in every binary
+haru-pack ships to a customer — a substituted Nim is a substituted launcher in every artifact
+built afterwards. `toolchain.py`'s module docstring says the same thing at the code. Closing it
+means installing pinned Nim releases ourselves rather than delegating to choosenim; that is not
+done, and no test claims it is.
+Note: The aarch64 docker image is the one Nim acquisition path WITHOUT that gap:
+`docker/install-nim-source.py` and `docker/install-nim-binary.py` fetch a Nim pinned in
+`pins.toml` (`kind = "nim"`, digest from the publisher's own `.sha256` file) and refuse an
+unpinned one. It exists because choosenim publishes no `linux_arm64` binary at all, so
+`install_nim` refuses on that platform rather than inventing a fallback: `choosenim_asset`
+returns None and the error names the supported hosts. No digest was invented to make a check
+pass.
+Territory: src/haru_pack/archives.py, src/haru_pack/bootstrap.py, src/haru_pack/bundle.py,
+src/haru_pack/toolchain.py, src/haru_pack/pins.toml
 
 ### INV-SUPPLY-02
 Status: proposed
@@ -1312,11 +1403,20 @@ pins, empty download, over-cap archive). Separately, delete its CALL from `ensur
 `tests/test_stage_callsites.py` goes red.
 Source: Adversarial review 2026-09-09, boundary B6 / finding W6. `writeFile(arc, fetch(url))`
 had no digest, no cap and no timeout.
-Note: **Read this narrowly. Nothing populates `uv_sha256` yet.** Writing it at build time is
-Python-side work in `build/`/`tiers.py`, outside the launcher. Until that lands the field is
-absent in every real payload, the pin check is vacuous in production, and the launcher prints a
-warning on stderr that the uv it is about to execute is unverified. The mechanism is proven; the
-deployment is not.
+Note: **`uv_sha256` IS populated, as of 2026-09-11.** `_stage_uv` writes the pinned digest of
+the target's uv release asset into the payload manifest for the `thin` tier — the only tier that
+fetches uv on the customer's machine — and refuses the build outright when no pin exists
+(`src/haru_pack/build/assemble.py:108`, INV-SUPPLY-01). Until 2026-09-15 this Note said the
+opposite in bold: that nothing populated the field and the pin check was "vacuous in
+production". That was written when the mechanism landed in the launcher ahead of the build side,
+and it was never updated when the build side landed a day later — a stale Note claiming a
+weakness the code no longer has, which is the same class of drift INV-DOC-02 exists for, pointed
+the other way.
+Note: The unverified path is still REACHABLE, for one case only: a payload built by an older
+haru-pack carries no `uv_sha256`, and for those `ensureUv` warns on stderr that the uv it is
+about to download and execute is unverified and then proceeds. It does not refuse. A binary
+built by this version of haru-pack cannot reach that branch, because the build fails before
+producing one.
 Note: Further limits — puppy exposes no streaming API, so the cap is enforced from a HEAD
 content-length pre-flight and then on the body once it is already in memory; the cap is on the
 compressed archive, so a zip bomb under it is not caught; TLS is the OS's, unpinned.
@@ -1482,13 +1582,36 @@ src/haru_pack/archives.py, src/haru_pack/bundle.py
 ### INV-SUPPLY-03
 Status: active
 Statement: No archive is extracted with a call that permits writes outside the destination
-directory; every `tarfile` extraction passes `filter="data"`.
+directory. Every `tarfile` extraction in the source goes through `archives.safe_extract_tar`,
+which uses `filter="data"` on interpreters that have it and otherwise screens every member
+itself before extracting.
 Actors: whoever controls an archive we fetched over unverified TLS (see INV-SUPPLY-01).
 Assets: the build host's filesystem.
-Red-path: Drop the `filter=` argument from any `extractall` call in `bootstrap.py` or
-`bundle.py`. The claiming test scans the source for unfiltered `extractall` and goes red.
+Red-path: Delete the `_reject_unsafe_members(tf, dest)` call from `safe_extract_tar`'s fallback
+branch (archives.py:128) — `test_traversing_member_is_rejected` builds a tar whose member is
+`../victim.txt` and goes red on any interpreter without `data_filter` — see the Note for which
+ones those are, and for why CI is not currently one of them. Or call
+`tarfile.open(...).extractall(dest)` directly from any module under `src/` other than
+`archives.py`: `test_no_unfiltered_tar_extraction_in_the_source` scans for that call shape and
+goes red on every interpreter.
 Source: Adversarial review 2026-09-09, finding W8. `requires-python = ">=3.9"`, where the
 tarfile default is the pre-CVE-2007-4559 behavior.
+Note — the two paths, because the statement used to say `filter="data"` full stop and that was
+not true of every supported interpreter. `safe_extract_tar` takes the `filter="data"` branch
+only when `hasattr(tarfile, "data_filter")`: 3.12+, plus the backports in 3.9.17, 3.10.12 and
+3.11.4. On 3.9.0-3.9.16, 3.10.0-3.10.11 and 3.11.0-3.11.3 — all inside `requires-python =
+">=3.9"` — it falls back to `_reject_unsafe_members` (archives.py:108) and then a bare
+`extractall`. That fallback rejects members whose path escapes the destination, symlinks and
+hardlinks whose target escapes it, and device nodes. It is deliberately narrower than
+`data_filter`: it does not clear setuid/setgid or other high mode bits, and does not normalize
+permissions. The escape property the statement claims holds on both paths; the mode-sanitizing
+extras of `data_filter` do not.
+Note — the fallback is not covered by CI today. The matrix pins `3.9` and `uv python install
+3.9` resolves to the newest 3.9 patch, which is past the 3.9.17 backport, so both CI jobs take
+the `filter="data"` branch. Walking the fallback red-path means asking for a pre-backport patch
+release by hand — `uv venv --python 3.9.16` (also 3.10.11, 3.11.3; all three are downloadable
+python-build-standalone builds). Closing this properly is a ci.yml change, not an INVARIANTS.md
+one.
 Territory: src/haru_pack/bootstrap.py, src/haru_pack/bundle.py
 
 ---
@@ -1601,9 +1724,21 @@ Status: active
 Statement: A license secret typed at the runtime prompt is never echoed to the terminal.
 Actors: shoulder-surfers; anyone reading a recorded terminal session or CI log.
 Assets: the license secret, which is the entire trust anchor — there is no PKI behind it.
-Red-path: Once implemented — run an encrypted build interactively and observe no echo.
-Source: Adversarial review 2026-09-09, finding W11. `cryptbox.resolveSecret` uses
-`stdin.readLine()`; `std/terminal` is already imported but `readPasswordFromStdin` is not used.
+Red-path: Change `readPasswordFromStdin("")` back to `stdin.readLine()` in
+`cryptbox.resolveSecret` (cryptbox.nim:103). Two tests go red.
+`test_typed_secret_is_not_echoed_to_the_terminal` drives the real decryptor over a kernel pty
+with ECHO left ON, types the secret, and fails when those bytes come back down the master; it
+also asserts the container actually opens, so a no-echo read that mangled the secret would not
+pass for the wrong reason. `test_the_secret_prompt_uses_a_no_echo_read` pins the mechanism by
+grepping the proc body, so the refactor is caught even on a box with no pty. The pty test has
+its own guard-of-guards, `test_the_echo_check_can_see_an_echo`: it types a WRONG secret at the
+same prompt and requires both that the open fails (rc 5) and that the wrong secret was not
+echoed either — proof the bytes really reach the child, so a misconfigured pty cannot make the
+first test pass vacuously.
+Source: Adversarial review 2026-09-09, finding W11, and fixed since: `resolveSecret` read the
+secret with `stdin.readLine()` while `std/terminal` was already imported and
+`readPasswordFromStdin` went unused. It now writes the prompt to stderr — so it never pollutes
+the app's stdout — and reads with no echo.
 Territory: src/haru_pack/launcher/cryptbox.nim
 
 
@@ -1652,10 +1787,43 @@ artifact the client holds. haru-pack's job is to be honest that packing is not t
 Note: `--emit-nim` widens what sits on the packager's OWN disk, not what the customer gets: the
 kit's `payload.bin` is the exact bytes the binary already carries (ciphertext under `--encrypt`,
 plaintext otherwise), so it exposes nothing new. The build SECRET/key is derived-from, not
-stored, and is never written to any kit file —
-`test_emit_kit_never_contains_the_build_secret` greps every emitted file to prove it.
+stored, and is never written to any kit file — that half is INV-SECRET-03's claim, proved by
+`test_emit_kit_never_contains_the_build_secret` grepping every emitted file. It is named here
+because the kit is what widens the packager-side exposure, not because this entry proves it.
+Note: This entry and INV-SECRET-03 carried the SAME id until 2026-09-15, and only the other one
+was loaded (see its first Note). They are neighbours because they are easy to conflate and must
+not be: this one is about what a customer who RUNS the binary can recover from their own cache,
+INV-SECRET-03 is about what the build writes to disk on the packager's machine. Neither implies
+the other — a build that leaks nothing still ships a payload the runner can stage and read.
 Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/crypto.py, src/haru_pack/emit/,
 tools/busybody*.py, tests/test_reverse_engineer.py, tests/test_emit_nim.py
+
+### INV-SECRET-03
+Status: active
+Statement: A build secret is never written into a manifest, a build receipt, an `--emit-nim`
+kit, or any other artifact the build produces, and it is not present in the value `build.build`
+returns to its caller.
+Actors: anyone who reads the project repo or the shipped binary.
+Assets: the license secret.
+Red-path: Add the secret to the `info` dict returned by `build.build`, or to the manifest
+written by `assemble_payload`. `test_secret_never_lands_in_a_produced_artifact` builds with a
+known secret and asserts it appears in no produced file or return value, and
+`test_emit_kit_never_contains_the_build_secret` greps every file of an emitted kit; both go red.
+Source: Adversarial review 2026-09-09. `docs/CONFIG.md` states the secret is never stored in
+config — asserted in prose only.
+Note: **This entry was a second `### INV-SECRET-02` until 2026-09-15**, declared under the OBF
+section with a Statement unrelated to the INV-SECRET-02 above. `load_invariants` keys entries by
+id and keeps the last one it parses, so while both existed this Statement was the only one the
+machinery loaded, the one above was unvalidated prose, and all ten markers naming
+`INV-SECRET-02` were credited here — including the seven in `tests/test_reverse_engineer.py`,
+which prove the other claim. Renumbered rather than merged, because the two say different
+things: this one is about what the BUILD emits, INV-SECRET-02 is about what a shipped binary
+yields to someone who runs it. A commit, report or marker dated before 2026-09-15 that cites
+`INV-SECRET-02` and talks about manifests, receipts or kits means this entry.
+Note: This does **not** cover `--secret <literal>`, which puts key material in shell history
+and `ps` output. That is a documented sharp edge, not a defended one.
+Territory: src/haru_pack/build/, src/haru_pack/cli/, src/haru_pack/emit/,
+tests/test_build_encryption.py, tests/test_emit_nim.py
 
 ---
 
@@ -1707,21 +1875,6 @@ protect different things (INV-SECRET-02), and the code wires them separately so 
 one cannot silently alter the other.
 Territory: src/haru_pack/obfuscate.py, src/haru_pack/build/, src/haru_pack/cli/,
 tests/test_obfuscate.py
-
-### INV-SECRET-02
-Status: active
-Statement: A build secret is never written into a manifest, a build receipt, or any other
-artifact the build produces.
-Actors: anyone who reads the project repo or the shipped binary.
-Assets: the license secret.
-Red-path: Add the secret to the `info` dict returned by `build.build`, or to the manifest
-written by `assemble_payload`. The claiming test builds with a known secret and asserts it
-appears in no produced file or return value; it goes red.
-Source: Adversarial review 2026-09-09. `docs/CONFIG.md` states the secret is never stored in
-config — asserted in prose only.
-Note: This does **not** cover `--secret <literal>`, which puts key material in shell history
-and `ps` output. That is a documented sharp edge, not a defended one.
-Territory: src/haru_pack/build/, src/haru_pack/cli/
 
 ---
 
@@ -1868,7 +2021,11 @@ publisher's: `bundle_uv` verifies the release against `pins.toml` (`INV-SUPPLY-0
 Scope of the runtime check — read this before citing the invariant: it detects **corruption**
 (a truncated or bit-rotted member, a mismatched `.size`, a decoder bug), NOT tampering. The
 digest sidecar sits next to the member, so an attacker who can rewrite `uv.xz` can rewrite
-`uv.xz.sha256` with it. Authenticity of the payload as a whole is `INV-LAUNCH-01`, which is
+`uv.xz.sha256` with it. Nor does `INV-LAUNCH-01` (`active`) close that gap for the payload as a
+whole: it is the same shape of check — payload against a digest in the same attacker-writable
+footer — so it too detects corruption rather than tampering. Authenticity of the whole artifact
+comes from a signature over the whole binary: Authenticode on Windows, nothing equivalent on
+Linux ELF output. See `INV-LAUNCH-01`'s Note, and `INV-LAUNCH-03`, which is the real fix and is
 still `proposed`. The original wording of this entry said the expansion is "byte-identical to
 the publisher's release" full stop, with nothing at runtime behind it — flagged by the
 adversarial review of 2026-09-11 as a claim the code did not back, which is the exact failure
@@ -1929,6 +2086,57 @@ Source: Written with `INV-PAYLOAD-04`, 2026-09-10 — the decoder was vendored r
 fetched precisely so it would be reviewable in a diff, which is only true if drift is
 detectable.
 Territory: src/haru_pack/launcher/xz/, tests/test_uv_compression.py
+
+### INV-PAYLOAD-06
+Status: active
+Statement: A file symlink inside the payload is stored **once**, with its aliases listed in
+`.haru-links`, and the launcher re-creates each alias as a **copy** between `extractAll` and
+`recordTree` — so the staged tree is byte-identical to one built before this existed and
+every alias is inside the sealed `.stage-files` manifest. Both halves of every entry are
+treated as untrusted: a link or target path that could reach outside the stage
+(`unsafeEntryPath`), a target the payload does not contain, a collision with a real member,
+a malformed line, or more than `MaxLinkEntries` entries all refuse the payload. Only the
+shape the launcher can reproduce exactly is deduplicated — a directory symlink, a dangling
+one, and one escaping the payload keep the old copy-the-bytes behaviour.
+Actors: the operator shipping over a metered link; anyone who can rewrite the payload of a
+binary they hold, for whom a link table is the obvious arbitrary-file-write primitive.
+Scale, measured rather than assumed: a thick linux-x86_64 payload carries **1047** link
+entries — the four interpreter aliases plus `idle3`, `pydoc3`, the pkgconfig pair, a man
+page, and about a thousand terminfo aliases. That is why the saving (34.98 MB) came out
+above the 34.3 MB the five big duplicates alone predicted, and why `MaxLinkEntries` is
+16384 rather than the few hundred a first guess would have set it to.
+Assets: 34.98 MB of every thick binary, and the integrity chain around the interpreter the
+launcher executes. Measured 2026-09-15 on `hello.py`, thick, linux-x86_64, Python 3.13:
+python-build-standalone ships `bin/python` and `bin/python3` as symlinks to `python3.13` and
+`libpython3.13.so` as one to `libpython3.13.so.1.0`; `Path.is_file()` follows symlinks and
+`ZipFile.write` reads through them, so five names stored five full copies of two files.
+DEFLATE compresses each member independently, so the duplication survived compression:
+2 x 12,074,129 + 10,107,799 = **34.3 MB of an 84.5 MB payload**. After the fix the same
+binary is **85,405,022 -> 50,425,885 bytes**, a 41% cut, and it still runs.
+Note — why copies and not symlinks, which would also save disk at stage time: `recordTree`
+walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
+`pcLinkToFile`. A symlink would be absent from `.stage-files`, and `verifyTree` only checks
+what was recorded — so the interpreter's own name would go unverified on every reuse. The
+saving is taken in the shipped binary, where it is wanted, and not in a way that quietly
+punches a hole in `INV-STAGE-01`. Reducing the ~186 MB staged footprint is a separate
+question and would have to solve the recording problem first.
+Red-path: four, all walked 2026-09-15:
+(0) replace the `unsafeEntryPath` guard in `stage.materialiseLinks` with `if false:` — a
+table naming `../escape.bin` or `/etc/cron.d/x` is then materialised outside the stage.
+Walked: two of the four parametrised cases went green-to-red, exit 0 instead of 3, with the
+file written outside the cache;
+(1) move the `materialiseLinks(root)` call in `stage.stageZip` to after `recordTree(root)` —
+the aliases drop out of the recorded set, exactly as `INV-PAYLOAD-04`'s red-path (1);
+(2) make `payload._dedupe_target` return a target for a symlink that escapes the payload —
+the launcher then cannot reproduce it and staging refuses with "does not contain";
+(3) drop the `fileExists(linkPath)` collision check — a payload carrying both a real member
+and a link entry for that path silently gets one of them.
+Source: Eli asked why a hello-world thick binary is 85 MB when PyInstaller manages under 20,
+2026-09-15. Most of the answer is deliberate (an unmodified, digest-verified CPython plus
+uv); this part was not, and had been invisible because `docs/TIERS.md` recorded the missing
+symlinks only as a *correctness* note the launcher tolerates, never as a size.
+Territory: src/haru_pack/payload.py, src/haru_pack/launcher/stage.nim,
+tests/test_payload_symlinks.py, tests/test_stage_hardening.py
 
 ### INV-BUILD-08
 Status: active
@@ -3094,3 +3302,128 @@ the valuable half and it is cheap; packaging is a bigger change and belongs with
 decision that has not been made (docs/BUSYBODY-PROTOCOLS.md is the input to it).
 Territory: tests/_modularity.py, tests/test_modularity.py, tools/
 
+
+## SANDBOX — the harnesses run stranger code in a box, not on the maintainer's workstation
+
+haru-pack's own test harnesses download code written by strangers — chosen by PyPI download
+rank, not by audit — and execute it. flex builds a project that depends on each package and
+runs the resulting binary; exam goes further and runs the package's **own test suite**. Both
+of those sit downstream of `uv sync`, which builds sdists, which executes arbitrary PEP 517
+backends.
+
+Until 2026-09-14 all of that ran on the maintainer's workstation, as the maintainer. This
+section is the containment, and `docs/adr/0005-sandboxed-flex-and-exam-harnesses.md` is the
+design. It is deliberately about **haru-pack's harnesses**, not about `haru-pack build` in an
+operator's hands — that is `INV-TRUST-02`, which is still `proposed`.
+
+### INV-SANDBOX-01
+Status: active
+Statement: `tools/flex-run.py` and `tools/exam.py` contain no path that executes a built
+artifact outside the sandbox runner — the `subprocess.run([str(exe)], …)` shape appears only
+inside `HostRunner` — and the container argv the runner builds never mounts the docker socket,
+mounts this repository read-only or not at all, gives stranger code no writable host path but
+the per-package work directory, and never mounts the shared cache into a phase where package
+code runs. The host path is opt-in behind an explicit flag: `sandbox.preflight` raises when
+docker is unavailable, naming `--no-docker`, rather than returning a host fallback, and
+`sandbox.host_warning` names `$HOME`, SSH keys and credentials rather than the word "sandbox".
+Actors: the maintainer running `tools/flex-run.py` on their own machine; the author of any
+package in `flex/packages.toml`, and of every transitive dependency of it; the author of any
+sdist whose build backend runs under `uv sync`.
+Assets: the maintainer's workstation — `$HOME`, SSH keys, cloud credentials, browser
+profiles — and this repository's working tree, which is where the signing story starts. Also
+the meaning of a flex result: one package poisoning the next package's environment makes the
+whole matrix unreadable.
+Red-path: Three, each walked 2026-09-14. (1) Mount the docker socket, or drop `:ro` from the
+repository mount — `test_the_docker_socket_is_never_mounted` /
+`test_the_repository_is_mounted_read_only_or_not_at_all` /
+`test_the_only_writable_host_path_is_the_per_package_work_directory` go red. (2) Mount the
+shared cache into the run phase at all — `test_the_shared_cache_is_never_mounted_while_stranger_code_runs`
+goes red. (3) Move `subprocess.run([str(exe)], ...)` out of `HostRunner` and back into
+`run_one`, where it would run whichever runner was selected —
+`test_no_harness_executes_a_built_binary_except_through_the_sandbox` names the offending
+scope. That last check has its own guard-of-guards,
+`test_the_bypass_check_would_actually_catch_a_bypass`, because its first version was a regex
+that flagged the legitimate host path and would have been "fixed" by loosening it into
+something that matched nothing.
+Source: 2026-09-14, issue #30. Not from a discovered compromise — from noticing that the
+harness's entire job is to download and run strangers' code, and that nothing was standing
+between that and the maintainer's `$HOME`. The threat is ordinary: a compromised release of
+any top-25 package, or of anything one of them depends on.
+Note: The **build** phase needs the uv cache read-write, and that cache is shared across
+packages so a 25-package run does not fetch a toolchain 25 times. A malicious sdist build
+backend can therefore write into a cache a later package's BUILD reads. That is a real
+residual risk, stated rather than papered over; it is confined to a docker volume and never
+touches the host filesystem. The **run** phase does not share it: it gets an anonymous volume
+that docker creates empty and `--rm` destroys, so package code never sees the shared cache in
+either direction.
+Note: The first implementation gave the run phase the shared volume mounted `:ro`, which is
+unimplementable — a thick binary stages into `$XDG_CACHE_HOME` before it can execute, and the
+first real end-to-end run died with `OSError: Read-only file system`. There is now no
+read-only cache mode at all and a test asserts its absence, because "mount the shared cache
+read-only" reads as the cautious choice and would be reached for again.
+Note: **What is checked here is the argv and the absence of a second execution path. The
+CALL SITES are not covered.** Each claiming test reads a function's own output — `docker_argv`'s
+argv, `host_warning`'s banner, `preflight`'s AST — or the AST shape of a direct execution.
+Nothing asserts that the harness calls `preflight` before it picks a runner, that the banner is
+actually printed before the first build rather than after it, or that `DockerRunner` is what
+gets selected by default. The earlier Statement said the harnesses "execute third-party package
+code only inside a container" and that the warning prints "before anything is built or run";
+both were ordinary code reading presented as machine-checked fact, and are narrowed above to
+what a red path would catch.
+Note: `test_the_harness_imports_the_sandbox_at_all` is `assert "sandbox" in path.read_text()`,
+which the word in a comment satisfies. Read it as a typo-catcher for the day someone deletes the
+import, not as evidence the runner is wired in. It is the weakest claimant this entry has, and
+it is listed so nobody counts it twice.
+Note: `_direct_artifact_executions` matches one shape — a `subprocess.run` whose first argument
+is a one-element list built with `str(...)`. `os.execv`, a shell string, or an argv assembled
+into a variable first would all walk past it. The shape covers how the bypass would most
+plausibly be reintroduced (by moving the existing line), not every way one could be written.
+Note: A container is not a VM. A kernel exploit leaves the box. Rootless docker narrows the
+gap and does not close it, which is why `rootless()` warns loudly rather than claiming the
+problem is solved — and why `--require-rootless` exists for anyone who wants the stronger
+line enforced.
+Territory: tools/sandbox.py, docker/, tools/flex-run.py, tools/exam.py, tests/test_sandbox.py
+
+### INV-SANDBOX-02
+Status: active
+Statement: Asked for a run with no network and a cold cache, `sandbox.docker_argv` produces an
+argv that gives the container `--network none` — no interface at all, not a blocked one — and a
+fresh anonymous cache volume rather than the warm shared one; asked for a networked run it
+produces `--network bridge`, never `--network host`. "The dependencies came out of the payload"
+is a claim about the absence of a fetch, so wherever this argv is used for a thick verification
+run the fetch is impossible rather than merely discouraged.
+Actors: whoever reads `flex/out/results.json` or `top_n_pypi_stats.md` and concludes that the
+thick tier carries what it says it carries; the author of any packaged dependency, who is not
+obliged to route their network access through uv.
+Assets: the evidentiary value of the `offline` column and of the exam page. Both are
+published claims about what haru-pack's payloads contain.
+Red-path: Change the run phase's `network=False` to `True` for the thick tier, or reuse the
+warm named cache instead of a cold anonymous volume. `test_a_thick_verification_run_has_no_network_interface`
+and `test_the_offline_check_runs_against_a_cache_that_has_never_been_used` read the argv
+`docker_argv` produces and go red. Walked 2026-09-14 by replacing the network expression with
+a constant `"bridge"` **in `docker_argv`** — the argv builder, not the call site (next Note).
+Source: 2026-09-14, issue #30. `tools/flex-run.py` already documented its own weakness: the
+old check forced `UV_OFFLINE` and pointed the proxy variables at a dead port, and said in its
+docstring that this "does not stop a package from opening a raw socket of its own". The
+container path is what makes that sentence unnecessary. The honesty came first; this
+invariant is the fix catching up to it.
+Note: **The call site is not covered.** Which runs are the offline ones is decided in
+`tools/flex-run.py` at `network=not offline` (:225) and `cache=sandbox.CACHE_COLD` (:230), and
+no test reads either line. The claiming tests pass `network=False, cache=sandbox.CACHE_COLD` in
+as their own fixture input and assert those values came back out of the argv, so what is proved
+is that `docker_argv` is faithful to the mode it is given — not that the harness ever gives it
+the offline mode for a thick run. Change `not offline` to `True` in flex-run.py and every test
+here stays green while `results.json` keeps printing `carried`. The earlier Statement said "a
+thick binary's offline verification run IS executed with no network interface", which is the
+half that is not checked. Closing this needs a test that reads the call site — as
+`test_no_harness_executes_a_built_binary_except_through_the_sandbox` already does for a
+different rule — or an end-to-end run that watches a thick binary fail to reach the network.
+Note: This is deliberately NOT "every run has no network". At the `default` and `thin` tiers
+the dependency is *supposed* to be fetched on first run, so denying the network there would
+fail every package for the wrong reason. `test_the_default_tier_run_keeps_its_network` pins
+that distinction so a later "harden everything" pass cannot quietly break the harness.
+Note: The host path (`--no-docker`) cannot create a network namespace, so it keeps the old
+approximation and every result it produces is marked `carried*` in the summary rather than
+`carried`. A weaker check reported in the same column as a stronger one is how evidence gets
+overstated.
+Territory: tools/sandbox.py, tools/flex-run.py, tools/exam.py, tests/test_sandbox.py

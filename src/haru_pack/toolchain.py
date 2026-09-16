@@ -17,6 +17,11 @@ system C compiler, so the source build needs **no `apt`, no sudo, and no host gc
 becomes a first-class build host with nothing to set up. (Verified 2026-09-14 on an arm64
 Pi: `build_all.sh` bootstraps csources, `koch boot` and `koch tools` all through zig cc.)
 
+Read the data-directory rule below as a statement about installing, not resolving:
+`bootstrap.find_nim` prefers the managed Nim but does fall back to one on `PATH`, which is
+what makes "bring your own Nim" work on an arm64 host where choosenim publishes nothing. So a
+build CAN use a system Nim; it is `install_nim` and `find_managed_nim` that never touch one.
+
 Nim goes into haru-pack's own data directory (`CHOOSENIM_DIR`/`NIMBLE_DIR` for the choosenim
 path; `nim-src/<version>` for the built one). The system's Nim is ignored and `~/.nimble` is
 left alone: a packaging tool should not take over a global toolchain, nor behave differently

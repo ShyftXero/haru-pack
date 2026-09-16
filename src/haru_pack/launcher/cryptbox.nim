@@ -104,14 +104,33 @@ proc resolveSecret(box: Box, secretEnv: string): string =
 
 proc checkPolicy(policy: seq[byte]) =
   ## The execution gates (INV-GATE-01). Uniform shape: resolve a current value, match an
-  ## allow-policy, fail closed. Runs POST-decrypt so the policy is never visible in cleartext to
-  ## a reverse-engineer, and NO environment variable can satisfy or bypass a gate.
+  ## allow-policy, fail closed. Runs POST-decrypt, so the policy itself is never visible in
+  ## cleartext to a reverse-engineer holding only the binary.
   ##   * date  (expiry)                         — checked here
   ##   * geo/ip (location/address)              — checked online by execgate.checkGeoGate
   ##   * machine/user                           — cryptographically bound via the key: a wrong
   ##                                              value means the payload never decrypts, so
   ##                                              reaching this proc already proves them (strictly
   ##                                              stronger than a checked rule).
+  ##
+  ## What "no env bypass" does and does not mean. This comment used to claim NO environment
+  ## variable can satisfy or bypass a gate. That is true only of the two gates decided here,
+  ## and it is worth keeping the line honest because an overstated gate is how a packager ends
+  ## up shipping to someone they meant to exclude:
+  ##   * expiry comes from the clock, and geo reads no env at all — the HARUPACK_GEO
+  ##     honor-system bypass is retired and nothing replaced it (INV-GEO-01, INV-CANARY-03).
+  ##   * user binding IS an environment variable. `currentUser` above reads $USER (falling back
+  ##     to $USERNAME) and folds that string into the key derivation below. The check is
+  ##     cryptographic rather than honor-system — a wrong value derives a wrong key and nothing
+  ##     decrypts — but what it binds to is a string the licensee can type, so on a machine
+  ##     they control it means "know the licensed username", not "be that user". Machine
+  ##     binding does not have this property: machineId() reads the host, not the environment.
+  ##   * geo is ADVISORY against a determined local adversary, because the resolver call is made
+  ##     on the end user's own machine: https_proxy, SSL_CERT_FILE/SSL_CERT_DIR, DNS or
+  ##     /etc/hosts let them MITM it and forge an allowed country, and endpoint consensus does
+  ##     not help — one on-path position intercepts every endpoint identically. It is real
+  ##     against a casual user and against honest network faults (fail-closed offline). See
+  ##     INV-GEO-01's HONEST LIMIT note and docs/adr/0006 §"Honest limits".
   let j = parseJson(cast[string](policy))
   let expires = j{"expires"}.getStr("")
   if expires.len > 0:

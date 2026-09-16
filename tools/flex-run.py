@@ -5,19 +5,40 @@
     python tools/flex-run.py --list top25       # breadth only
     python tools/flex-run.py --list hard_targets
     python tools/flex-run.py --only numpy,pyyaml
+    python tools/flex-run.py --style smoke      # the hand-written bodies, not just an import
     python tools/flex-run.py -j 4               # 4 builds at once
     python tools/flex-run.py --tier thick --offline-check    # prove the payload carries deps
+    python tools/flex-run.py --cache-info       # what the caches are using
     python tools/flex-run.py --dry-run          # show what would run
 
 WHAT THIS PROVES
 
-For each package: build a tiny project that depends on it, whose `__main__` imports it and
-does one small real thing, then EXECUTE the resulting binary and require it to print
-FLEX_OK. Building is not the test — a binary that builds and then dies on startup is a
-failure, and only running it catches that.
+For each package: build a tiny project that depends on it, then EXECUTE the resulting binary
+and require it to print FLEX_OK. Building is not the test — a binary that builds and then
+dies on startup is a failure, and only running it catches that.
 
 The entrypoint is `python -m flexapp`, so stdout comes from a module that had to be
 importable inside the packaged environment. A bare `import` in a script proves less.
+
+WHAT THE BINARY IS ASKED TO DO — `--style`
+
+    importable  (default)  attempt every module the distribution provides
+    smoke                  run the hand-written body from flex/curation.toml
+
+`importable` is the default because it has exactly one failure mode, and it is the one this
+harness exists to detect. A hand-written smoke body is a second thing that can break for
+reasons unrelated to packaging, and when it does the run says "flex failed" and somebody has
+to read a traceback to find out whether haru-pack did anything wrong. That is a narrowing and
+it costs something real — a default run no longer exercises the library. `--style smoke` and
+`tools/exam.py` are still there for the stronger claims. See `tools/flex_probes.py`.
+
+The style is recorded in results.json and printed in the summary header: an `importable` pass
+and a `smoke` pass are different claims, and results that do not say which they hold invite
+comparing two runs that were never asking the same question.
+
+The importable probe DISCOVERS its import names from the installed distribution rather than
+guessing them from the package name (INV-FLEX-03) — `pillow` provides `PIL`, and no rule
+recovers that. A curated `import_name` is checked against what it found, never fed into it.
 
 THICK MODE IS THE ONE THAT PROVES ANYTHING ABOUT THE PAYLOAD
 
@@ -25,15 +46,27 @@ At the default tier the dependency is fetched on FIRST RUN, so a green result pr
 packaging path and nothing about what the binary carries. At `--thick` the payload is
 supposed to carry uv, the interpreter and every dependency.
 
-`--offline-check` proves it: run the thick binary again with a PRISTINE cache directory and
-uv forced offline. Pristine matters — with a warm ~/.cache/haru-pack the run succeeds from
-cache and the test is vacuous. If it still prints FLEX_OK, the dependencies came out of the
-payload.
+`--offline-check` proves it: run the thick binary again in a container with NO NETWORK
+INTERFACE and a cache volume that has never been used. Pristine matters — with a warm cache
+the staged tree is reused and the run proves nothing about the payload. If it still prints
+FLEX_OK, the dependencies came out of the payload.
 
-Note this is not a network namespace (this box cannot create one). It forces uv offline and
-points the proxy variables at a dead port, which blocks the fetch path that matters; it does
-not stop a package from opening a raw socket of its own. Stated so the result is not read as
-stronger than it is.
+This is a real network namespace. It used to force uv offline and point the proxy variables
+at a dead port, and said so: that blocked the fetch path that matters but did not stop a
+package opening a raw socket of its own. `--network none` does (INV-SANDBOX-02).
+
+EVERYTHING RUNS IN A CONTAINER, BY DEFAULT
+
+This harness downloads code written by strangers, chosen by download rank rather than by
+audit, and executes it — at three points: sdist build backends under `uv sync`, the binary
+the build produces, and any [[bundle]]/[[post_install]] step in the manifest. Each package
+gets its own throwaway containers, so a poisoned one cannot reach $HOME, your keys, or the
+next package's RUN (INV-SANDBOX-01, docs/adr/0005). The build phase is the exception and a
+real one: it shares a read-write uv cache across packages, so a hostile sdist build backend
+can write into a cache a later package's build reads.
+
+`--no-docker` runs it on this host instead, after printing what that means. There is no
+silent fallback: if docker is missing and you did not pass the flag, this stops.
 
 A thick *script* build would not prove this: assemble_payload only warms the dependency
 cache for `kind == "project"`, so the harness builds projects, not PEP 723 scripts.
@@ -67,38 +100,19 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "tools"))
 
+import flex_cache  # noqa: E402
+import flex_probes  # noqa: E402
+import sandbox  # noqa: E402
 from haru_pack import tomlio  # noqa: E402
 
 MANIFEST = REPO / "flex" / "packages.toml"
 OUT = REPO / "flex" / "out"
-MARKER = "FLEX_OK"
+MARKER = flex_probes.MARKER
 
 
-def smoke_body(pkg: dict) -> str:
-    """The body of flexapp/__main__.py: exercise the package, then print the marker."""
-    name = pkg["name"]
-    imp = pkg.get("import_name", name.replace("-", "_"))
-    body = (pkg.get("smoke") or "").strip("\n")
-    if not body:
-        body = (f"import {imp} as _m\n"
-                f"print('version:', getattr(_m, '__version__', 'unknown'))\n"
-                f"print('{MARKER}')")
-    extra = ""
-    mod = pkg.get("module")
-    if mod:
-        # The package ships its own `python -m` entrypoint; run it too, in-process, so its
-        # stdout is part of the evidence that the module is importable AND executable.
-        extra = ("\nimport runpy\n"
-                 f"print('--- python -m {mod} ---')\n"
-                 "try:\n"
-                 f"    runpy.run_module({mod!r}, run_name='__main__')\n"
-                 "except SystemExit:\n"
-                 "    pass\n")
-    return body + extra + "\n"
-
-
-def make_project(pkg: dict, root: Path) -> Path:
+def make_project(pkg: dict, root: Path, style: str) -> Path:
     """A minimal real project: pyproject + a flexapp package with a __main__.
 
     A project, not a PEP 723 script, because only `kind == "project"` gets its dependency
@@ -110,7 +124,7 @@ def make_project(pkg: dict, root: Path) -> Path:
     proj = root / "proj"
     (proj / "flexapp").mkdir(parents=True)
     (proj / "flexapp" / "__init__.py").write_text("")
-    (proj / "flexapp" / "__main__.py").write_text(smoke_body(pkg))
+    (proj / "flexapp" / "__main__.py").write_text(flex_probes.body_for(pkg, style))
     (proj / "pyproject.toml").write_text(
         "[project]\n"
         'name = "flexapp"\n'
@@ -127,29 +141,118 @@ def make_project(pkg: dict, root: Path) -> Path:
     return proj
 
 
-def _execute(exe: Path, work: Path, timeout: int, env=None) -> tuple:
-    """(ok, seconds, detail). ok means exit 0 AND the marker in stdout."""
-    t0 = time.monotonic()
-    try:
-        r = subprocess.run([str(exe)], capture_output=True, text=True,
-                           timeout=timeout, cwd=work, env=env)
-    except subprocess.TimeoutExpired:
-        return False, round(time.monotonic() - t0, 1), f"timed out after {timeout}s"
-    dt = round(time.monotonic() - t0, 1)
-    if r.returncode != 0:
-        return False, dt, f"exit {r.returncode}: " + (r.stderr or r.stdout).strip()[-600:]
-    if MARKER not in r.stdout:
-        return False, dt, f"no {MARKER} in output: {r.stdout.strip()[:300]!r}"
-    return True, dt, r.stdout.strip()[-200:]
+def _verdict_from_output(rc, stdout, stderr, timed_out, timeout, secs) -> tuple:
+    """(ok, seconds, detail, full_stdout) from one execution, whoever ran it.
+
+    Shared by both runners so that "what counts as a pass" is decided in exactly one place.
+    A container and a host process disagreeing about that would be a very annoying bug.
+
+    The FULL stdout comes back as well as the short `detail`, because the importable probe
+    reports the modules it resolved on a `FLEX_JSON` line and the harness has to read it
+    (INV-FLEX-03). A 200-character tail is enough to look at and not enough to parse.
+    """
+    stdout = stdout or ""
+    if timed_out:
+        return False, secs, f"timed out after {timeout}s", stdout
+    if rc != 0:
+        # The importable probe prints full tracebacks to stderr on purpose; keep more of it.
+        return False, secs, f"exit {rc}: " + (stderr or stdout).strip()[-1200:], stdout
+    if MARKER not in stdout:
+        return False, secs, f"no {MARKER} in output: {stdout.strip()[:300]!r}", stdout
+    return True, secs, stdout.strip()[-200:], stdout
+
+
+class HostRunner:
+    """Build and run directly on this machine. Opt-in via --no-docker; see host_warning()."""
+
+    kind = "host"
+    #: The host cannot create a network namespace, so its offline check is an
+    #: APPROXIMATION and every result it produces is labelled as one.
+    offline_is_real = False
+
+    def __init__(self, haru: str):
+        self.haru = haru
+
+    def build(self, work: Path, proj: Path, exe: Path, tier: str, timeout: int) -> tuple:
+        b = subprocess.run([self.haru, "build", str(proj), "-o", str(exe), "--tier", tier],
+                           capture_output=True, text=True, timeout=timeout)
+        return b.returncode, (b.stderr or b.stdout)
+
+    def execute(self, work: Path, exe: Path, timeout: int, *, offline: bool) -> tuple:
+        env = _offline_env(work / "cold-cache") if offline else None
+        t0 = time.monotonic()
+        try:
+            r = subprocess.run([str(exe)], capture_output=True, text=True,
+                               timeout=timeout, cwd=work, env=env)
+            rc, out, err, to = r.returncode, r.stdout, r.stderr, False
+        except subprocess.TimeoutExpired:
+            rc, out, err, to = None, "", "", True
+        return _verdict_from_output(rc, out, err, to, timeout,
+                                    round(time.monotonic() - t0, 1))
+
+
+class DockerRunner:
+    """Build and run each package in its own throwaway containers (INV-SANDBOX-01).
+
+    Two per package: the build gets the network and the shared cache, the run gets a
+    THROWAWAY anonymous cache of its own and — at thick — no network interface at all.
+    There is no read-only cache mode: a thick binary stages into $XDG_CACHE_HOME before it
+    can execute, so `:ro` died with `OSError: Read-only file system`. Not mounting the shared
+    volume at all is the stronger answer anyway (`tools/sandbox.py`, CACHE_MODES).
+    """
+
+    kind = "docker"
+    offline_is_real = True
+
+    def __init__(self, image: str, uid: int, gid: int):
+        self.image, self.uid, self.gid = image, uid, gid
+
+    def _env(self) -> dict:
+        return sandbox.container_env()
+
+    def build(self, work: Path, proj: Path, exe: Path, tier: str, timeout: int) -> tuple:
+        r = sandbox.run(
+            self.image,
+            cmd=["haru-pack", "build", f"{sandbox.WORKDIR}/{proj.name}",
+                 "-o", f"{sandbox.WORKDIR}/{exe.name}", "--tier", tier],
+            work=work, network=True, cache=sandbox.CACHE_RW,
+            uid=self.uid, gid=self.gid, repo=REPO, env=self._env(), timeout=timeout)
+        if r["infra"]:
+            return 125, f"the sandbox could not start this build: {r['stderr'].strip()[-300:]}"
+        return (r["rc"] if r["rc"] is not None else 124), (r["stderr"] or r["stdout"])
+
+    def execute(self, work: Path, exe: Path, timeout: int, *, offline: bool) -> tuple:
+        r = sandbox.run(
+            self.image, cmd=[f"{sandbox.WORKDIR}/{exe.name}"], work=work,
+            # A real network namespace, which is what makes the offline check mean
+            # something. At other tiers the dependency is SUPPOSED to be fetched on first
+            # run, so the network stays on.
+            network=not offline,
+            # Always cold. The binary STAGES into $XDG_CACHE_HOME before it can run, so the
+            # run phase needs a writable cache — and giving it the shared one would let a
+            # package poison what the next build reads. A throwaway volume is both the thing
+            # that works and the stronger answer.
+            cache=sandbox.CACHE_COLD,
+            uid=self.uid, gid=self.gid, env=self._env(), timeout=timeout)
+        return _verdict_from_output(r["rc"], r["stdout"], r["stderr"], r["timed_out"],
+                                    timeout, r["seconds"])
 
 
 def _offline_env(cold: Path) -> dict:
-    """Environment for the offline check: a cache that has never been used, and uv barred
-    from the network.
+    """The HOST path's approximation of offline. Not used by the container path.
 
-    The pristine cache is the load-bearing part. With a warm ~/.cache/haru-pack the staged
-    tree is reused and the run proves nothing about the payload.
+    A container gets `--network none` — a real namespace, with no interface for a package to
+    open a socket on. This function is what is left when the harness is run with
+    --no-docker: it forces uv offline and points the proxy variables at a dead port, which
+    blocks the fetch path that matters but does NOT stop a package reaching the network by
+    other means. Results produced this way are marked approximate in the summary, because a
+    weaker check reported in the same column as a stronger one is how evidence gets
+    overstated.
+
+    The pristine cache is the load-bearing part either way. With a warm ~/.cache/haru-pack
+    the staged tree is reused and the run proves nothing about the payload.
     """
+    cold.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["XDG_CACHE_HOME"] = str(cold)
     env["UV_OFFLINE"] = "1"
@@ -162,44 +265,161 @@ def _offline_env(cold: Path) -> dict:
     return env
 
 
-def run_one(pkg: dict, haru: str, timeout: int, keep: bool, offline_check: bool) -> dict:
+def select_packages(a):
+    """The packages this invocation will run, or None after saying why there are none."""
+    if not MANIFEST.exists():
+        print(f"{MANIFEST.relative_to(REPO)} missing — run tools/gen-package-manifest.py",
+              file=sys.stderr)
+        return None
+    pkgs = tomlio.load(MANIFEST).get("package", [])
+    if a.which != "all":
+        pkgs = [p for p in pkgs if p.get("list") == a.which]
+    if a.only:
+        want = {s.strip() for s in a.only.split(",") if s.strip()}
+        pkgs = [p for p in pkgs if p["name"] in want]
+        if missing := want - {p["name"] for p in pkgs}:
+            print(f"not in the manifest: {', '.join(sorted(missing))}", file=sys.stderr)
+            return None
+    if not pkgs:
+        print("nothing selected", file=sys.stderr)
+        return None
+    if a.tier:
+        pkgs = [{**p, "tier": a.tier} for p in pkgs]
+    if a.offline_check and not any(p.get("tier") == "thick" for p in pkgs):
+        print("note: --offline-check only applies to thick builds; none selected",
+              file=sys.stderr)
+    return pkgs
+
+
+def print_summary(results: list) -> int:
+    """The table, and the process exit code. Non-zero if anything came out unexpected."""
+    styles = sorted({r.get("style", "?") for r in results})
+    print(f"\n{'package':22} {'list':13} {'tier':8} {'verdict':7} {'size':>9} "
+          f"{'build':>7} {'run':>6} {'offline':>8}   {'style=' + ','.join(styles)}")
+    print("-" * 100)
+    for r in results:
+        size = f"{r['bytes'] / 1e6:.1f}MB" if r["bytes"] else "-"
+        # `carried*` is not decoration. The host path cannot create a network namespace, so
+        # its offline result is weaker evidence than the container path's, and printing both
+        # in one column without a mark is how the weaker one gets read as the stronger one.
+        carried = "carried" if r.get("offline_is_real", True) else "carried*"
+        off = {True: carried, False: "FETCHED", None: "-"}[r.get("offline_ok")]
+        print(f"{r['name']:22} {(r['list'] or ''):13} {(r['tier'] or ''):8} {verdict(r):7} "
+              f"{size:>9} {r['build_s']:>6}s {r['run_s']:>5}s {off:>8}")
+
+    if any(not r.get("offline_is_real", True) for r in results):
+        print("\n  * approximate: produced with --no-docker, which cannot create a network "
+              "namespace.\n    uv was forced offline and the proxy variables pointed at a "
+              "dead port; a package\n    could still have reached the network by other means.")
+
+    bad = [r for r in results if verdict(r) in ("FAIL", "XPASS")]
+    print(f"\n{len(results) - len(bad)}/{len(results)} as expected; "
+          f"results in {(OUT / 'results.json').relative_to(REPO)}")
+    if bad:
+        print("\nnot as expected:")
+        for r in bad:
+            print(f"  {verdict(r)} {r['name']}: {r['error'][:300]}")
+    return 1 if bad else 0
+
+
+def choose_runner(a, count: int) -> tuple:
+    """(runner, description), or (None, "") after printing why it cannot run.
+
+    The sandbox decision, made once and before anything is downloaded or executed. Its own
+    function because it is the security-relevant branch in this file and should be readable
+    without scrolling through argument parsing (INV-SANDBOX-01).
+    """
+    if a.no_docker:
+        # Not a log line among log lines: this is the one moment the operator can still
+        # decide they did not mean it.
+        print(sandbox.host_warning(count, "third-party package(s)"), file=sys.stderr)
+        haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
+        if not Path(haru).exists() and not shutil.which("haru-pack"):
+            print("haru-pack not found on PATH", file=sys.stderr)
+            return None, ""
+        return HostRunner(haru), f"ON THIS HOST (--no-docker), haru-pack at {haru}"
+
+    try:
+        image = sandbox.preflight(require_rootless=a.require_rootless,
+                                  log=lambda m: print(m, file=sys.stderr))
+    except sandbox.SandboxUnavailable as e:
+        # Never a fallback to the host: that is how the safe default stops being the default.
+        print(f"\nflex: {e}", file=sys.stderr)
+        return None, ""
+    if a.max_cache_gb:
+        # Before the matrix starts, never during it: reclaiming space underneath a run in
+        # flight turns a disk problem into a pile of confusing package failures.
+        try:
+            sandbox.enforce_cache_budget(a.max_cache_gb, image,
+                                         log=lambda m: print(m, file=sys.stderr))
+        except ValueError as e:
+            # A refused budget is a usage error, not a crash. A traceback here would bury
+            # the one sentence that explains what the flag was about to cost.
+            print(f"\nflex: {e}", file=sys.stderr)
+            return None, ""
+    return DockerRunner(image, os.getuid(), os.getgid()), f"in containers ({image})"
+
+
+def run_one(pkg: dict, runner, timeout: int, keep: bool, offline_check: bool,
+            style: str) -> dict:
     name = pkg["name"]
     tier = pkg.get("tier", "default")
     work = OUT / name
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
-    proj = make_project(pkg, work)
+    proj = make_project(pkg, work, style)
     exe = work / name.replace("-", "_")
 
-    res = {"name": name, "list": pkg.get("list"), "tier": tier,
+    # `style` is recorded, not just used. An `importable` pass and a `smoke` pass are
+    # different claims, and a results.json that does not say which one it holds invites
+    # comparing two runs that were never asking the same question.
+    res = {"name": name, "list": pkg.get("list"), "tier": tier, "style": style,
            "expect_failure": bool(pkg.get("expect_failure")),
            "build_ok": False, "run_ok": False, "offline_ok": None, "bytes": 0,
-           "build_s": 0.0, "run_s": 0.0, "offline_s": 0.0, "error": "", "stdout": ""}
+           "build_s": 0.0, "run_s": 0.0, "offline_s": 0.0, "error": "", "stdout": "",
+           "modules": [], "resolved_via": "",
+           "sandbox": runner.kind, "offline_is_real": runner.offline_is_real}
 
     t0 = time.monotonic()
-    b = subprocess.run([haru, "build", str(proj), "-o", str(exe), "--tier", tier],
-                       capture_output=True, text=True, timeout=timeout)
+    rc, output = runner.build(work, proj, exe, tier, timeout)
     res["build_s"] = round(time.monotonic() - t0, 1)
-    if b.returncode != 0 or not exe.exists():
-        res["error"] = "build: " + (b.stderr or b.stdout).strip()[-600:]
+    if rc != 0 or not exe.exists():
+        res["error"] = "build: " + output.strip()[-600:]
         return res
     res["build_ok"] = True
     res["bytes"] = exe.stat().st_size
 
-    ok, dt, detail = _execute(exe, work, timeout)
+    ok, dt, detail, full = runner.execute(work, exe, timeout, offline=False)
     res["run_s"], res["run_ok"] = dt, ok
+
+    # Read the probe's own report before deciding anything else: on a FAILURE it names which
+    # modules could not be imported, which is the difference between "flex failed" and
+    # "pillow does not import".
+    report = flex_probes.parse_report(full)
+    if report:
+        res["modules"] = report.get("modules", [])
+        res["resolved_via"] = report.get("how", "")
+        if report.get("failed"):
+            res["failed_modules"] = report["failed"]
+
     if not ok:
         res["error"] = "run: " + detail
         return res
     res["stdout"] = detail
 
+    # INV-FLEX-03: a curated import_name is an assertion about the installed distribution,
+    # checked against what the binary actually found. A stale one fails the package here
+    # rather than silently steering the next person's debugging.
+    if conflict := flex_probes.curation_conflict(pkg, report):
+        res["run_ok"] = False
+        res["error"] = "curation: " + conflict
+        return res
+
     # The payload check. Only meaningful at thick: at other tiers the dependency is SUPPOSED
     # to be fetched at first run, so failing offline is correct behaviour, not a defect.
     if offline_check and tier == "thick":
-        cold = work / "cold-cache"
-        cold.mkdir(exist_ok=True)
-        ok2, dt2, detail2 = _execute(exe, work, timeout, env=_offline_env(cold))
+        ok2, dt2, detail2, _ = runner.execute(work, exe, timeout, offline=True)
         res["offline_ok"], res["offline_s"] = ok2, dt2
         if not ok2:
             res["error"] = ("offline: the thick payload did not carry its dependencies — "
@@ -217,7 +437,27 @@ def verdict(r: dict) -> str:
     return "ok" if ok else "FAIL"
 
 
+def line_buffer_stdout() -> None:
+    """Make progress visible when stdout is a file or a pipe.
+
+    Python block-buffers stdout when it is not a terminal, so `flex-run.py > log` showed
+    NOTHING for the whole of an 18-minute top25 run and then everything at once. A harness
+    whose output only arrives after it finishes is indistinguishable from a hung one, and the
+    first thing anyone does about a hung harness is kill it.
+
+    Line buffering rather than `flush=True` at each call site: the per-package line is not the
+    only thing worth seeing as it happens, and one setting cannot be forgotten at a new
+    `print`.
+    """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass            # not a TextIOWrapper (redirected oddly, or already replaced)
+
+
 def main() -> int:
+    line_buffer_stdout()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--list", dest="which", choices=["top25", "hard_targets", "all"],
@@ -228,37 +468,33 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="keep work dirs for passing builds")
     ap.add_argument("--tier", default="", help="override the tier for every package")
     ap.add_argument("--offline-check", action="store_true",
-                    help="for thick builds, re-run with a pristine cache and uv offline")
+                    help="for thick builds, re-run with a pristine cache and no network")
+    ap.add_argument("--no-docker", action="store_true",
+                    help="run the packages' code DIRECTLY ON THIS HOST instead of in a "
+                         "container. Prints what that puts at risk before it starts.")
+    ap.add_argument("--require-rootless", action="store_true",
+                    help="refuse to run against a rootful docker daemon")
+    ap.add_argument("--style", choices=flex_probes.STYLES, default="importable",
+                    help="what to ask the binary to prove. `importable` (default) attempts "
+                         "every module the distribution provides; `smoke` runs the "
+                         "hand-written body from flex/curation.toml")
+    ap.add_argument("--cache-info", action="store_true",
+                    help="report what the harness caches are using, and exit")
+    ap.add_argument("--flush-cache", choices=("sandbox", "host"), default="",
+                    help="reclaim space and exit. `sandbox` removes the docker volume; "
+                         "`host` prunes ~/.cache/uv, which other projects also use")
+    ap.add_argument("--max-cache-gb", type=float, default=0.0,
+                    help="before the run, prune the sandbox cache volume if it is bigger "
+                         "than this. Never touches the host caches")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
-    if not MANIFEST.exists():
-        print(f"{MANIFEST.relative_to(REPO)} missing — run tools/gen-package-manifest.py",
-              file=sys.stderr)
+    pkgs = select_packages(a)
+    if pkgs is None:
         return 1
-    pkgs = tomlio.load(MANIFEST).get("package", [])
-    if a.which != "all":
-        pkgs = [p for p in pkgs if p.get("list") == a.which]
-    if a.only:
-        want = {s.strip() for s in a.only.split(",") if s.strip()}
-        pkgs = [p for p in pkgs if p["name"] in want]
-        missing = want - {p["name"] for p in pkgs}
-        if missing:
-            print(f"not in the manifest: {', '.join(sorted(missing))}", file=sys.stderr)
-            return 1
-    if not pkgs:
-        print("nothing selected", file=sys.stderr)
-        return 1
-    if a.tier:
-        pkgs = [{**p, "tier": a.tier} for p in pkgs]
-    if a.offline_check and not any(p.get("tier") == "thick" for p in pkgs):
-        print("note: --offline-check only applies to thick builds; none selected",
-              file=sys.stderr)
 
-    haru = shutil.which("haru-pack") or str(REPO / ".venv" / "bin" / "haru-pack")
-    if not Path(haru).exists() and not shutil.which("haru-pack"):
-        print("haru-pack not found on PATH", file=sys.stderr)
-        return 1
+    if a.cache_info or a.flush_cache:
+        return flex_cache.cache_command(a)
 
     if a.dry_run:
         for p in pkgs:
@@ -267,13 +503,18 @@ def main() -> int:
         print(f"\n{len(pkgs)} package(s); nothing was run.")
         return 0
 
+    runner, where = choose_runner(a, len(pkgs))
+    if runner is None:
+        return 1
+
     OUT.mkdir(parents=True, exist_ok=True)
-    print(f"flex: {len(pkgs)} package(s), {a.jobs} job(s), haru-pack at {haru}\n")
+    print(f"flex: {len(pkgs)} package(s), style={a.style}, {a.jobs} job(s), {where}\n")
 
     results = []
     if a.jobs > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-            futs = {ex.submit(run_one, p, haru, a.timeout, a.keep, a.offline_check): p
+            futs = {ex.submit(run_one, p, runner, a.timeout, a.keep, a.offline_check,
+                              a.style): p
                     for p in pkgs}
             for f in concurrent.futures.as_completed(futs):
                 r = f.result()
@@ -281,30 +522,13 @@ def main() -> int:
                 print(f"  {verdict(r):5} {r['name']}")
     else:
         for p in pkgs:
-            r = run_one(p, haru, a.timeout, a.keep, a.offline_check)
+            r = run_one(p, runner, a.timeout, a.keep, a.offline_check, a.style)
             results.append(r)
             print(f"  {verdict(r):5} {r['name']}")
 
     results.sort(key=lambda r: (r["list"] or "", r["name"]))
     (OUT / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-
-    print(f"\n{'package':22} {'list':13} {'tier':8} {'verdict':7} {'size':>9} "
-          f"{'build':>7} {'run':>6} {'offline':>8}")
-    print("-" * 88)
-    for r in results:
-        size = f"{r['bytes'] / 1e6:.1f}MB" if r["bytes"] else "-"
-        off = {True: "carried", False: "FETCHED", None: "-"}[r.get("offline_ok")]
-        print(f"{r['name']:22} {(r['list'] or ''):13} {(r['tier'] or ''):8} {verdict(r):7} "
-              f"{size:>9} {r['build_s']:>6}s {r['run_s']:>5}s {off:>8}")
-
-    bad = [r for r in results if verdict(r) in ("FAIL", "XPASS")]
-    print(f"\n{len(results) - len(bad)}/{len(results)} as expected; "
-          f"results in {(OUT / 'results.json').relative_to(REPO)}")
-    if bad:
-        print("\nnot as expected:")
-        for r in bad:
-            print(f"  {verdict(r)} {r['name']}: {r['error'][:300]}")
-    return 1 if bad else 0
+    return print_summary(results)
 
 
 if __name__ == "__main__":

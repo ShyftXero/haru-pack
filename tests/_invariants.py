@@ -3,9 +3,14 @@
 Adopted from lotek's tests/_invariants.py. Kept dependency-free and deliberately
 simple: this module is itself the thing that decides whether the invariant scheme is
 being honoured, so it must be readable in one sitting.
+
+It answers linkage questions only — which entries exist, and which tests claim them.
+Whether a claiming test actually RAN is a different question, asked by the pytest hooks
+in `_invariant_execution.py`.
 """
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +20,6 @@ INVARIANTS_MD = REPO / "INVARIANTS.md"
 
 ID_RE = re.compile(r"\bINV-[A-Z]+-\d{2}\b")
 HEADING_RE = re.compile(r"^### (INV-[A-Z]+-\d{2})\s*$", re.M)
-MARKER_RE = re.compile(r"""@pytest\.mark\.invariant\(\s*["'](INV-[A-Z]+-\d{2})["']""")
 
 REQUIRED_FIELDS = ("Statement", "Actors", "Assets", "Red-path", "Source")
 
@@ -30,6 +34,10 @@ REQUIRED_FIELDS = ("Statement", "Actors", "Assets", "Red-path", "Source")
 CITATION_ROOTS = ("src", "docs", "tests", "tools")
 
 
+class DuplicateInvariantError(ValueError):
+    """INVARIANTS.md declares one id under two `### INV-...` headings."""
+
+
 @dataclass
 class Invariant:
     id: str
@@ -41,26 +49,52 @@ class Invariant:
         return self.status == "active"
 
 
-def _split_entries(text: str) -> list[tuple[str, str]]:
-    """Return [(id, body)] for every `### INV-...` heading in the document."""
+def _split_entries(text: str) -> list[tuple[str, str, int]]:
+    """Return [(id, body, heading line number)] for every `### INV-...` heading."""
     matches = list(HEADING_RE.finditer(text))
     out = []
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        out.append((m.group(1), text[m.end():end]))
+        out.append((m.group(1), text[m.end():end], text.count("\n", 0, m.start()) + 1))
     return out
 
 
-def load_invariants(path: Path = INVARIANTS_MD) -> dict[str, Invariant]:
+def load_invariants(path: Path = INVARIANTS_MD, *,
+                    allow_duplicates: bool = False) -> dict[str, Invariant]:
+    """Parse INVARIANTS.md into id -> Invariant, refusing a twice-declared id.
+
+    The refusal exists because the silent version of this happened: INVARIANTS.md carried
+    two unrelated `### INV-SECRET-02` entries (one about secrets at rest in a shipped
+    binary, one about secrets in build artifacts). The return value is a dict keyed by id,
+    so the second heading overwrote the first — 113 headings parsed to 112 entries, the
+    first Statement was discarded unread, and every check in this suite passed against
+    whichever one happened to be last in the file.
+
+    `allow_duplicates=True` parses anyway, last heading winning. It has exactly one caller:
+    the contract test, which wants a single named failure pointing at both line numbers
+    rather than an import-time exception that takes the other hundred-odd checks with it.
+    """
     text = path.read_text(encoding="utf-8")
     out: dict[str, Invariant] = {}
-    for inv_id, body in _split_entries(text):
+    first_seen: dict[str, int] = {}
+    dupes: list[str] = []
+    for inv_id, body, lineno in _split_entries(text):
+        if inv_id in first_seen:
+            dupes.append(f"{inv_id}: declared at line {first_seen[inv_id]}, "
+                         f"declared again at line {lineno}")
+        else:
+            first_seen[inv_id] = lineno
         fields: dict[str, str] = {}
         for line in body.splitlines():
             m = re.match(r"^(Status|Statement|Actors|Assets|Red-path|Source|Note|Territory):\s*(.*)$", line)
             if m:
                 fields[m.group(1)] = m.group(2).strip()
         out[inv_id] = Invariant(id=inv_id, status=fields.get("Status", ""), fields=fields)
+    if dupes and not allow_duplicates:
+        raise DuplicateInvariantError(
+            f"{path} declares the same invariant id more than once. Entries are keyed by id, "
+            f"so only the last heading survives and the earlier Statement is discarded "
+            f"unread — give one of them a new id:\n  " + "\n  ".join(dupes))
     return out
 
 
@@ -71,13 +105,61 @@ def _rel(p: Path) -> str:
         return str(p)
 
 
+def _invariant_ids_in(expr: ast.expr) -> list[str]:
+    """The ids named by one `pytest.mark.invariant(...)` expression, or [].
+
+    Matched on the `.mark.invariant` attribute chain, so `from pytest import mark` and an
+    aliased import both still resolve. Only literal string arguments count: an id assembled
+    at runtime is invisible here, which shows up as the invariant reporting itself
+    unclaimed rather than as a claim nobody can trace.
+    """
+    if not isinstance(expr, ast.Call):
+        return []
+    fn = expr.func
+    if not (isinstance(fn, ast.Attribute) and fn.attr == "invariant"):
+        return []
+    owner = fn.value
+    is_mark = ((isinstance(owner, ast.Attribute) and owner.attr == "mark")
+               or (isinstance(owner, ast.Name) and owner.id == "mark"))
+    if not is_mark:
+        return []
+    return [a.value for a in expr.args
+            if isinstance(a, ast.Constant) and isinstance(a.value, str) and ID_RE.fullmatch(a.value)]
+
+
 def collect_markers(tests_dir: Path | None = None) -> dict[str, list[str]]:
-    """Map invariant id -> [test file paths that claim it]."""
+    """Map invariant id -> [test file paths that claim it], one entry per claiming def.
+
+    Parsed, not grepped. The regex this replaced matched the marker's TEXT anywhere in a
+    test file, so a commented-out marker, one quoted inside a docstring and one in an f-string
+    all satisfied the linkage contract identically — `test_invariants_enforced.py` quotes the
+    marker syntax twice in its own prose, and would have credited itself for whatever id those
+    quotes named. `ast.parse` sees decorators on real defs and module/class `pytestmark`
+    assignments, and nothing else.
+
+    A test file that does not parse now raises SyntaxError out of here instead of quietly
+    contributing no claims, which is the inverse of what the regex did with it.
+
+    What this still does not prove is that a claiming test RUNS. That is the job of
+    `_invariant_execution.py`; linkage alone was satisfied by five invariants whose every
+    claimant skipped.
+    """
     tests_dir = tests_dir or (REPO / "tests")
     out: dict[str, list[str]] = {}
     for p in sorted(tests_dir.rglob("test_*.py")):
-        for m in MARKER_RE.finditer(p.read_text(encoding="utf-8")):
-            out.setdefault(m.group(1), []).append(_rel(p))
+        found: list[tuple[int, str]] = []
+        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"), filename=str(p))):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for dec in node.decorator_list:
+                    found += [(node.lineno, i) for i in _invariant_ids_in(dec)]
+            elif isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
+                marks = (node.value.elts if isinstance(node.value, (ast.List, ast.Tuple))
+                         else [node.value])
+                for mark in marks:
+                    found += [(node.lineno, i) for i in _invariant_ids_in(mark)]
+        for _lineno, inv_id in sorted(found):
+            out.setdefault(inv_id, []).append(_rel(p))
     return out
 
 

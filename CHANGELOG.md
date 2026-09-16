@@ -3,7 +3,312 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-09-16
+
+### Four README claims checked against the code; four were wrong
+
+Eli asked whether two paragraphs of the "Decisions" section were accurate. Reading every
+paragraph against the source turned up four that were not. None of the code changed — these
+were all cases of prose drifting past what the code does, which is the exact failure
+`INVARIANTS.md` exists to catch and which prose about prose does not.
+
+- **The pinning list left out `zig`.** It named uv, the Python interpreter and the choosenim
+  installer. `install_zig` verifies against `pins.toml` exactly like the others, and zig is
+  the *default* C compiler in every bootstrap — so the README was understating its own
+  guarantee, and contradicting its Install section three paragraphs earlier.
+
+- **The nimble gap was described too gently.** "Pinned to exact versions but never
+  digest-checked" implies the pinned version is what ships. `bootstrap.ensure_nim_deps`
+  installs `zippy`/`puppy`/`parsetoml`/`nimcrypto` at exact versions, but `compile_launcher`
+  runs a bare `nim c` with no lockfile, no project `.nimble` and no `--nimblePath`, so Nim
+  links the *highest* version present in the package directory regardless. The code comment
+  said so already (`INV-SUPPLY-02`, `proposed`); the README did not.
+
+- **"a ~500-line stub" was out by about 5x.** `main.nim` is 392 lines, but the launcher is
+  ~2 400 lines of Nim across seven modules, most of it staging and verification, plus ~3 400
+  lines of vendored C. The figure was doing argumentative work — it is the answer to "why is
+  a packaging tool written in Nim" — so it is now the real one. Also fixed in
+  `docs/COMMON_CRITIQUES.md`, which repeated it.
+
+- **"five active invariants defended by nothing that ran" was fourteen.** Re-measured by
+  pointing `XDG_DATA_HOME` at an empty directory and stripping `PATH` so no Nim is
+  resolvable, then running the claimants: `INV-CANARY-01`, `CRYPTO-06`, `EPHEMERAL-03`,
+  `GATE-01`, `GEO-01`, `LAUNCH-01`, `-02`, `-04`, `-05`, `-06`, `-08`, `-09`, `REMOTE-01`,
+  `STUB-01`. The *other* five in that sentence is right — the 2026-09-09 review did find five
+  documented, dated "Verified" claims that were unimplemented — and the two numbers had been
+  collapsed into one.
+
+Also corrected, in `toolchain.py`'s own module docstring: "The system's Nim is ignored" is
+true of installing and false of resolving. `bootstrap.find_nim` prefers the managed Nim and
+then falls back to `PATH`, which is precisely what makes the README's "bring your own Nim"
+promise work on an arm64 host.
+
+Verified accurate and left alone: the three-users principle, uv-does-the-Python-part,
+encryption-at-rest, one-code-path, the ARM-Linux paragraph in full, mirrors (the digest is
+looked up by upstream URL before the rewrite), the uv compression figures, `--shake`, and
+refuses-instead-of-guessing.
+
+### A thick binary was 40% duplicate bytes: 85.4 MB -> 50.4 MB
+
+`hello.py` at `--thick` is now **50,425,885 bytes**, down from **85,405,022**. Nothing was
+removed from it — the same unmodified, digest-verified CPython and uv are still in there, and
+the staged tree on disk is byte-identical to what it was before.
+
+python-build-standalone ships `bin/python` and `bin/python3` as symlinks to `python3.13`,
+`libpython3.13.so` as one to `.so.1.0`, and — the part nobody had counted — about a thousand
+terminfo aliases. `Path.is_file()` follows symlinks and `ZipFile.write` reads through them, so
+`build_payload_zip` stored a full copy per name. A zip has no cross-member dedup, so the
+duplication survived compression intact: the three big ones alone were 34.3 MB of an 84.5 MB
+payload.
+
+The payload now stores each file once and lists the **1047** aliases in `.haru-links`;
+`stage.materialiseLinks` re-creates them between `extractAll` and `recordTree`.
+
+**They are re-created as copies, not symlinks, and that is the whole design.** `recordTree`
+walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
+`pcLinkToFile`. A symlink would have been absent from `.stage-files`, and `verifyTree` only
+checks what was recorded — so `bin/python`, the interpreter itself, would have gone unverified
+on every reuse. That is a hole in `INV-STAGE-01` traded for disk space. The saving is taken in
+the shipped binary, where it was wanted; the ~186 MB staged footprint is unchanged, and
+shrinking *that* would have to solve the recording problem first.
+
+The link table is untrusted input — the payload digest is not a MAC — so both halves of every
+entry go through `unsafeEntryPath`, a target the payload does not contain is refused, a
+collision with a real member is refused rather than resolved, malformed lines are refused, and
+`MaxLinkEntries` (16384, against a measured 1047) bounds how much disk a rewritten table can
+make the launcher write. Red path walked: replacing the guard with `if false:` makes a table
+naming `../escape.bin` or `/etc/cron.d/x` materialise outside the stage, exit 0 instead of 3.
+`INV-PAYLOAD-06`.
+
+Found by asking why a hello-world thick binary is 85 MB when PyInstaller manages under 20. The
+rest of that answer stands and is deliberate: ~9.5 MB is python-build-standalone material a
+hello world never touches (tcl/tk, pip, ensurepip, `share/`, headers, idlelib), and the
+remainder is the price of an unmodified interpreter plus uv. Only this 35 MB was a defect.
+`docs/TIERS.md`'s note that the zip "doesn't preserve symlinks" had been there all along, as a
+correctness remark about the launcher tolerating their absence. Nobody had costed it.
+
+## 2026-09-15
+
+### CI tests the happy path fast; the fallback is tested where it does not cost every push
+
+Giving CI a Nim toolchain (so the invariant gate stops being green on tests that never ran)
+took the job from ~30 s to ~10 min. Most of that was avoidable.
+
+Measured on the 3.13 job: installing Nim took **24 s**. The other nine and a half minutes were
+launcher compiles inside the tests — and they happened **twice**, because a `pytest -m invariant`
+step ran the claiming tests and then the full suite ran the same tests again (4m06 + 5m20).
+That step is gone. The skip-detector does not need it and is stronger in a full run, where
+every claimant is selected rather than just the marked ones.
+
+The toolchain now goes on **one** Python version. x86_64 Ubuntu on 3.13 is the target
+demographic and gets the full treatment; 3.9 stays a real floor check for the pure-Python half
+and sets `HARUPACK_INVARIANT_SKIPS_OK` explicitly, because launcher tests skipping there is by
+design rather than an accident to be caught.
+
+**The compile-from-source route is still fully tested** — in `nim-source-route.yml`, weekly and
+on demand, not on every push. It builds the image with `NIM_FROM=source`, asserts the compiler
+it produced is the version `pins.toml` names (so the two architectures cannot drift apart),
+and packs a real binary with it. It also asserts the escape hatch fails closed: with no
+`variant = "binary"` pin, `NIM_FROM=binary` must refuse rather than quietly compile for an hour.
+
+It runs on x86_64 rather than arm64 on purpose, and the workflow says so: what is under test is
+the *logic* — which route `acquire-nim.sh` picks, whether `install-nim-source.py` verifies the
+pinned tarball, whether `build.sh` bootstraps without reaching for git — none of which is
+architecture-specific. A green run there says the route works, not that arm64 works; arm64 was
+verified by hand on a Raspberry Pi.
+
+Nothing changed about *when* Nim gets compiled: `NIM_FROM=auto` on x86_64 has always taken the
+choosenim binary, and the source build only runs where choosenim publishes nothing.
+
+### the flex sandbox image builds for arm64, and getting a compiler is now a choice
+
+`docker/flex.Dockerfile` supported linux/amd64 only, because choosenim publishes binaries for
+linux x86_64, macOS x86_64/arm64 and Windows and **nothing for linux aarch64**. That left the
+arm64 box unable to run flex sandboxed at all — it could only use `--no-docker`, which is
+precisely the unprotected path the sandbox exists to stop being the default.
+
+Both architectures now work, and both land on the same Nim version, so an arm64 result and an
+amd64 result are comparable rather than merely both green.
+
+**Compiling is the fallback, not the plan.** Bootstrapping Nim means compiling roughly eleven
+thousand C files — about 25 minutes on a 4-core Raspberry Pi. Nobody on the platforms
+choosenim covers pays that, and there is no reason an arm64 user should either. So
+`.github/workflows/nim-aarch64.yml` builds one from the source tarball pinned in `pins.toml`.
+
+The pinning half is not done yet, so arm64 still compiles under `auto`: the workflow uploads
+the tarball and prints its sha256 with an instruction to add the pin by hand — it never writes
+`pins.toml` — and `pins.toml` has a comment where a `variant = "binary"` entry goes rather
+than the entry. While this repository is private an unauthenticated fetch of a release asset
+cannot work, so a pin would point at something nobody could download. When it lands its
+`provenance` must be the workflow run URL, and a test is already waiting to enforce that.
+
+**`NIM_FROM` is the escape hatch**, and two of its modes exist for opposite reasons:
+
+| `NIM_FROM` | what it does |
+|---|---|
+| `auto` (default) | choosenim where upstream publishes for it; else our pinned prebuilt binary; else compile from the pinned source |
+| `binary` | a pinned binary only — fails rather than quietly compiling for an hour |
+| `source` | compile from the pinned source; never run a Nim binary this project published |
+| `system` | use the Nim already present; fetch and compile nothing |
+
+Someone on a slow arm64 box wants `binary` and would rather fail than wait. Someone who
+declines to execute a compiler this project built wants `source` and would rather wait than
+trust it. A single "no-download" switch would have served only one of them.
+
+**A gap and a mismatch are different answers.** "No pin for this platform" exits 3 and the
+caller may fall back to a source build. "There is a pin and the bytes do not match it" exits 1
+and nothing falls back — quietly recompiling instead would erase exactly the supply-chain
+signal worth keeping.
+
+**Provenance for an artifact we publish is held to a different standard.** Pinning a
+third-party artifact asserts "this is what the publisher published". Pinning our own asserts
+"this is what *we* built" — weaker, and worth very little if the only evidence is that someone
+ran a command on hardware nobody else can see. So a `variant = "binary"` pin's `provenance`
+must be the workflow run URL, and a test enforces it. Building it on a maintainer's Pi would
+have been faster and is specifically what this rules out.
+
+Verified on the arm64 box: image built, `Nim Compiler Version 2.2.6 [Linux: arm64]`, and
+`certifi` packed and ran inside the sandbox (13.3 MB, build 44.4 s, run 10.8 s).
+
+Two small things found on the way, both of which produced failures that named nothing useful:
+nim-lang.org answers urllib's default User-Agent with **HTTP 403**, and the installer scripts
+were printing progress to stdout when stdout *is* their return value — so a captured path came
+back as `install-nim-source: nim 2.2.6 from https://...` and the build died on `cd`.
+
 ## 2026-09-14
+
+### flex: two things the first top25 run taught us
+
+Both found by running the matrix for real rather than by reading the diff.
+
+**`--max-cache-gb` treated a toolchain cache as reclaimable bulk.** The sandbox volume is
+13.5 MB, which reads like nothing worth keeping — but it holds haru-pack's XZ-compressed uv
+(55.6 MB → 14.2 MB at preset 9), recomputed from scratch if it is gone. Measured across a
+top25 run: builds took **207–213 s with a cold volume and 70–83 s with a warm one**, about
+140 s per build, paid by every build that starts before the first one repopulates it. To
+reclaim 13.5 MB.
+
+That was not hypothetical — the volume had been emptied by testing the budget with
+`--max-cache-gb 0.001`, which is why the first four builds of that run were three times
+slower than the other twenty-one. Budgets under 1 GB are now refused, with the measurement in
+the message. `--flush-cache sandbox` still empties it and now prints the same cost, because
+that flag is someone saying they meant it.
+
+**Progress was invisible when stdout was redirected.** Python block-buffers stdout when it is
+not a terminal, so `flex-run.py > log` showed nothing at all for an 18-minute top25 run and
+then everything at once. A harness whose output only arrives after it finishes is
+indistinguishable from a hung one, and the first thing anyone does about a hung harness is
+kill it. stdout and stderr are now line-buffered — one setting, rather than a `flush=True`
+that the next `print` forgets.
+
+### flex: an `importable` probe style, import names that are found rather than guessed
+
+Three rungs now, cheapest first — `importable` (flex default), `smoke`
+(`--style smoke`), `suite` (`tools/exam.py`).
+
+**Why the default moved.** The smoke bodies are hand-written, one per package, in
+`flex/curation.toml`. That made each one a second thing that could break for reasons with
+nothing to do with packaging — an API moved, a keyword was removed, the package wanted a
+display — and when it did, the run said "flex failed" and somebody had to read a traceback to
+find out whether haru-pack had done anything wrong at all. `importable` has exactly one
+failure mode, and it is the one the harness exists to detect. It is a narrowing, and it costs
+something real: a default run no longer exercises the library. The stronger rungs are still
+there, and the style is recorded in `results.json` and printed in the summary header so an
+`importable` pass and a `smoke` pass are never silently compared.
+
+Each module is attempted in its own `try`/`except`/`finally`. The `except` prints the **full
+traceback** — that output is the only artefact left once the container is gone — and doing it
+per module means a package with several top-level modules says *which* one broke.
+
+**Import names are now discovered, not guessed** ([`INV-FLEX-03`](INVARIANTS.md)).
+`pip install pillow` gives you `import PIL`, and no rule recovers that from the name; it is
+why `flex/curation.toml` carried eight hand-written `import_name` entries, each a guess that
+could go stale silently. The probe inverts `importlib.metadata.packages_distributions()` from
+*inside* the binary, where the distribution actually exists, with PEP 503 normalisation so
+`typing-extensions` and `typing_extensions` are one dist. Two fallbacks behind that
+(`top_level.txt`, then the guess), and **the route is reported**, so a guess never reads as a
+fact. The curated entries become assertions the harness checks and can no longer steer the
+probe — if they could, checking the probe against them would be a tautology.
+
+**Cache control**, because a matrix run grows several caches:
+`--cache-info`, `--flush-cache sandbox|host`, `--max-cache-gb N`.
+
+Measuring first moved the design. The assumption was that the sandbox volume was the problem;
+it is not.
+
+| what | size | may the harness delete it? |
+|---|---|---|
+| `~/.cache/uv` | **18.9 GB** | no — shared with every project on the machine |
+| `haru-flex-cache` | 13.5 MB | yes — the harness's own, rebuildable |
+| `~/.cache/haru-pack` | 273 MB | no |
+| anonymous run volumes | 0 | `--rm` already reaps them |
+
+The volume stays small because `warm_cache_and_lock` points `UV_CACHE_DIR` at the payload's
+own bundled cache inside the build tree, not at ours. So `--max-cache-gb` only ever touches
+the volume; the host caches are reported, and only *pruned*, and only when you ask.
+
+One bug worth naming because of its shape: `uv cache dir` writes a **coloured** path, the
+escape codes went into the `Path`, and `du` then reported `0 B` for an 18.9 GB cache. Nothing
+raised — the number was simply wrong and looked exactly like a right one, which is the worst
+thing that can happen in a tool whose entire output is numbers. There is a regression test.
+
+### flex and exam now run strangers' code in a container, not on your workstation
+
+The flex matrix is a list of packages picked by PyPI download rank, and running their code is
+the entire point of the harness. That code executed in three places — sdist build backends
+under `uv sync`, the binary the build produces, and any `[[bundle]]`/`[[post_install]]` step —
+and all three ran on the maintainer's machine, as the maintainer, with `$HOME`, SSH keys,
+cloud credentials and this repository's working tree in scope. `tools/exam.py` was the sharp
+end: it runs each package's **own test suite**.
+
+Both harnesses now give every package its own throwaway containers, by default. The build
+phase gets the network and the shared cache; the run phase gets a throwaway cache of its own
+and never sees the shared one, so nothing a package writes into the cache can reach the next
+package's **run**. Its next package's *build* is another matter: the build cache is shared
+read-write across packages on purpose, so a 25-package run does not fetch the same toolchain
+25 times, and a malicious sdist build backend can therefore write into a cache a later build
+reads. That residual risk is stated rather than papered over — it lives in a docker volume,
+never on your filesystem, and `docker volume rm haru-flex-cache` resets it. The
+repository is bind-mounted **read-only**, so flex still tests your working tree rather than a
+stale copy baked into an image. `--no-docker` still runs on the host, after printing what that
+puts at risk; docker being missing is an error, never a silent fallback
+([`INV-SANDBOX-01`](INVARIANTS.md), [ADR 0005](docs/adr/0005-sandboxed-flex-and-exam-harnesses.md)).
+
+**This made an existing result stronger, not just safer.** `--offline-check` is how the thick
+tier's "the payload carries its dependencies" claim gets tested, and `tools/flex-run.py` was
+honest in its own docstring about how weak the mechanism was: it forced `UV_OFFLINE` and
+pointed the proxy variables at a dead port, which "does not stop a package from opening a raw
+socket of its own". The run phase now gets `--network none` and a cache volume that has never
+been used — a real network namespace, with no interface to open a socket on
+([`INV-SANDBOX-02`](INVARIANTS.md)). The `--no-docker` path keeps the old approximation and
+prints its results as `carried*`, because a weaker check reported in the same column as a
+stronger one is how evidence gets overstated.
+
+**The containment is checked offline.** `docker_argv()` is a pure function — it reads no
+environment, no filesystem and no clock — so `tests/test_sandbox.py` asserts the properties
+that matter (no network at thick, the shared cache unmounted during the run, the docker socket never
+mounted, the repo never mounted writable) by reading the argv, on a box with no docker
+installed. A guarantee that can only be checked by running docker is one that gets checked
+when somebody remembers.
+
+**Rootless docker is preferred, detected, and warned about rather than required.** The gap is
+real — on a rootful daemon the socket is a root-equivalent handle — and
+[`docs/ROOTLESS_DOCKER.md`](docs/ROOTLESS_DOCKER.md) is the switch-over. It warns instead of
+refusing on purpose: refusing would send people to `--no-docker`, and a rootful container
+beats no container. `--require-rootless` makes it fatal for anyone who wants the stronger line.
+
+Stated and not papered over: the build phase needs the uv cache read-write and shares it
+across packages, so a malicious build backend can still write into a cache a later package's
+*build* reads. It is confined to a docker volume and never touches the host filesystem;
+`docker volume rm haru-flex-cache` resets it. And a container is not a VM.
+
+Two things the first implementation got wrong, both found by running it rather than by
+reading it, and both now recorded in the ADR rather than quietly amended. The run phase was
+given the shared cache mounted `:ro` — unimplementable, because a thick binary stages into
+`$XDG_CACHE_HOME` before it can execute, so it died with `OSError: Read-only file system`.
+And the image's `chmod -R` sat in its own layer after unpacking zig and the Nim toolchain;
+on overlayfs a chmod is a write, so it copied the whole tree up and added ~1.08 GB to the
+image for a permission bit.
 
 ### busybody — an alignment pass against lotek's independent implementation
 

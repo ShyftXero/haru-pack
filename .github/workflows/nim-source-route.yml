@@ -1,0 +1,120 @@
+name: nim-source-route
+
+# Prove the compile-from-source route to a Nim compiler still works, and that the escape
+# hatch around it behaves — on x86_64, off the critical path.
+#
+# WHY THIS IS A SEPARATE WORKFLOW
+#
+# `ci.yml` tests the HAPPY PATH: x86_64 Ubuntu, where choosenim publishes a binary and
+# `NIM_FROM=auto` takes it. That is the target demographic and it should stay fast.
+#
+# The source route only runs where choosenim publishes nothing — linux aarch64 today — or
+# when an operator asks for it by name. Nobody on the happy path pays for it, so it does not
+# belong in the workflow that gates every push. But it is also the fallback that a whole
+# architecture depends on, and a fallback nothing exercises is a fallback that has already
+# rotted by the time someone needs it.
+#
+# WHY x86_64 AND NOT arm64
+#
+# The thing under test is the LOGIC — does `acquire-nim.sh` pick the right route, does
+# `install-nim-source.py` verify the pinned tarball and refuse an unpinned one, does
+# `build.sh` bootstrap without reaching for git. None of that is architecture-specific.
+# Running it on x86_64 costs a native compile instead of an emulated one, and the arm64
+# result was verified by hand on real hardware (a 4-core Raspberry Pi, 2026-09-15, in the PR
+# that added this route). Testing it here on amd64 is a proxy, and that is stated rather than
+# implied: a green run says the route works, not that arm64 works.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly. Nim releases, nim-lang.org's TLS, and the pinned tarball's availability all
+    # change on their own schedule, and a fallback discovered broken on the day it is needed
+    # is the failure this guards against.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  source-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the escape hatch fails closed when there is nothing to fetch
+        # `NIM_FROM=binary` must FAIL rather than quietly compiling for an hour. There is no
+        # `variant = "binary"` nim pin yet (see src/haru_pack/pins.toml), so on every platform
+        # this is the "nothing pinned for this platform" path — exit 3 from
+        # install-nim-binary.py, which acquire-nim.sh must turn into a refusal, not a
+        # fallback. Runs first because it is seconds, and because a regression here is the one
+        # that would make the slow step below meaningless.
+        run: |
+          set -euo pipefail
+          if docker build -f docker/flex.Dockerfile --build-arg NIM_FROM=binary \
+               -t haru-pack-flex:binary-should-fail . > /tmp/binary.log 2>&1; then
+            echo "::error::NIM_FROM=binary built successfully, but no nim binary is pinned."
+            echo "It must fail rather than fall back to a compile. Tail of the build log:"
+            tail -40 /tmp/binary.log
+            exit 1
+          fi
+          grep -q "NIM_FROM=binary" /tmp/binary.log || {
+            echo "::error::the build failed, but not with the NIM_FROM=binary refusal:"
+            tail -40 /tmp/binary.log
+            exit 1
+          }
+          echo "refused as intended:"
+          grep -A 3 "NIM_FROM=binary" /tmp/binary.log | head -8
+
+      - name: build the image with NIM_FROM=source
+        # The real thing: fetch the pinned Nim source, verify its digest, bootstrap the
+        # compiler from the `c_code/` the tarball ships (never `build_all.sh`, which clones
+        # csources from git and would put an unpinned fetch inside a verified chain), then
+        # build the rest of the sandbox image on top of it.
+        run: |
+          set -euo pipefail
+          docker build -f docker/flex.Dockerfile --build-arg NIM_FROM=source \
+            -t haru-pack-flex:source-route .
+
+      - name: the compiler it built is the one pins.toml names
+        # A source build that produces SOME nim is not the claim. The pinned version is chosen
+        # to match what choosenim installs on the platforms it covers, so that an arm64 result
+        # and an amd64 result are comparable rather than merely both green — this asserts the
+        # two have not drifted apart.
+        run: |
+          set -euo pipefail
+          want="$(python3 - <<'PY'
+          import tomllib, pathlib
+          pins = tomllib.loads(pathlib.Path("src/haru_pack/pins.toml").read_text())
+          e = [a for a in pins["artifact"]
+               if a.get("kind") == "nim" and a.get("variant") == "source"]
+          assert len(e) == 1, f"expected one pinned nim source, got {len(e)}"
+          print(e[0]["version"])
+          PY
+          )"
+          got="$(docker run --rm haru-pack-flex:source-route \
+                   sh -c 'nim --version | head -1' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          echo "pinned $want, built $got"
+          test "$want" = "$got" || {
+            echo "::error::source build produced Nim $got, but pins.toml names $want"
+            exit 1
+          }
+
+      - name: the image is usable, and packs something
+        # The same uid-65534 check the image runs at build time, plus one real build: a
+        # compiler that exists but cannot produce a binary is not a working fallback.
+        run: |
+          set -euo pipefail
+          docker run --rm -u 65534:65534 haru-pack-flex:source-route \
+            sh -c 'haru-pack version && haru-pack doctor'
+          mkdir -p /tmp/proj/app
+          printf 'print("SOURCE_ROUTE_OK")\n' > /tmp/proj/app/__main__.py
+          : > /tmp/proj/app/__init__.py
+          printf '[project]\nname = "app"\nversion = "0.1.0"\nrequires-python = ">=3.12"\n' \
+            > /tmp/proj/pyproject.toml
+          printf 'entrypoint = ["python", "-m", "app"]\n' > /tmp/proj/haru_pack.toml
+          docker run --rm -u "$(id -u):$(id -g)" -v /tmp/proj:/w -w /w \
+            -e HOME=/opt/haru -e XDG_CACHE_HOME=/cache -v /cache \
+            haru-pack-flex:source-route haru-pack build /w -o /w/app.bin
+          test -s /tmp/proj/app.bin
+          echo "built $(stat -c%s /tmp/proj/app.bin) bytes via the source route"

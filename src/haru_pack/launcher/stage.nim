@@ -46,6 +46,14 @@ const
   StageFormat* = "haru-pack-stage/2"
   ReadyName* = ".ready"
   FilesName* = ".stage-files"
+  LinksName* = ".haru-links"
+  ## Ceiling on entries in `.haru-links`. Measured, not guessed: a thick linux-x86_64
+  ## payload with CPython 3.13 carries **1047** — four interpreter aliases plus `idle3`,
+  ## `pydoc3`, the pkgconfig `.pc` pair, a man page, and roughly a thousand terminfo
+  ## aliases. 16384 leaves room for a bigger terminfo database without being an open door:
+  ## every entry costs a full file copy, so the count is what bounds how much disk a
+  ## rewritten table can make the launcher write.
+  MaxLinkEntries* = 16384
   KeyChars = {'0'..'9', 'a'..'f', 'A'..'F'}
 
 proc baseDir*(): string =
@@ -682,12 +690,16 @@ proc expandCompressedMembers(root: string) =
       want = parseInt(readFile(sizePath).strip())
     except ValueError:
       raise newException(StageError, "unreadable size sidecar for " & rel)
-    # The sidecar is a number from the payload, and the payload is not verified at runtime
-    # (INV-LAUNCH-01 is still `proposed`). Feeding it straight to `newString` means a
-    # tampered or corrupt value allocates that much: measured 2026-09-11, `newString(1 shl
-    # 50)` aborts the process with a bare "out of memory" — an OutOfMemDefect, which is not
-    # catchable, so none of the error handling below would ever run. A ceiling turns that
-    # into a refusal with a reason.
+    # The sidecar is a number from the payload. `main.launch` does verify the payload
+    # against the digest in its own footer before we get here (INV-LAUNCH-01, now
+    # `active`), but that is not a MAC: both halves come from the same attacker-writable
+    # footer, so it catches corruption and naive edits, not a deliberate rewrite. The
+    # invariant that would make a hostile size unreachable is a signature over the payload
+    # — INV-LAUNCH-03, still `proposed`. So treat this number as untrusted. Feeding it
+    # straight to `newString` means a tampered or corrupt value allocates that much:
+    # measured 2026-09-11, `newString(1 shl 50)` aborts the process with a bare "out of
+    # memory" — an OutOfMemDefect, which is not catchable, so none of the error handling
+    # below would ever run. A ceiling turns that into a refusal with a reason.
     if want <= 0 or want > MaxExpandedBytes:
       raise newException(StageError,
         "size sidecar for " & rel & " says " & $want & " bytes, which is outside the " &
@@ -709,9 +721,12 @@ proc expandCompressedMembers(root: string) =
     # decompression "succeeds" and yields something else.
     #
     # What it does NOT do, stated plainly: defeat tampering. An attacker who can rewrite
-    # `uv.xz` can rewrite `uv.xz.sha256` alongside it. Closing that needs the digest in a
-    # signature-covered place the payload cannot reach — see INV-LAUNCH-01, still
-    # `proposed`. This is an integrity check against corruption, not an authenticity one.
+    # `uv.xz` can rewrite `uv.xz.sha256` alongside it. The footer digest checked in
+    # `main.launch` (INV-LAUNCH-01, `active`) does not close the gap either — it is the
+    # same shape of check, payload against a digest an editor can recompute. Closing it
+    # needs the digest in a signature-covered place the payload cannot reach — see
+    # INV-LAUNCH-03, still `proposed`. This is an integrity check against corruption, not
+    # an authenticity one.
     let shaPath = full & ".sha256"
     if fileExists(shaPath):
       let wantSha = readFile(shaPath).strip().toLowerAscii
@@ -731,6 +746,62 @@ proc expandCompressedMembers(root: string) =
       except OSError: discard
     removeFile(full)
     removeFile(sizePath)
+
+proc materialiseLinks(root: string) =
+  ## Re-create the files the build stored once, then delete the link table.
+  ##
+  ## python-build-standalone ships `bin/python` and `bin/python3` as symlinks to
+  ## `python3.13`, and `libpython3.13.so` as one to `libpython3.13.so.1.0`. The build used
+  ## to follow those and store five full copies of two files — 34.3 MB of an 84.5 MB thick
+  ## payload, since DEFLATE cannot dedupe across members. Now it stores each once and lists
+  ## the aliases in `.haru-links`.
+  ##
+  ## They are re-created as COPIES, not symlinks, and that is deliberate. `recordTree`
+  ## walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
+  ## `pcLinkToFile`: a symlink here would be absent from `.stage-files`, and `verifyTree`
+  ## only checks what was recorded (see `isRuntimeMutable`'s note). Staging a symlink would
+  ## buy disk at the cost of leaving the interpreter's own name unverified on every reuse.
+  ## So the staged tree is byte-identical to one from a payload built before this existed,
+  ## the saving is in the shipped binary, and INV-STAGE-01 is untouched.
+  ##
+  ## Same ordering rule as `expandCompressedMembers`, for the same reason: this runs before
+  ## `recordTree`, so the copies are inside the sealed manifest rather than written after it.
+  let table = root / LinksName
+  if not fileExists(table): return
+  var entries: seq[(string, string)]
+  for line in readFile(table).splitLines:
+    if line.len == 0: continue
+    let tab = line.find('\t')
+    if tab <= 0:
+      raise newException(StageError, "malformed " & LinksName & " entry: " & line)
+    entries.add (line[0 ..< tab], line[tab + 1 .. ^1])
+  if entries.len > MaxLinkEntries:
+    raise newException(StageError,
+      LinksName & " lists " & $entries.len & " entries, more than this launcher will " &
+      "materialise (" & $MaxLinkEntries & "). The payload is corrupt or was not produced " &
+      "by haru-pack.")
+  for (linkRel, targetRel) in entries:
+    # Both halves come out of the payload, which `main.launch` has checked against a digest
+    # that is not a MAC (INV-LAUNCH-01's own note). Treat them as untrusted input: without
+    # this, a rewritten table is an arbitrary-file-write primitive, and `..` in the target
+    # would copy a file from outside the stage into it.
+    if unsafeEntryPath(linkRel) or unsafeEntryPath(targetRel):
+      raise newException(StageError,
+        "refusing payload: unsafe path in " & LinksName & ": " & linkRel & " -> " & targetRel)
+    let linkPath = root / linkRel
+    let targetPath = root / targetRel
+    if not fileExists(targetPath):
+      raise newException(StageError,
+        LinksName & " points " & linkRel & " at " & targetRel & ", which the payload does " &
+        "not contain")
+    if fileExists(linkPath) or dirExists(linkPath):
+      raise newException(StageError,
+        "payload contains both " & linkRel & " and a " & LinksName & " entry for it; " &
+        "refusing to choose")
+    createDir(parentDir(linkPath))
+    # Permissions come with it: `bin/python` is only useful if it is still executable.
+    copyFileWithPermissions(targetPath, linkPath)
+  removeFile(table)
 
 proc recordTree(root: string): tuple[manifest: string, count: int] =
   var rels: seq[string]
@@ -836,6 +907,7 @@ proc stageZip*(payload: string, key: string, root = baseDir()): string =
   extractAll(zipPath, root)           # dest must not pre-exist
   removeFile(zipPath)
   expandCompressedMembers(root)       # BEFORE recordTree — see that proc's comment
+  materialiseLinks(root)              # likewise: copies must be inside the sealed manifest
   hardenDir(root)
   let (mf, count) = recordTree(root)
   writeHardened(root / FilesName, mf)
