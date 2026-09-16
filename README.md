@@ -14,6 +14,10 @@ Playwright, …) — into a single, **signable native launcher** that stages `uv
 standalone Python and runs it **as if it were a compiled binary in the folder it was
 launched from**. Windows-first, cross-compiled from Linux. Built on `uv`; launcher in Nim.
 
+> Think PyInstaller's UX, but the interpreter + deps are delegated to `uv`, the launcher is
+> a thin signable native stub, and you choose how much is bundled vs fetched on the target.
+> 
+
 ## Why is this even here.
 
 I love python.
@@ -39,9 +43,6 @@ Now it's got far too many flags to remember but I don't need to remember them be
 ## AI Disclaimer
 
 This project was engineered with AI but that doesn't necessarily mean it's slop. Care was taken to ensure that it's robust, built with consistent standards, and able to withstand some adversarial pressure. That being said, it might also be slop. Buyer beware. I believe we should be building tools that will outlast the AI bubble. Build the tools that will continue to work when we can no longer afford to throw tokens at the problem. I'm capitalizing on that now and building the tools using AI while I still have access to it. Come with me if you want to live.
-
-> Think PyInstaller's UX, but the interpreter + deps are delegated to `uv`, the launcher is
-> a thin signable native stub, and you choose how much is bundled vs fetched on the target.
 
 ## TL;DR
 
