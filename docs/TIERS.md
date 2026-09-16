@@ -6,24 +6,24 @@ How much is baked into the exe vs fetched on the target machine. Pick with a `bu
 |------|------|---------|-------------------|--------------|---------|
 | **thin** | `--thin` | nothing | uv + Python + deps | ~0.4 MB | no (needs net on 1st run) |
 | **default** | *(none)* | uv | Python + deps | ~15 MB | no (net on 1st run) |
-| **thick** | `--thick` / `--chonky` | uv + Python (+deps) | nothing | ~85 MB | **yes** |
+| **thick** | `--thick` / `--chonky` | uv + Python (+deps) | nothing | ~50 MB | **yes** |
 
-> Both figures are ~8 MB smaller than they used to be because the bundled `uv` now ships
-> XZ-compressed; see below. Both are measured, not derived: `hello` is **15.1 MB** at
-> default tier and **85.4 MB** at thick (2026-09-11, linux-x86_64, Python 3.13). The thick
-> figure read ~82 MB until 2026-09-11, which was the old number minus the saving rather
-> than a measurement — caught by the documentation pass.
+> Measured, not derived: `hello` is **15.1 MB** at default tier and **50.4 MB** at thick
+> (2026-09-15, linux-x86_64, Python 3.13). Thick was 85.4 MB until 2026-09-15, when
+> `INV-PAYLOAD-06` stopped the payload storing python-build-standalone's interpreter
+> symlinks as full copies — 35 MB of duplicate bytes, 41% of the binary. Both figures are a
+> further ~8 MB down on where they started, because the bundled `uv` ships XZ-compressed;
+> see below.
 
 The same two builds, side by side, so the trade is a measurement rather than a table you have
 to trust:
 
 ![default vs thick, measured](media/03-tiers.gif)
 
-The `82M` in that recording is the same binary as the `85.4 MB` in the table, not the
-discredited old figure the note above retired. `ls -lh` prints MiB and rounds up: the file is
-85,405,022 bytes, which is 85.4 MB and 81.45 MiB, and `ls` shows that as `82M`. The default
-binary is 15,078,929 bytes by the same measurement. The `84501169 B` in the build output is
-smaller than either because it counts the payload, not the whole executable.
+`ls -lh` prints MiB and rounds up, so the same thick binary reads as `49M` there and
+**50.4 MB** here: it is 50,425,885 bytes, which is 50.4 MB and 48.09 MiB. The default binary
+is 15,083,249 bytes (15.1 MB, 14.38 MiB, shown as `15M`). The `49517712 B` in the build
+output is smaller than either because it counts the payload, not the whole executable.
 
 Regenerate with `docs/tapes/record.sh 03`; the tape is `docs/tapes/03-tiers.tape`.
 

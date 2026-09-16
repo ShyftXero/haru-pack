@@ -2087,6 +2087,57 @@ fetched precisely so it would be reviewable in a diff, which is only true if dri
 detectable.
 Territory: src/haru_pack/launcher/xz/, tests/test_uv_compression.py
 
+### INV-PAYLOAD-06
+Status: active
+Statement: A file symlink inside the payload is stored **once**, with its aliases listed in
+`.haru-links`, and the launcher re-creates each alias as a **copy** between `extractAll` and
+`recordTree` — so the staged tree is byte-identical to one built before this existed and
+every alias is inside the sealed `.stage-files` manifest. Both halves of every entry are
+treated as untrusted: a link or target path that could reach outside the stage
+(`unsafeEntryPath`), a target the payload does not contain, a collision with a real member,
+a malformed line, or more than `MaxLinkEntries` entries all refuse the payload. Only the
+shape the launcher can reproduce exactly is deduplicated — a directory symlink, a dangling
+one, and one escaping the payload keep the old copy-the-bytes behaviour.
+Actors: the operator shipping over a metered link; anyone who can rewrite the payload of a
+binary they hold, for whom a link table is the obvious arbitrary-file-write primitive.
+Scale, measured rather than assumed: a thick linux-x86_64 payload carries **1047** link
+entries — the four interpreter aliases plus `idle3`, `pydoc3`, the pkgconfig pair, a man
+page, and about a thousand terminfo aliases. That is why the saving (34.98 MB) came out
+above the 34.3 MB the five big duplicates alone predicted, and why `MaxLinkEntries` is
+16384 rather than the few hundred a first guess would have set it to.
+Assets: 34.98 MB of every thick binary, and the integrity chain around the interpreter the
+launcher executes. Measured 2026-09-15 on `hello.py`, thick, linux-x86_64, Python 3.13:
+python-build-standalone ships `bin/python` and `bin/python3` as symlinks to `python3.13` and
+`libpython3.13.so` as one to `libpython3.13.so.1.0`; `Path.is_file()` follows symlinks and
+`ZipFile.write` reads through them, so five names stored five full copies of two files.
+DEFLATE compresses each member independently, so the duplication survived compression:
+2 x 12,074,129 + 10,107,799 = **34.3 MB of an 84.5 MB payload**. After the fix the same
+binary is **85,405,022 -> 50,425,885 bytes**, a 41% cut, and it still runs.
+Note — why copies and not symlinks, which would also save disk at stage time: `recordTree`
+walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
+`pcLinkToFile`. A symlink would be absent from `.stage-files`, and `verifyTree` only checks
+what was recorded — so the interpreter's own name would go unverified on every reuse. The
+saving is taken in the shipped binary, where it is wanted, and not in a way that quietly
+punches a hole in `INV-STAGE-01`. Reducing the ~186 MB staged footprint is a separate
+question and would have to solve the recording problem first.
+Red-path: four, all walked 2026-09-15:
+(0) replace the `unsafeEntryPath` guard in `stage.materialiseLinks` with `if false:` — a
+table naming `../escape.bin` or `/etc/cron.d/x` is then materialised outside the stage.
+Walked: two of the four parametrised cases went green-to-red, exit 0 instead of 3, with the
+file written outside the cache;
+(1) move the `materialiseLinks(root)` call in `stage.stageZip` to after `recordTree(root)` —
+the aliases drop out of the recorded set, exactly as `INV-PAYLOAD-04`'s red-path (1);
+(2) make `payload._dedupe_target` return a target for a symlink that escapes the payload —
+the launcher then cannot reproduce it and staging refuses with "does not contain";
+(3) drop the `fileExists(linkPath)` collision check — a payload carrying both a real member
+and a link entry for that path silently gets one of them.
+Source: Eli asked why a hello-world thick binary is 85 MB when PyInstaller manages under 20,
+2026-09-15. Most of the answer is deliberate (an unmodified, digest-verified CPython plus
+uv); this part was not, and had been invisible because `docs/TIERS.md` recorded the missing
+symlinks only as a *correctness* note the launcher tolerates, never as a size.
+Territory: src/haru_pack/payload.py, src/haru_pack/launcher/stage.nim,
+tests/test_payload_symlinks.py, tests/test_stage_hardening.py
+
 ### INV-BUILD-08
 Status: active
 Statement: A bare console-script entrypoint is checked as far as the tier allows: refused

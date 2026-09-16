@@ -3,6 +3,47 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-09-16
+
+### A thick binary was 40% duplicate bytes: 85.4 MB -> 50.4 MB
+
+`hello.py` at `--thick` is now **50,425,885 bytes**, down from **85,405,022**. Nothing was
+removed from it — the same unmodified, digest-verified CPython and uv are still in there, and
+the staged tree on disk is byte-identical to what it was before.
+
+python-build-standalone ships `bin/python` and `bin/python3` as symlinks to `python3.13`,
+`libpython3.13.so` as one to `.so.1.0`, and — the part nobody had counted — about a thousand
+terminfo aliases. `Path.is_file()` follows symlinks and `ZipFile.write` reads through them, so
+`build_payload_zip` stored a full copy per name. A zip has no cross-member dedup, so the
+duplication survived compression intact: the three big ones alone were 34.3 MB of an 84.5 MB
+payload.
+
+The payload now stores each file once and lists the **1047** aliases in `.haru-links`;
+`stage.materialiseLinks` re-creates them between `extractAll` and `recordTree`.
+
+**They are re-created as copies, not symlinks, and that is the whole design.** `recordTree`
+walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
+`pcLinkToFile`. A symlink would have been absent from `.stage-files`, and `verifyTree` only
+checks what was recorded — so `bin/python`, the interpreter itself, would have gone unverified
+on every reuse. That is a hole in `INV-STAGE-01` traded for disk space. The saving is taken in
+the shipped binary, where it was wanted; the ~186 MB staged footprint is unchanged, and
+shrinking *that* would have to solve the recording problem first.
+
+The link table is untrusted input — the payload digest is not a MAC — so both halves of every
+entry go through `unsafeEntryPath`, a target the payload does not contain is refused, a
+collision with a real member is refused rather than resolved, malformed lines are refused, and
+`MaxLinkEntries` (16384, against a measured 1047) bounds how much disk a rewritten table can
+make the launcher write. Red path walked: replacing the guard with `if false:` makes a table
+naming `../escape.bin` or `/etc/cron.d/x` materialise outside the stage, exit 0 instead of 3.
+`INV-PAYLOAD-06`.
+
+Found by asking why a hello-world thick binary is 85 MB when PyInstaller manages under 20. The
+rest of that answer stands and is deliberate: ~9.5 MB is python-build-standalone material a
+hello world never touches (tcl/tk, pip, ensurepip, `share/`, headers, idlelib), and the
+remainder is the price of an unmodified interpreter plus uv. Only this 35 MB was a defect.
+`docs/TIERS.md`'s note that the zip "doesn't preserve symlinks" had been there all along, as a
+correctness remark about the launcher tolerating their absence. Nobody had costed it.
+
 ## 2026-09-15
 
 ### CI tests the happy path fast; the fallback is tested where it does not cost every push

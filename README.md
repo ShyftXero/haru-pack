@@ -80,7 +80,7 @@ and the choice is about what the target machine is allowed to reach — not abou
 | | bundled | first run | offline | sharing |
 |---|---|---|---|---|
 | **default** (~15 MB) | `uv` | downloads Python + your deps, then caches them | needs a network once | two of your apps share one copy of a heavy dep |
-| **`--thick`** (~85 MB) | `uv` + Python + deps | nothing to fetch | **yes, always** | none — two thick torch apps are two copies |
+| **`--thick`** (~50 MB) | `uv` + Python + deps | nothing to fetch | **yes, always** | none — two thick torch apps are two copies |
 
 Default is the right answer when your users are online: first launch costs a few seconds,
 every launch after is instant. Reach for `--thick` when the target has no internet, or must
@@ -94,20 +94,22 @@ that says where it is. The OS only ever executes the first part. Byte offsets be
 `hello` binaries from the recording above — read them with `haru-pack verify <exe>`.
 
 ```
-  default (15,078,929 B)                       thick (85,405,022 B)
+  default (15,083,249 B)                       thick (50,425,885 B)
 +--------------------------------+ 0        +--------------------------------+ 0
 | Nim launcher                   |          | Nim launcher                   |
 |   native ELF/PE, ~900 KB       |          |   byte-identical to default    |
 |   the only part the OS runs    |          |   the only part the OS runs    |
-+--------------------------------+ 903,632  +--------------------------------+ 903,632
-| payload (zip)     14,175,076 B |          | payload (zip)     84,501,169 B |
++--------------------------------+ 907,952  +--------------------------------+ 907,952
+| payload (zip)     14,175,076 B |          | payload (zip)     49,517,712 B |
 |                                |          |                                |
 |  app/           your code      |          |  app/           your code      |
 |  manifest.toml  entrypoint,    |          |  manifest.toml  + offline=true |
 |                 tier, cwd      |          |  vendor/uv.xz   uv, XZ'd       |
-|  vendor/uv.xz   uv, XZ'd       |          |  vendor/python/ CPython,       |
-|                 14.2 MB        |          |                 186 MB unzipped|
-|                 + .sha256/.size|          |  vendor/cache/  your deps *    |
+|  vendor/uv.xz   uv, XZ'd       |          |  vendor/python/ CPython: 95 MB |
+|                 14.2 MB        |          |                 stored, 186 MB |
+|                 + .sha256/.size|          |                 once staged *  |
+|                                |          |  vendor/cache/  your deps **   |
+|                                |          |  .haru-links    alias table *  |
 +--------------------------------+          +--------------------------------+
 | stub-config          105 B     |          | stub-config          105 B     |
 |   cleartext knobs + canaries   |          |   cleartext knobs + canaries   |
@@ -116,10 +118,16 @@ that says where it is. The OS only ever executes the first part. Byte offsets be
 +--------------------------------+ EOF      +--------------------------------+ EOF
 ```
 
-\* `vendor/cache` is uv's cache for your dependencies. It is empty in this example because
-`hello.py` has none — which is also why a thick `hello` is 85 MB rather than the hundreds a
-real project reaches. The launcher is byte-identical between the two binaries: the tier
-changes only what got stapled on.
+\* python-build-standalone ships `bin/python`, `bin/python3`, `libpython3.13.so` and about a
+thousand terminfo names as symlinks. Storing each one's target again cost 35 MB — 41% of the
+binary — because a zip has no cross-member dedup, so the payload now stores each file once and
+lists the 1047 aliases in `.haru-links`; the launcher re-creates them at stage time, which is
+why the tree on disk is still the full 186 MB (`INV-PAYLOAD-06`).
+
+\*\* `vendor/cache` is uv's cache for your dependencies, empty here because `hello.py` has
+none — which is also why a thick `hello` is 50 MB rather than the hundreds a real project
+reaches. The launcher is byte-identical between the two binaries: the tier changes only what
+got stapled on.
 
 The footer is `HARUPACK` … `KCAPURAH` around a payload offset, a length, and a SHA-256, found
 by scanning **backward** from EOF so an Authenticode certificate appended after signing does

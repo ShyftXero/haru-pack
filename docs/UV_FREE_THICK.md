@@ -28,6 +28,13 @@ for a much smaller change. Any future case for this work has to be made against 
 against a `--thick` binary that is ~85 MB (measured) — so it is roughly a 17% cut, not an
 order-of-magnitude one.
 
+> **Updated 2026-09-15.** That ~85 MB baseline is now ~50 MB (`INV-PAYLOAD-06` stopped the
+> payload storing the interpreter's symlink targets repeatedly). The same ~14 MB removal is
+> therefore about a **28%** cut rather than 17% — a better ratio against a smaller binary,
+> not a new saving. The verdict below is unchanged: the reasons this was declined are that a
+> prebuilt venv cannot be made to work cross-platform and that the work is large, neither of
+> which the ratio moves. Re-measure before reopening on size grounds.
+
 There is a real secondary benefit that is not about size: at thick, a payload that ships no
 `uv` has no third-party executable in it at all, which simplifies the story an operator
 tells their security reviewer.
