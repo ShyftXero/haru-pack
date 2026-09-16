@@ -1,5 +1,9 @@
 # haru-pack
 
+<p align="center">
+  <img src="docs/media/haru-logo.svg" alt="haru-pack logo" width="220">
+</p>
+
 haru-pack (하루팩)
 
 "Haru" (하루) means "day,"
