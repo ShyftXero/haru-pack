@@ -16,21 +16,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor and the ceiling of `requires-python = ">=3.9"`.
+        # The floor and the ceiling of `requires-python = ">=3.12"`.
         #
         # Only ONE of them installs Nim and compiles launchers. That work is the whole cost of
         # this workflow — measured 2026-09-15 on the 3.13 job: installing Nim took 24 s, and
         # the launcher compiles in the tests took the other nine and a half minutes. Doing it
         # twice bought nothing: the Nim-gated tests exercise the launcher and the Nim/Python
-        # container layout, neither of which changes between 3.9 and 3.13.
+        # container layout, neither of which changes between 3.12 and 3.13.
         #
         # x86_64 Ubuntu is the target demographic, so that is the configuration that gets the
-        # full treatment. 3.9 stays as a real floor check for the pure-Python half — import
-        # compatibility, syntax, the stdlib differences that actually bite at 3.9.
+        # full treatment. 3.12 is the declared floor (`requires-python = ">=3.12"`, raised from
+        # 3.9 on 2026-09-16 — the tooling uses stdlib `tomllib`): it stays as a pure-Python floor
+        # check for import compatibility and the stdlib differences between floor and ceiling.
         include:
           - python-version: "3.13"
             toolchain: true      # installs Nim; runs the Nim-gated tests for real
-          - python-version: "3.9"
+          - python-version: "3.12"
             toolchain: false     # pure-Python floor check; launcher tests skip, by design
     steps:
       - uses: actions/checkout@v4

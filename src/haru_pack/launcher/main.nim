@@ -43,11 +43,6 @@ proc die(msg: string, code = 1) =
   stderr.writeLine "haru-pack: " & msg
   quit(code)
 
-proc parseIntOr(s: string, fallback: int): int =
-  ## env override that refuses to fail the launch on a typo
-  if s.len == 0: return fallback
-  try: parseInt(s.strip) except ValueError: fallback
-
 proc findUv(stageRoot: string, m: Manifest): string =
   # bundled (thick/default) -> PATH -> fetch on target (thin)
   let bundled = stageRoot / "vendor" / (when defined(windows): "uv.exe" else: "uv")
@@ -71,11 +66,16 @@ proc findUv(stageRoot: string, m: Manifest): string =
   die("no uv binary bundled and none on PATH")
 
 proc findBundledPython(stageRoot: string): string =
-  ## Scan the staged tree for a real interpreter (robust to uv's version-alias
-  ## symlink dir, which the zip does not preserve).
+  ## Scan the staged tree for a real interpreter. python-build-standalone ships `bin/python`
+  ## and `bin/python3` as SYMLINKS to `python3.NN`; since INV-STAGE-04 the launcher stages
+  ## those aliases as on-disk symlinks (POSIX), so `walkDirRec` must yield `pcLinkToFile` or
+  ## the only names we match here (`python3`/`python`) are skipped and a thick payload looks
+  ## interpreter-less. `fileExists(py)` at the call site follows the link. On Windows the alias
+  ## stays a copy (a regular file), so the default filter would suffice there — but yielding
+  ## links is harmless on Windows and keeps one code path.
   let base = stageRoot / "vendor" / "python"
   if not dirExists(base): return ""
-  for p in walkDirRec(base):
+  for p in walkDirRec(base, yieldFilter = {pcFile, pcLinkToFile}):
     if "venv" in p.toLowerAscii: continue          # skip the stdlib venv-template python
     let fn = p.extractFilename
     when defined(windows):
@@ -309,12 +309,14 @@ proc launch(): int =
   #     SIBLINGS of stageRoot — whatever root we actually staged into — so it coexists with the
   #     BASE_PATH / --ephemeral staging roots (docs/adr/0004, 0007) without touching the cache
   #     when the live tree lives elsewhere.
+  #
+  #     Retention is manifest-only (m.keepDays / m.keepMax, set from haru_pack.toml by
+  #     build/declare.py). There is deliberately NO env override: the launcher must not read a
+  #     haru-named env INPUT outside the canary model (INV-CANARY), and eviction tuning is not
+  #     worth a canary-protected knob — the build-time value is the single source of truth.
   if not devStaged:
     touchStage(stageRoot)
-    let
-      keepDays = parseIntOr(getEnv("HARUPACK_KEEP_DAYS"), m.keepDays)
-      keepMax = parseIntOr(getEnv("HARUPACK_KEEP_MAX"), m.keepMax)
-    evictStale(stageRoot, keepDays, keepMax)
+    evictStale(stageRoot, m.keepDays, m.keepMax)
 
   # 3. env wiring (inject first, then three roots + uv offline knobs)
   # inject (env-append) is applied FIRST so both uv AND the app inherit it, while every

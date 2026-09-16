@@ -5,6 +5,65 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### Stage dirs are garbage-collected — the cache no longer grows without bound
+
+Every build stages to a new `<staging-root>/<key>-<payload-sha>` dir, so every rebuild left
+another tree behind and nothing removed the old ones (23 MB default tier, 90 MB+ thick, per
+version). On every launch the launcher now touches `.lastrun` in its own stage dir, then
+deletes stage dirs that are **both** older than `keep_days` **and** outside the `keep_max`
+most-recently-used. Defaults `keep_days = 30`, `keep_max = 3`; `keep_days = 0` disables it. Set
+them in `haru_pack.toml` — manifest-only, **no env override** (reading a haru-named env input
+outside the canary model would violate `INV-CANARY`, and eviction tuning is not worth a
+canary-protected knob).
+
+Retention is LRU by last *use*, not creation, so a build still run daily is never collected.
+The sweep is scoped to the siblings of the live stage dir — whatever root was staged into — so
+an `--ephemeral` / `BASE_PATH` build GCs only its own trees and never reaches the persistent
+cache; only dirs carrying a `.ready` token are candidates (the sibling `uv-cache` tree and
+half-written `<key>.tmp-<pid>` dirs are skipped); and removal unlinks the `INV-STAGE-04` in-tree
+symlink aliases rather than following them. Residual limit, documented in `docs/TIERS.md`:
+`.lastrun` is touched at launch, not periodically, so an instance running longer than
+`keep_days` can have its tree evicted by a different launch — raise `keep_days` for long-lived
+services.
+
+### The supported-Python floor is now 3.12 (was 3.9)
+
+`requires-python` is `>=3.12`. The tooling already depended on stdlib `tomllib` (3.11+) behind
+`tomli` shims, and the CI floor leg kept catching 3.9/3.10 breakage that no longer reflects a
+version anyone should package *with* — the launcher targets a bundled 3.13, and the flex exam
+projects declare `>=3.12`. So: drop the `tomli` fallback dependency, `import tomllib` directly
+(`haru_pack.tomlio`, `tools/exam_fetch`), and move the CI matrix's pure-Python floor leg from
+3.9 to 3.12 (3.13 stays the toolchain/ceiling leg). Nothing about the packed *output's*
+interpreter changes — this is the floor for running haru-pack itself.
+
+### The vendored XZ decoder is now provenance-CHECKED, not just recorded
+
+`src/haru_pack/launcher/xz/PROVENANCE.md` has always said where the ~3 400 lines of vendored C
+came from; nothing ever checked that the record was true. `tools/verify-vendored-xz.py` closes
+that: it fetches the pinned upstream tag, checks the archive against the recorded SHA-256, and
+compares every vendored file byte-for-byte with the upstream file it claims to be — refusing
+any vendored `.c`/`.h` with no upstream mapping. `INV-PAYLOAD-05` already compared vendored
+files against per-file digests recorded in this same repo; both halves of that check lived
+here, so an edited `.c` with its digest updated to match passed cleanly regardless. The
+tarball's SHA-256 was the only link to something outside the repo, and it lived nowhere but
+prose.
+
+Run: the tarball hashes to the recorded `ee12fa8c…8977d` and all eight files are
+byte-identical to upstream `v2024-12-30`, no local modifications. `.github/workflows/vendored-xz.yml`
+runs it Mondays, on dispatch, and on any push touching the vendored tree — not in `ci.yml`,
+because it needs the network and the gate on every push must not depend on GitHub being up.
+The case worth the weekly run is a **moved tag**: `v2024-12-30` resolving to different bytes
+than it did when vendored would be a supply-chain event in someone else's repository, invisible
+from here any other way.
+
+`PROVENANCE.md` also gains the upstream path for each vendored file and answers the question
+every security reader will ask: this is **xz-embedded**, not xz-utils. CVE-2024-3094 was
+injected into xz-utils release tarballs via `build-to-host.m4` and was absent from that
+project's git tree; xz-embedded is a separate decoder-only codebase with no autotools, no
+build scripts and no compressor, and the vendored tag postdates that discovery by nine months.
+Shared authorship is why the question comes up — the answer offered is the verification
+command, not the name.
+
 ### A staged thick tree stops carrying ~90 MB of duplicate interpreter bytes
 
 On POSIX the launcher now stages a `.haru-links` alias (`bin/python`, `libpython…`, the ~1000

@@ -67,8 +67,9 @@ dir, then deletes stage dirs that are **both** older than `keep_days` **and** ou
 | `keep_days` | `30` | evict dirs unused this long; **`0` disables eviction** |
 | `keep_max` | `3` | always retain this many most-recent dirs, whatever their age |
 
-Set them in `haru_pack.toml`, or override per-machine with `HARUPACK_KEEP_DAYS` /
-`HARUPACK_KEEP_MAX` (env wins; an unparseable value falls back to the manifest).
+Set them in `haru_pack.toml`; the value is baked into the payload manifest at build time.
+There is no runtime env override — the launcher does not read a haru-named env input outside
+the canary model (INV-CANARY), and eviction tuning is not worth a canary-protected knob.
 
 Safety rules, all covered by the eviction logic:
 - The **live** stage dir is never evicted — it is touched *before* the sweep, so it stays
