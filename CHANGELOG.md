@@ -22,6 +22,43 @@ suite in sdist" — never a faked pass. Under the sdist mechanism numpy and cert
 themselves, because their suites ship only in the wheel; that is the honest face of the
 coverage the wheel path hid. Governed by `INV-CHAOS-15` (Red-path walked 2026-09-16).
 
+### `--slim-python`: drop the ~9.5 MB of interpreter furniture a packed app never touches
+
+A `--thick` binary bundles python-build-standalone unmodified, and ~9.5 MB zipped of it is
+furniture most packed apps never reach: tcl/tk + tkinter, pip in the interpreter's
+site-packages, ensurepip's bundled wheels, `share/man`, the C headers under `include/`,
+idlelib, pydoc_data. The new **opt-in** `--thick --slim-python` removes that fixed set.
+
+- **Never the default.** A build without the flag prunes nothing, so the staged interpreter
+  stays byte-for-byte the pinned published artifact — which is what makes `INV-SUPPLY-01`'s
+  digest check repeatable by a third party.
+- **Prune only after verification, and record it.** The prune runs *after* `bundle_python`
+  fetches and digest-verifies the interpreter, and every removed path (and size) lands on the
+  build receipt, so the provenance reads "verified PBS artifact, then these N files removed by
+  haru-pack" (`INV-SHAKE-05`).
+- **Distinct from `--shake`, not folded into it.** `--shake` prunes on a traced test run and
+  refuses without a suite; `--slim-python` drops a known-unused set with no suite required.
+- **The tkinter trap:** a project that imports `tkinter`, or shells out to pip/ensurepip at
+  runtime, must NOT use `--slim-python` — it is opt-in because that safety cannot be proven
+  statically. See `docs/SLIM.md`. Closes #43.
+
+### The payload now declares its format, and the launcher refuses one it is too old to read
+
+`manifest.toml` carries a new integer, `payload_format` (current value **1**), and the Nim
+launcher refuses any payload whose declared format exceeds `MaxSupportedPayloadFormat` — exit 12,
+"this payload's format (N) is newer than this launcher understands (1); rebuild with a matching
+haru-pack". A payload with *no* key is treated as legacy/0 and still accepted, so nothing built
+before this changes.
+
+The skew this closes (#44): the footer's `format_ver` describes the footer's *layout*, not the
+payload's *contents*, so before this an OLD launcher handed a NEW payload had nothing to check.
+A launcher predating `.haru-links` (#40) stages that member as a plain text file and the ~1000
+aliases it lists silently never appear — `bin/python` goes missing with no error. haru-pack
+compiles the launcher from source on every build, so no supported path pairs the two today; the
+gate closes the class before a cached, vendored, or `--launcher <path>` prebuilt launcher makes
+it reachable. Mirrors `overlay.footerSizeFor` and `expandCompressedMembers`, which already refuse
+an unknown version rather than guess. See `INV-PAYLOAD-07`.
+
 ### Four README claims checked against the code; four were wrong
 
 Eli asked whether two paragraphs of the "Decisions" section were accurate. Reading every

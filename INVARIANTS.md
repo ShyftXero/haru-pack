@@ -2037,6 +2037,34 @@ red. Would require the stager to install an import hook that consults a pruned-p
 shipped in the manifest.
 Source: Named as a known gap when `--shake` landed, 2026-09-10, rather than left implicit.
 
+### INV-SHAKE-05
+Status: active
+Statement: `--slim-python` prunes only AFTER the bundled interpreter has been digest-verified
+(`INV-SUPPLY-01`) and records every removed path on the build receipt; a default build (no
+flag) prunes nothing, so the staged interpreter is byte-for-byte the pinned published
+artifact.
+Actors: not an attacker — the operator who wants the ~9.5 MB of interpreter furniture off a
+`--thick` binary, and the auditor who repeats `INV-SUPPLY-01`'s digest check against the
+publisher's release. Shipping PBS unmodified is what makes that check repeatable; pruning
+before verification, or without recording what was cut, breaks it.
+Assets: the provenance chain of the staged interpreter. `--slim-python` is the one path that
+deliberately deletes from a verified upstream artifact, so its value depends entirely on the
+order (verify, then prune — never the reverse) and on the receipt naming every file removed,
+so the chain reads "verified PBS artifact, then these N files removed by haru-pack" rather
+than "some tree we assembled". A default build must not touch the interpreter at all, or the
+byte-for-byte property `INV-SUPPLY-01` rests on is silently lost.
+Red-path: In `thick.stage`, move the `slim_mod.maybe_slim(...)` call ABOVE the
+`bundle_python(...)` line — `test_slim_prunes_only_after_the_interpreter_is_verified` goes
+red because the prune now precedes the fetch-and-verify. Separately, drop the
+`info["slim_python"] = {...}` block in `receipt.finish` —
+`test_the_receipt_lists_every_removed_path` goes red because the removed set is no longer
+recorded. Walked both 2026-09-16: 1 red each, restored to green.
+Source: Issue #43, 2026-09-16. Follow-up to #40. `--shake` prunes on evidence and requires a
+traced suite; `--slim-python` is the distinct capability — drop a FIXED known-unused set with
+no test suite — kept separate on purpose so the size trade never voids provenance by default.
+Territory: src/haru_pack/build/slim.py, src/haru_pack/build/thick.py,
+src/haru_pack/build/receipt.py, tests/test_slim.py
+
 ---
 
 ## The uv binary is compressed in the payload and byte-identical in the stage
@@ -2169,6 +2197,54 @@ uv); this part was not, and had been invisible because `docs/TIERS.md` recorded 
 symlinks only as a *correctness* note the launcher tolerates, never as a size.
 Territory: src/haru_pack/payload.py, src/haru_pack/launcher/stage.nim,
 tests/test_payload_symlinks.py, tests/test_stage_hardening.py
+
+### INV-PAYLOAD-07
+Status: active
+Statement: Every payload declares its format. `assemble_payload` stamps `payload_format` (an
+integer, current value **1**) into `manifest.toml`, and the launcher REFUSES a payload whose
+declared format exceeds `MaxSupportedPayloadFormat` (also 1) — exit `ExitPayloadFormat` (12),
+with "this payload's format (N) is newer than this launcher understands (1); rebuild with a
+matching haru-pack". A payload with NO `payload_format` key reads back as 0 (legacy) and is
+ACCEPTED, so every payload built before this field existed keeps launching. This mirrors the
+instinct already in `overlay.footerSizeFor` (an unknown footer version is refused, not guessed)
+and `stage.expandCompressedMembers` (a member with no `.size` sidecar is refused as "not produced
+by a matching haru-pack") — but points it at the OTHER skew: not a malformed payload, an older
+launcher handed a newer one.
+Actors: whoever caches, vendors, or `--launcher <path>`s a prebuilt launcher instead of the one
+this repo compiles during every build — the moment the "always build both at once" coincidence
+that makes the skew unreachable today stops holding; the recipient who would otherwise run a
+silently broken staged tree.
+Assets: the guarantee that a launcher matches the payload it stages. The concrete failure is
+`.haru-links` (#40, `INV-PAYLOAD-06`): a launcher predating `materialiseLinks` stages the ~1000-
+entry link table as an ordinary ~60 KB text file, so `bin/python` and every other alias silently
+never appear and the app runs against a tree missing its interpreter — a confusing runtime error
+or a silent misbehaviour depending on which alias something reaches for. A one-integer version
+gate gives every FUTURE payload member the same protection at once, instead of re-litigating it
+per feature the first time a prebuilt-launcher path exists — which is the wrong time.
+Note — where the check sits, stated plainly: the format lives inside the payload's own
+`manifest.toml`, so the launcher can only read it after `stageZip` has extracted the tree. The
+refusal therefore fires just after `parseManifest`, BEFORE `findUv` and any execution — it
+prevents RUNNING a mis-staged tree, which is the harm, not the staging into the private cache
+(which `--reap` cleans). A corrupt/non-integer `payload_format` degrades to 0/legacy via
+`getInt`'s default, matching the "no key is accepted" rule rather than faulting.
+Red-path: two, both walked 2026-09-16:
+(0) bump `MaxSupportedPayloadFormat` in `launcher/main.nim` from 1 to 999 (neutralise the gate)
+and rebuild. Observed: `test_payload_format_newer_than_supported_is_refused` and
+`test_a_far_future_format_is_also_refused` flipped green-to-red — the format-2 and format-99
+payloads ran all the way to their bundled uv (`PAYLOAD_UV_RAN` on stdout, exit **0** instead of
+12), while the legacy and current-format accept tests stayed green. Restored to 1;
+(1) comment out `manifest["payload_format"] = PAYLOAD_FORMAT` in `build/assemble.py` (drop the
+stamp). Observed: `test_build_stamps_the_current_payload_format` flipped green-to-red — the
+written manifest carried no `payload_format` at all (`None == 1`), i.e. the launcher's gate would
+have nothing to check and the guarantee would rest entirely on "always build both at once".
+Restored.
+Source: filed by Eli as #44 while landing #40 — noticed that the thing making the old-launcher/
+new-payload skew unreachable is a coincidence (haru-pack compiles the launcher from source every
+build), not a check, and that `manifest.toml` carried no format version while the footer's
+`format_ver` describes only the footer layout, not the payload's contents.
+Territory: src/haru_pack/payload.py, src/haru_pack/build/assemble.py,
+src/haru_pack/launcher/manifest.nim, src/haru_pack/launcher/main.nim,
+tests/test_payload_format.py
 
 ### INV-BUILD-08
 Status: active

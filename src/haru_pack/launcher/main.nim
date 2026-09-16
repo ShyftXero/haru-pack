@@ -28,6 +28,16 @@ const
                             ## HTTP (network down, non-200, over the size cap, timeout). A
                             ## fetched-but-tampered payload is ExitDigestMismatch, not this —
                             ## this is transport-level, always fail-closed (INV-REMOTE-01).
+  ExitPayloadFormat*  = 12  ## the payload declares a `payload_format` (manifest.toml) NEWER
+                            ## than this launcher understands (INV-PAYLOAD-07). Refuse rather
+                            ## than mis-stage a member/layout we do not know about. A payload
+                            ## with no key is legacy/0 and accepted; this fires only above the
+                            ## ceiling below.
+
+  ## The highest payload_format this launcher can stage. Mirrors overlay.footerSizeFor and
+  ## expandCompressedMembers: an unknown/newer version is refused, not guessed at. Bump in
+  ## lockstep with payload.PAYLOAD_FORMAT whenever the launcher learns a new payload layout.
+  MaxSupportedPayloadFormat* = 1
 
 proc die(msg: string, code = 1) =
   stderr.writeLine "haru-pack: " & msg
@@ -271,6 +281,15 @@ proc launch(): int =
   let mfPath = stageRoot / "manifest.toml"
   if not fileExists(mfPath): die("manifest.toml missing in payload: " & mfPath)
   let m = parseManifest(mfPath)
+  # INV-PAYLOAD-07: refuse a payload whose declared format is NEWER than we understand, before
+  # we act on a manifest we cannot fully interpret. The .haru-links skew (#44) is the concrete
+  # case — a launcher predating a member stages it wrong and runs a broken tree with no error;
+  # a version gate turns "silent misbehaviour" into a clean refusal. payloadFormat == 0 means a
+  # pre-#44 payload with no key, which is accepted; only a value ABOVE the ceiling refuses.
+  if m.payloadFormat > MaxSupportedPayloadFormat:
+    die("this payload's format (" & $m.payloadFormat & ") is newer than this launcher " &
+        "understands (" & $MaxSupportedPayloadFormat & "); rebuild with a matching haru-pack.",
+        ExitPayloadFormat)
   if m.entrypoint.len == 0:                 # W16 — this used to be an unguarded [0]
     die("manifest declares no entrypoint: " & mfPath)
   let appDir = stageRoot / m.appSubdir

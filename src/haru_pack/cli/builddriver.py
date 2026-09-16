@@ -107,6 +107,11 @@ def _print_receipt(info: dict) -> None:
         print(f"shaken: {sh['dropped_files']} files, {before/1e6:.1f} → "
                     f"{after/1e6:.1f} MB unpacked ({pct:.0f}% off), traced with "
                     f"{sh['tracer']} — receipt {sh['report']}", style="ok")
+    if info.get("slim_python"):
+        sp = info["slim_python"]
+        print(f"slim-python: {sp['removed_files']} interpreter files removed after digest "
+                    f"verification, {sp['freed_bytes']/1e6:.1f} MB unpacked — every path on "
+                    f"the receipt", style="ok")
     print(f"built {info['out']}  (tier={info['tier']}, target={info['target']}, "
                 f"{info['payload_len']} B payload, sha {info['sha256'][:16]}…){tag}", style="ok")
     # A kit that was not written is reported next to the binary that WAS, and says so —
@@ -129,7 +134,8 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                embed_secret=False, expires="", machine="", user="", geo="",
                geo_restrict=None, geo_restrict_api_url=None, geo_restrict_consensus=1, python="",
                entry_point="", wine=False, obfuscate="none", obfuscate_args="",
-               shake=False, shake_keep=(), env_canary="", env_canary_random=False,
+               shake=False, shake_keep=(), slim_python=False,
+               env_canary="", env_canary_random=False,
                stub_env_secret_canary="", stub_env_uv_ver_canary="",
                stub_env_source_url_canary="", stub_env_base_path_canary="",
                stub_env_ephemeral_canary="",
@@ -161,7 +167,8 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          obfuscate=obfuscate,
                          obfuscate_args=[a for a in obfuscate_args.split() if a],
                          entry_point=entry_point, shake=shake,
-                         shake_keep=list(shake_keep or []), cc=cc, emit_c=emit_c,
+                         shake_keep=list(shake_keep or []), slim_python=slim_python,
+                         cc=cc, emit_c=emit_c,
                          env_canary=env_canary, env_canary_random=env_canary_random,
                          stub_env_secret_canary=stub_env_secret_canary,
                          stub_env_uv_ver_canary=stub_env_uv_ver_canary,
