@@ -134,7 +134,7 @@ def make_project(pkg: str, imp: str, ver: str, kind: str, suite: list[Path], dep
         "try:\n"
         f"    import {imp}  # noqa: F401\n"
         "except Exception as _e:\n"
-        f"    print('exam: note: could not import {imp!r} by guessed name (' + repr(_e) + "
+        f"    print('exam: note: could not import ' + {imp!r} + ' by guessed name (' + repr(_e) + "
         "'); running the suite anyway')\n"
         "src = pathlib.Path(__file__).parent / '_src'\n"
         "sys.path.append(str(src))   # in-tree test helpers, without shadowing the installed pkg\n"
