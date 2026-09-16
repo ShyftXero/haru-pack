@@ -372,7 +372,7 @@
     "rank": 37,
     "repo_url": "https://github.com/tox-dev/platformdirs",
     "tests": 0,
-    "version": "4.11.8"
+    "version": "4.11.9"
   },
   "pluggy": {
     "error": "",
