@@ -2005,6 +2005,34 @@ red. Would require the stager to install an import hook that consults a pruned-p
 shipped in the manifest.
 Source: Named as a known gap when `--shake` landed, 2026-09-10, rather than left implicit.
 
+### INV-SHAKE-05
+Status: active
+Statement: `--slim-python` prunes only AFTER the bundled interpreter has been digest-verified
+(`INV-SUPPLY-01`) and records every removed path on the build receipt; a default build (no
+flag) prunes nothing, so the staged interpreter is byte-for-byte the pinned published
+artifact.
+Actors: not an attacker — the operator who wants the ~9.5 MB of interpreter furniture off a
+`--thick` binary, and the auditor who repeats `INV-SUPPLY-01`'s digest check against the
+publisher's release. Shipping PBS unmodified is what makes that check repeatable; pruning
+before verification, or without recording what was cut, breaks it.
+Assets: the provenance chain of the staged interpreter. `--slim-python` is the one path that
+deliberately deletes from a verified upstream artifact, so its value depends entirely on the
+order (verify, then prune — never the reverse) and on the receipt naming every file removed,
+so the chain reads "verified PBS artifact, then these N files removed by haru-pack" rather
+than "some tree we assembled". A default build must not touch the interpreter at all, or the
+byte-for-byte property `INV-SUPPLY-01` rests on is silently lost.
+Red-path: In `thick.stage`, move the `slim_mod.maybe_slim(...)` call ABOVE the
+`bundle_python(...)` line — `test_slim_prunes_only_after_the_interpreter_is_verified` goes
+red because the prune now precedes the fetch-and-verify. Separately, drop the
+`info["slim_python"] = {...}` block in `receipt.finish` —
+`test_the_receipt_lists_every_removed_path` goes red because the removed set is no longer
+recorded. Walked both 2026-09-16: 1 red each, restored to green.
+Source: Issue #43, 2026-09-16. Follow-up to #40. `--shake` prunes on evidence and requires a
+traced suite; `--slim-python` is the distinct capability — drop a FIXED known-unused set with
+no test suite — kept separate on purpose so the size trade never voids provenance by default.
+Territory: src/haru_pack/build/slim.py, src/haru_pack/build/thick.py,
+src/haru_pack/build/receipt.py, tests/test_slim.py
+
 ---
 
 ## The uv binary is compressed in the payload and byte-identical in the stage
