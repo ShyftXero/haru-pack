@@ -100,9 +100,12 @@ OWN test suite from inside the thick binary with the network denied at the proce
 This is a stronger statement than a hello-world fixture can make. `import numpy` succeeds
 long before numpy is usable — the failure modes of a bundled native package live in the
 parts an import never touches: a lazily-loaded `.so`, an f2py-generated extension, a
-packaged data file. Checked across all 25 top-PyPI packages, only these two ship a runnable
-suite in the wheel; the other 23 would need sdists, which is a second acquisition path for
-no extra assurance.
+packaged data file. The figures above are the WHEEL-path measurement: checked across all 25
+top-PyPI packages, only numpy and certifi ship a runnable suite in the wheel. As of
+2026-09-16 the examiner sources each package's suite from its SDIST instead (INV-CHAOS-15),
+reusing the flex exam's `tools/exam_fetch`, so it now covers any top-N package rather than
+that pair — and numpy and certifi, whose suites ride only in the wheel, are themselves
+recorded honestly as "no test suite in sdist".
 Note: A vacuous pass is prevented twice over. The generated script verifies the test paths
 exist and exits 2 with `PAYLOAD INCOMPLETE` if they do not, and pytest itself returns 5
 rather than 0 when it collects nothing. The success marker is printed only on rc == 0.
@@ -685,6 +688,35 @@ red on every non-clean journal. Walked 2026-09-12 on this Linux host.
 Source: adopted from lotek BusyBody #418/#682 (analyze doubles as a gate; refuse a false-clean).
 docs/BUSYBODY.md. Found by auditing haru-pack's `--analyze` against lotek's false-clean hardening.
 Territory: tools/busybody*.py, tools/busybody_analyze.py, tests/test_busybody_ledger.py
+
+### INV-CHAOS-15
+Status: active
+Statement: The examiner sources each package's real test suite from its SDIST — reusing
+`tools/exam_fetch` (`pypi_meta`/`fetch_sdist`/`locate_suite`/`test_deps`/`make_project`), never a
+forked copy — so it covers ANY top-N package rather than a hardcoded pair, and records "no test
+suite in sdist" rather than reporting a pass it did not run. A package whose sdist carries no test
+tree yields NO-SUITE, and one whose suite errors is a real result, not a skip.
+Actors: an operator (or a reviewer) who reads a green examiner run as "a thick payload carried a
+WORKING library". A wheel-only examiner that silently covers 2 of N — or one that fakes a pass for
+a package it never actually ran a suite for — is the false assurance this forbids.
+Assets: the honesty of the examiner's coverage. The exam persona is the strongest statement the
+harness makes about a packed library (it runs the library's OWN suite, offline); a claim that
+tests a hardcoded pair while reading as "any package", or that reports a pass with no suite behind
+it, makes every other exam result suspect.
+Red-path: In `busybody_cases_exam.exam_project_from_root` replace the `if kind == "none": return
+None, NO_SUITE` branch with `return proj, "faked"`, so a suiteless sdist yields a project instead
+of the honest no-suite verdict; `test_a_sdist_with_no_test_tree_is_no_suite_not_a_pass` goes red
+(a project was written for a package that ships no suite). Separately, re-freeze the pair with
+`EXAM_PACKAGES = ("numpy", "certifi")` and `test_the_examiner_is_not_frozen_to_numpy_and_certifi`
+goes red. Separately, paste `locate_suite`'s body in as a local def and
+`test_the_examiner_reuses_exam_fetch_and_does_not_fork_it` goes red (identity broken, fork named).
+Walked 2026-09-16 on this Linux host — all three observed green->red, then restored.
+Source: 2026-09-16, issue #28. The examiner hardcoded numpy+certifi — the only two top-25 packages
+whose suite ships in the WHEEL — so it covered 2 of N. The flex exam (PR #29) had already factored
+the sdist->thick-project->offline-pytest machinery into `tools/exam_fetch`; the examiner just did
+not use it.
+Territory: tools/busybody.py, tools/busybody_cases_exam.py, tools/busybody_report.py,
+tests/test_examiner_fixtures.py
 
 ### INV-FLEX-01
 Status: active
@@ -1716,6 +1748,51 @@ Territory: not yet claimed. The behaviour lives in src/haru_pack/launcher/stage.
 (`stageZip`'s `<key>.tmp-<pid>` plus the atomic `moveDir`); the harness that probes it is the
 `herd` persona in tools/busybody*.py.
 
+### INV-STAGE-04
+Status: active
+Statement: On POSIX the launcher stages a `.haru-links` alias as a relative **symlink** to its
+in-stage target, not a copy — so a staged thick tree stops carrying its duplicate interpreter
+bytes (~90 MB). That stays inside INV-STAGE-01 because `recordTree` now yields `pcLinkToFile`
+and records each alias as a `symlink:<target> <rel>` line, and `verifyTree`, on every reuse,
+checks that the path is **still a symlink** **still resolving to that same in-stage target** —
+whose own bytes are hash-verified by its regular-file line — rather than following the link and
+hashing whatever it reaches. A recorded regular file that is later a symlink, an alias replaced
+by a regular file, and an alias repointed (inside the stage or out) are all refused. On Windows,
+where creating a symlink is privileged, the alias stays a copy and is recorded as an ordinary
+file; the two platforms' staged trees differ in size, not in what each is verified against.
+Actors: for the saving, not an attacker — an operator staging thick payloads on a small disk,
+each staged tree ~90 MB lighter. For the checks, anyone who can write into a staged tree between
+runs, to whom a symlink is a redirect primitive: repoint `bin/python` at `/etc` or a file whose
+bytes they can swap after verification (a TOCTOU the copy never exposed), or swap a verified
+regular file for a link to matching content.
+Assets: ~90 MB of duplicate on-disk bytes per staged thick payload, and INV-STAGE-01's integrity
+chain extended over the alias — the launcher must never execute a `bin/python` that now points
+somewhere it did not record. The target is required to be a present, non-symlink regular file that
+is **not `isRuntimeMutable`** — recordTree records exactly those, so the alias can only resolve to a
+member the manifest itself hash-verifies. Both recordTree and verifyTree enforce it, so neither a
+crafted payload nor a hand-edited `.stage-files` can name a runtime-mutable (unrecorded) target.
+Red-path: three, all walked 2026-09-16 on this linux host:
+(0) drop the `got != tgtRel` target-equality check in `verifyTree`'s symlink branch — rebuild,
+stage, then repoint `vendor/alias.bin` at `/etc/hostname` and at another in-stage member. Both
+`test_an_alias_repointed_outside_the_stage_is_refused` and
+`test_an_alias_repointed_at_a_different_member_is_refused` went green-to-red: the launcher reused
+the tampered stage (exit 0 instead of 3);
+(1) force `materialiseLinks` back to `copyFileWithPermissions` on POSIX (`when false and ...`) —
+`test_a_deduped_alias_is_staged_as_a_symlink_and_reused` went red (`is_symlink()` false) and the
+on-disk saving disappeared;
+(2) neuter both `isRuntimeMutable(tgtRel)` guards (recordTree + verifyTree) — a payload aliasing
+`bin/python` at `uv.lock` then staged clean (exit 0) and
+`test_an_alias_to_a_runtime_mutable_target_is_refused` went green-to-red, i.e. an interpreter whose
+bytes no `.stage-files` line hashes was accepted. All three reverted before commit. Finding from
+Acid_Burn's adversarial review of this change.
+Source: INV-PAYLOAD-06 took the *shipped-binary* saving 2026-09-15 and left the ~186 MB *staged*
+footprint as "a separate question [that] would have to solve the recording problem first" — a
+symlink was absent from `.stage-files` and so unverified. Issue #42 is that follow-up: recordTree
+records symlinks and verifyTree gained the kind + target rules that let the staged tree hold them
+without a hole. Deliberately not casual, per the issue: it touches the one file whose whole job is
+making the staged tree accountable.
+Territory: src/haru_pack/launcher/stage.nim, tests/test_stage_hardening.py
+
 ---
 
 ## SECRET — key material does not leak sideways
@@ -2005,6 +2082,34 @@ red. Would require the stager to install an import hook that consults a pruned-p
 shipped in the manifest.
 Source: Named as a known gap when `--shake` landed, 2026-09-10, rather than left implicit.
 
+### INV-SHAKE-05
+Status: active
+Statement: `--slim-python` prunes only AFTER the bundled interpreter has been digest-verified
+(`INV-SUPPLY-01`) and records every removed path on the build receipt; a default build (no
+flag) prunes nothing, so the staged interpreter is byte-for-byte the pinned published
+artifact.
+Actors: not an attacker — the operator who wants the ~9.5 MB of interpreter furniture off a
+`--thick` binary, and the auditor who repeats `INV-SUPPLY-01`'s digest check against the
+publisher's release. Shipping PBS unmodified is what makes that check repeatable; pruning
+before verification, or without recording what was cut, breaks it.
+Assets: the provenance chain of the staged interpreter. `--slim-python` is the one path that
+deliberately deletes from a verified upstream artifact, so its value depends entirely on the
+order (verify, then prune — never the reverse) and on the receipt naming every file removed,
+so the chain reads "verified PBS artifact, then these N files removed by haru-pack" rather
+than "some tree we assembled". A default build must not touch the interpreter at all, or the
+byte-for-byte property `INV-SUPPLY-01` rests on is silently lost.
+Red-path: In `thick.stage`, move the `slim_mod.maybe_slim(...)` call ABOVE the
+`bundle_python(...)` line — `test_slim_prunes_only_after_the_interpreter_is_verified` goes
+red because the prune now precedes the fetch-and-verify. Separately, drop the
+`info["slim_python"] = {...}` block in `receipt.finish` —
+`test_the_receipt_lists_every_removed_path` goes red because the removed set is no longer
+recorded. Walked both 2026-09-16: 1 red each, restored to green.
+Source: Issue #43, 2026-09-16. Follow-up to #40. `--shake` prunes on evidence and requires a
+traced suite; `--slim-python` is the distinct capability — drop a FIXED known-unused set with
+no test suite — kept separate on purpose so the size trade never voids provenance by default.
+Territory: src/haru_pack/build/slim.py, src/haru_pack/build/thick.py,
+src/haru_pack/build/receipt.py, tests/test_slim.py
+
 ---
 
 ## The uv binary is compressed in the payload and byte-identical in the stage
@@ -2090,8 +2195,8 @@ Territory: src/haru_pack/launcher/xz/, tests/test_uv_compression.py
 ### INV-PAYLOAD-06
 Status: active
 Statement: A file symlink inside the payload is stored **once**, with its aliases listed in
-`.haru-links`, and the launcher re-creates each alias as a **copy** between `extractAll` and
-`recordTree` — so the staged tree is byte-identical to one built before this existed and
+`.haru-links`, and the launcher re-creates each alias between `extractAll` and `recordTree` —
+as a **symlink** on POSIX (the on-disk dedup, INV-STAGE-04) or a **copy** on Windows — so
 every alias is inside the sealed `.stage-files` manifest. Both halves of every entry are
 treated as untrusted: a link or target path that could reach outside the stage
 (`unsafeEntryPath`), a target the payload does not contain, a collision with a real member,
@@ -2113,13 +2218,12 @@ python-build-standalone ships `bin/python` and `bin/python3` as symlinks to `pyt
 DEFLATE compresses each member independently, so the duplication survived compression:
 2 x 12,074,129 + 10,107,799 = **34.3 MB of an 84.5 MB payload**. After the fix the same
 binary is **85,405,022 -> 50,425,885 bytes**, a 41% cut, and it still runs.
-Note — why copies and not symlinks, which would also save disk at stage time: `recordTree`
-walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
-`pcLinkToFile`. A symlink would be absent from `.stage-files`, and `verifyTree` only checks
-what was recorded — so the interpreter's own name would go unverified on every reuse. The
-saving is taken in the shipped binary, where it is wanted, and not in a way that quietly
-punches a hole in `INV-STAGE-01`. Reducing the ~186 MB staged footprint is a separate
-question and would have to solve the recording problem first.
+Note — this is the *shipped-binary* saving; the *on-disk* staged tree once kept the aliases
+as copies because `recordTree` walked `walkDirRec` with its default `{pcFile}` filter and so
+skipped `pcLinkToFile` — a symlink would have been absent from `.stage-files` and gone
+unverified. `INV-STAGE-04` closed that: `recordTree` now records symlinks (as `symlink:<target>`
+lines) and `verifyTree` re-checks them, so on POSIX the alias is a symlink and the ~186 MB
+staged footprint drops by the duplicate bytes too, without punching a hole in `INV-STAGE-01`.
 Red-path: four, all walked 2026-09-15:
 (0) replace the `unsafeEntryPath` guard in `stage.materialiseLinks` with `if false:` — a
 table naming `../escape.bin` or `/etc/cron.d/x` is then materialised outside the stage.
@@ -2137,6 +2241,54 @@ uv); this part was not, and had been invisible because `docs/TIERS.md` recorded 
 symlinks only as a *correctness* note the launcher tolerates, never as a size.
 Territory: src/haru_pack/payload.py, src/haru_pack/launcher/stage.nim,
 tests/test_payload_symlinks.py, tests/test_stage_hardening.py
+
+### INV-PAYLOAD-07
+Status: active
+Statement: Every payload declares its format. `assemble_payload` stamps `payload_format` (an
+integer, current value **1**) into `manifest.toml`, and the launcher REFUSES a payload whose
+declared format exceeds `MaxSupportedPayloadFormat` (also 1) — exit `ExitPayloadFormat` (12),
+with "this payload's format (N) is newer than this launcher understands (1); rebuild with a
+matching haru-pack". A payload with NO `payload_format` key reads back as 0 (legacy) and is
+ACCEPTED, so every payload built before this field existed keeps launching. This mirrors the
+instinct already in `overlay.footerSizeFor` (an unknown footer version is refused, not guessed)
+and `stage.expandCompressedMembers` (a member with no `.size` sidecar is refused as "not produced
+by a matching haru-pack") — but points it at the OTHER skew: not a malformed payload, an older
+launcher handed a newer one.
+Actors: whoever caches, vendors, or `--launcher <path>`s a prebuilt launcher instead of the one
+this repo compiles during every build — the moment the "always build both at once" coincidence
+that makes the skew unreachable today stops holding; the recipient who would otherwise run a
+silently broken staged tree.
+Assets: the guarantee that a launcher matches the payload it stages. The concrete failure is
+`.haru-links` (#40, `INV-PAYLOAD-06`): a launcher predating `materialiseLinks` stages the ~1000-
+entry link table as an ordinary ~60 KB text file, so `bin/python` and every other alias silently
+never appear and the app runs against a tree missing its interpreter — a confusing runtime error
+or a silent misbehaviour depending on which alias something reaches for. A one-integer version
+gate gives every FUTURE payload member the same protection at once, instead of re-litigating it
+per feature the first time a prebuilt-launcher path exists — which is the wrong time.
+Note — where the check sits, stated plainly: the format lives inside the payload's own
+`manifest.toml`, so the launcher can only read it after `stageZip` has extracted the tree. The
+refusal therefore fires just after `parseManifest`, BEFORE `findUv` and any execution — it
+prevents RUNNING a mis-staged tree, which is the harm, not the staging into the private cache
+(which `--reap` cleans). A corrupt/non-integer `payload_format` degrades to 0/legacy via
+`getInt`'s default, matching the "no key is accepted" rule rather than faulting.
+Red-path: two, both walked 2026-09-16:
+(0) bump `MaxSupportedPayloadFormat` in `launcher/main.nim` from 1 to 999 (neutralise the gate)
+and rebuild. Observed: `test_payload_format_newer_than_supported_is_refused` and
+`test_a_far_future_format_is_also_refused` flipped green-to-red — the format-2 and format-99
+payloads ran all the way to their bundled uv (`PAYLOAD_UV_RAN` on stdout, exit **0** instead of
+12), while the legacy and current-format accept tests stayed green. Restored to 1;
+(1) comment out `manifest["payload_format"] = PAYLOAD_FORMAT` in `build/assemble.py` (drop the
+stamp). Observed: `test_build_stamps_the_current_payload_format` flipped green-to-red — the
+written manifest carried no `payload_format` at all (`None == 1`), i.e. the launcher's gate would
+have nothing to check and the guarantee would rest entirely on "always build both at once".
+Restored.
+Source: filed by Eli as #44 while landing #40 — noticed that the thing making the old-launcher/
+new-payload skew unreachable is a coincidence (haru-pack compiles the launcher from source every
+build), not a check, and that `manifest.toml` carried no format version while the footer's
+`format_ver` describes only the footer layout, not the payload's contents.
+Territory: src/haru_pack/payload.py, src/haru_pack/build/assemble.py,
+src/haru_pack/launcher/manifest.nim, src/haru_pack/launcher/main.nim,
+tests/test_payload_format.py
 
 ### INV-BUILD-08
 Status: active
@@ -2880,6 +3032,34 @@ system-GCC-by-default to avoid changing existing setups, which is inertia rather
 benefit, against a real ergonomic win of one less post-install step and no sudo.
 Territory: src/haru_pack/toolchain.py, src/haru_pack/build/, src/haru_pack/targets.py,
 src/haru_pack/pins.toml, tests/test_zig_provider.py
+
+### INV-TOOL-03
+Status: active
+Statement: Installing Nim is ONE code path with two host-selected implementations, chosen by
+`choosenim_asset()`, not by a flag: where choosenim publishes a binary it is used (digest-pinned);
+where it does not — notably linux aarch64, a Raspberry Pi you build ON — `install_nim` BUILDS Nim
+from source with haru-pack's own managed `zig cc` (a `cc`/`gcc` shim that execs the managed zig,
+so no host gcc, no apt, no sudo). It never dead-ends on "unsupported host" for a host haru-pack can
+actually build for. The source build is pinned to the `v<NIM_VERSION>` git tag (Nim itself is not
+haru-digest-pinned on either path — see the toolchain module docstring).
+Actors: someone who ran `uv tool install haru-pack` on an arm64 board (a Pi) and wants to build
+there. Before this they hit a wall — choosenim has no arm64 binary — and had to install Nim by
+hand; now the tool provisions itself.
+Assets: whether an arm64 Linux box is a first-class BUILD host with nothing to set up. zig already
+covers every C-compiler need without sudo (INV-TOOL-02); this extends the same one-artifact,
+no-sudo story to the Nim compiler itself, so the Pi needs neither a system gcc nor a hand-built Nim.
+Red-path: Restore the `raise ToolchainError(... build on a supported host ...)` in the `if not
+asset` branch of `install_nim` and `test_no_choosenim_binary_builds_nim_from_source` goes red —
+install_nim raises instead of building, and the Pi has no way to get Nim. Separately, make
+`_host_zig_cc_shim` exec a bare `cc` instead of the managed zig and
+`test_source_build_shim_runs_the_managed_zig` goes red (the build would need a system compiler).
+Note: Verified end to end on an arm64 Pi 2026-09-14 — `install_nim`/`build_nim_from_source` cloned
+Nim v2.2.6 and built csources + `koch boot` + `koch tools` entirely through the managed zig cc,
+producing a working `nim`. (First proven by hand the same day: 6321 zig-cc invocations, zero system
+gcc.)
+Source: Asked for 2026-09-14 — make zig the way to compile Nim on a Pi, one code path, automatic
+where choosenim has no binary. docs/ZIG_TOOLCHAIN.md.
+Territory: src/haru_pack/toolchain.py, src/haru_pack/nim_source.py, tests/test_zig_provider.py
 
 ## TRUST — the project being packaged is an input, not an author
 

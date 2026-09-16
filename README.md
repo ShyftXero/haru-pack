@@ -1,5 +1,9 @@
 # haru-pack
 
+<p align="center">
+  <img src="docs/media/haru-logo.svg" alt="haru-pack logo" width="220">
+</p>
+
 haru-pack (하루팩)
 
 "Haru" (하루) means "day,"
@@ -12,7 +16,8 @@ you can just call it `haru` for short.
 Pack a Python project — a **PEP 723 script** or a full **multi-folder project** (Flask,
 Playwright, …) — into a single, **signable native launcher** that stages `uv` + a
 standalone Python and runs it **as if it were a compiled binary in the folder it was
-launched from**. Windows-first, cross-compiled from Linux. Built on `uv`; launcher in Nim.
+launched from**. Windows is a first-class target and a primary deployment goal, with
+cross-compilation from Linux. Built on `uv`; launcher in Nim.
 
 > Think PyInstaller's UX, but the interpreter + deps are delegated to `uv`, the launcher is
 > a thin signable native stub, and you choose how much is bundled vs fetched on the target.

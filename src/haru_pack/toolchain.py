@@ -4,41 +4,36 @@ Goal: `pip install haru-pack && haru-pack bootstrap`, then pack projects. No sys
 install guide, and **at most one sudo prompt** — for the C compiler, the only thing that has
 to come from the system.
 
-**choosenim is the only way haru-pack installs Nim.** It is the official toolchain manager,
-it is what upstream recommends, and one path means one thing to test, document and debug.
-There is deliberately no "download the prebuilt archive" path and no "build from source"
-fallback: each would be a second and third way for this to behave differently on someone
-else's machine, which is exactly the failure mode this project keeps finding in itself.
+**haru-pack installs Nim by ONE code path, with two implementations chosen by the host, not
+by a flag.** Where choosenim publishes a binary (linux x86_64, macOS x86_64/arm64, Windows
+x86_64), that is used — the official toolchain manager, digest-pinned. Where it does not —
+notably **linux aarch64, a Raspberry Pi you build ON** — haru-pack builds Nim **from source
+using its own managed `zig cc`** as the C compiler. `install_nim` picks the implementation
+from `choosenim_asset()`; the caller does not choose and cannot get it wrong.
 
-Nim goes into haru-pack's own data directory, with `CHOOSENIM_DIR` and `NIMBLE_DIR` pointed
-there too. haru-pack never *installs* into the system's Nim and leaves the user's `~/.nimble`
-alone: a packaging tool should not quietly take over a global toolchain.
+This deliberately reverses an earlier "choosenim only, no source build" stance. The reason
+it is safe now is the same reason zig exists in this project: one pinned zig replaces every
+system C compiler, so the source build needs **no `apt`, no sudo, and no host gcc** — the Pi
+becomes a first-class build host with nothing to set up. (Verified 2026-09-14 on an arm64
+Pi: `build_all.sh` bootstraps csources, `koch boot` and `koch tools` all through zig cc.)
 
-Read that as a statement about installing, not about resolving — `bootstrap.find_nim` prefers
-the managed Nim but does fall back to one on `PATH`, which is what makes "bring your own Nim"
-work on an arm64 host where choosenim publishes nothing. So a build CAN use a system Nim; it
-is `install_nim` and `find_managed_nim` that never touch one.
+Read the data-directory rule below as a statement about installing, not resolving:
+`bootstrap.find_nim` prefers the managed Nim but does fall back to one on `PATH`, which is
+what makes "bring your own Nim" work on an arm64 host where choosenim publishes nothing. So a
+build CAN use a system Nim; it is `install_nim` and `find_managed_nim` that never touch one.
 
-## Build hosts vs targets — these are not the same list
-
-choosenim publishes binaries for **linux x86_64, macOS x86_64, macOS arm64, and Windows
-x86_64** (checked 2026-09-09). Those are the machines you can *build on*.
-
-ARM Linux — a Raspberry Pi — is a **target**, not a build host. You do not need Nim on the
-Pi at all: build on an x86_64 machine with `--target linux-aarch64`, which needs the
-aarch64 cross-compiler and nothing else. That is one `apt install` on the build host, and it
-is why dropping the source-build fallback costs nothing: the Pi never needed it.
-
-If you genuinely must build ON an ARM Linux box, install Nim yourself (choosenim from
-source, or your distro) and haru-pack will use it — but that is your toolchain to maintain,
-not one haru-pack manages.
+Nim goes into haru-pack's own data directory (`CHOOSENIM_DIR`/`NIMBLE_DIR` for the choosenim
+path; `nim-src/<version>` for the built one). The system's Nim is ignored and `~/.nimble` is
+left alone: a packaging tool should not take over a global toolchain, nor behave differently
+depending on what the host happens to have lying around.
 
 ## What is verified, and what is delegated
 
-haru-pack verifies the **choosenim binary** against a digest pinned in `pins.toml`
-(INV-SUPPLY-01). It does **not** verify what choosenim then downloads — that is choosenim's
-business, and using a toolchain manager means trusting it to manage the toolchain. Stated
-here rather than left implied, because "we pin everything" would be an overclaim.
+haru-pack verifies the **choosenim binary** and the **zig archive** against digests pinned in
+`pins.toml` (INV-SUPPLY-01). It does **not** digest-pin Nim itself: on the choosenim path
+that is choosenim's business, and on the source path Nim is built from its upstream git tag
+`v<NIM_VERSION>`. Both trust Nim's origin rather than a haru-pack hash — stated here rather
+than left implied, because "we pin everything" would be an overclaim.
 """
 from __future__ import annotations
 
@@ -58,6 +53,7 @@ from .paths import toolchain_dir
 from .targets import Target, host_arch, host_os
 
 __all__ = ["ToolchainError", "NIM_VERSION", "CHOOSENIM_VERSION", "install_nim",
+           "build_nim_from_source",
            "choosenim_asset", "find_managed_nim", "system_packages", "sudo_command",
            "SUPPORTED_BUILD_HOSTS", "Capability", "capabilities", "select_capabilities",
            "missing_packages", "install_weight", "ZIG_VERSION", "install_zig",
@@ -65,6 +61,7 @@ __all__ = ["ToolchainError", "NIM_VERSION", "CHOOSENIM_VERSION", "install_nim",
 
 NIM_VERSION = "2.2.6"
 CHOOSENIM_VERSION = "0.8.16"
+NIM_GIT = "https://github.com/nim-lang/Nim"   # source-build fallback (hosts choosenim can't serve)
 
 # (os, arch) -> choosenim release asset. This table IS the list of supported build hosts.
 _CHOOSENIM_ASSETS = {
@@ -86,11 +83,18 @@ def choosenim_asset(os_: str | None = None, arch: str | None = None) -> str | No
 
 
 def find_managed_nim() -> Path | None:
-    """The Nim haru-pack installed, if any. Never the system's."""
+    """The Nim haru-pack installed, if any. Never the system's. Finds either the choosenim
+    toolchain OR a source build (nim-src/<version>), since both are haru-pack's own."""
     exe = "nim.exe" if host_os() == "windows" else "nim"
     root = toolchain_dir() / "choosenim" / "toolchains"
     if root.is_dir():
         for d in sorted(root.iterdir(), reverse=True):     # newest version first
+            c = d / "bin" / exe
+            if c.exists():
+                return c
+    src = toolchain_dir() / "nim-src"
+    if src.is_dir():
+        for d in sorted(src.iterdir(), reverse=True):
             c = d / "bin" / exe
             if c.exists():
                 return c
@@ -403,7 +407,9 @@ def sudo_command(packages) -> list:
 # ---------------------------------------------------------------- installation
 
 def install_nim(force: bool = False, log=print) -> str:
-    """Ensure haru-pack has a Nim compiler; return its path. choosenim, or nothing."""
+    """Ensure haru-pack has a Nim compiler; return its path. ONE path, two implementations chosen
+    by the host: the pinned choosenim binary where upstream ships one, else a source build with
+    the managed zig cc (linux aarch64 — a Pi you build ON). The caller does not choose."""
     if not force:
         have = find_managed_nim()
         if have:
@@ -411,16 +417,9 @@ def install_nim(force: bool = False, log=print) -> str:
 
     asset = choosenim_asset()
     if not asset:
-        raise ToolchainError(
-            f"choosenim publishes no binary for this machine ({host_os()}-{host_arch()}), so "
-            f"haru-pack cannot install Nim here.\n"
-            f"Supported build hosts: {', '.join(SUPPORTED_BUILD_HOSTS)}.\n\n"
-            f"If you are trying to produce a binary FOR this machine, build it on a "
-            f"supported host instead — e.g. on linux-x86_64:\n"
-            f"    haru-pack build ./yourproject --target {host_os()}-{host_arch()}\n"
-            f"Cross-compiling needs only the target's C cross-compiler on that host; "
-            f"`haru-pack bootstrap --target {host_os()}-{host_arch()}` prints the one "
-            f"command that installs it.")
+        # No choosenim binary for this host (e.g. linux aarch64). Build from source with zig cc,
+        # automatically — the Pi is a first-class build host, nothing to set up (INV-TOOL-03).
+        return build_nim_from_source(force=force, log=log)
 
     entry = pins.choosenim_digests().get(CHOOSENIM_VERSION, {}).get(asset)
     if not entry:
@@ -453,3 +452,11 @@ def install_nim(force: bool = False, log=print) -> str:
             f"Inspect that directory; nothing was installed system-wide.")
     log(f"Nim ready: {got}")
     return str(got)
+
+
+# The from-source Nim build lives in `nim_source` to keep this module under the statement-line
+# budget (INV-MODULARITY-01). Imported at the bottom, not the top: `nim_source` reaches back for
+# `NIM_VERSION`, `ToolchainError`, `install_zig` and friends with function-local imports, so a
+# top-level import here would close the loop. Re-exported so `toolchain.build_nim_from_source`
+# (and `install_nim`'s call to it) keep working.
+from .nim_source import build_nim_from_source, _host_zig_cc_shim  # noqa: E402,F401

@@ -21,8 +21,9 @@ def prog() -> str:
 
     Split on BOTH separators rather than with `Path`: `Path(r"C:\\...\\haru.exe").name`
     returns the whole string on POSIX, because a backslash is an ordinary character there.
-    That matters because this is a Windows-first tool whose argv[0] is routinely a Windows
-    path, and it is the same mistake the vendored decoder's include path made under mingw.
+    That matters because Windows is a first-class target here, so argv[0] is routinely a
+    Windows path, and it is the same mistake the vendored decoder's include path made under
+    mingw.
     """
     raw = sys.argv[0] if sys.argv else ""
     name = re.split(r"[\\/]", raw)[-1] if raw else ""

@@ -32,7 +32,8 @@ _SHAKE_KEYS = ("tracer", "dropped_files", "freed_bytes",
 def finish(info: dict, *, sources, provider: str, tier: str, tgt, nim: str, compiler: str,
            out: Path, enc: dict, manifest: dict, pyver: str, canary: dict, reap: bool,
            overwrite: bool, ram_only: bool, base_path: str, source_url: str,
-           unpacked_bytes: int, shake_report: dict) -> dict:
+           unpacked_bytes: int, shake_report: dict,
+           slim_report: dict | None = None) -> dict:
     """Fold every recorded fact about this build into the receipt and return it."""
     # The receipt records WHERE this build's third-party bytes came from. An operator
     # auditing a signed artifact should not have to guess whether a mirror was in play.
@@ -49,4 +50,13 @@ def finish(info: dict, *, sources, provider: str, tier: str, tgt, nim: str, comp
     if shake_report:
         info["shake"] = {k: shake_report[k] for k in _SHAKE_KEYS}
         info["shake"]["report"] = str(shake_mod.write_report(shake_report, out))
+    if slim_report:
+        # Provenance, not a saving: the receipt names EVERY path `--slim-python` removed from
+        # the verified PBS interpreter, so the chain reads "verified artifact, then these N
+        # files removed by haru-pack" rather than "some tree we assembled" (INV-SHAKE-05).
+        info["slim_python"] = {
+            "removed_files": slim_report["removed_files"],
+            "freed_bytes": slim_report["freed_bytes"],
+            "removed_paths": list(slim_report["removed_paths"]),
+        }
     return info
