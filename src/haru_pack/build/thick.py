@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 from .. import shake as shake_mod
-from ..bundle import (bundle_python, install_dev_tools, run_bundle_step,
+from ..bundle import (bundle_python, bundle_uv, install_dev_tools, run_bundle_step,
                       run_bundle_steps_wine, warm_cache_and_lock, warm_cache_for_script,
                       warm_cache_windows)
 from ..entrypoints import verify_console_script
@@ -24,7 +24,7 @@ from .tree import target_is_host
 
 
 def _warm_on_host(*, payload: Path, app_dir: Path, cache: Path, py, steps, manifest: dict,
-                  sources, log, shake: bool, shake_keep, shake_report, workdir: Path) -> None:
+                  sources, log, shake: bool, shake_keep, shake_report, workdir: Path, tgt) -> None:
     """Resolve and stage the project's dependencies using the BUNDLED interpreter.
 
     Everything happens against a throwaway env (`tmp_env`) rather than the project's own
@@ -35,8 +35,16 @@ def _warm_on_host(*, payload: Path, app_dir: Path, cache: Path, py, steps, manif
     that does not exist.
     """
     tmp_env = Path(tempfile.mkdtemp(prefix="haru-warm-"))
+    uv_dir = Path(tempfile.mkdtemp(prefix="haru-warmuv-"))
     try:
-        warm_cache_and_lock(app_dir, py, cache, tmp_env, sources=sources)
+        # Warm with the PINNED uv (the one the binary bundles and runs), not the build host's
+        # `uv` on PATH. uv keys its cache buckets by its own schema version, so a cache warmed by
+        # a different host uv is unreadable to the bundled uv at offline run time — the deps are
+        # present but the run can't resolve them (#53). For a host target the pinned uv is this
+        # arch, so it runs here. It goes in its OWN temp dir, never inside `tmp_env` — that is
+        # `UV_PROJECT_ENVIRONMENT`, and a stray subdir there makes `uv sync` refuse it.
+        uv_bin = str(bundle_uv(tgt, uv_dir, sources=sources))
+        warm_cache_and_lock(app_dir, py, cache, tmp_env, sources=sources, uv_bin=uv_bin)
         # The bundled cache above is runtime-only (INV-PAYLOAD-03). Dev tools
         # go into the throwaway env only, so a [[bundle]] step or a --shake
         # observation can still run them without the payload carrying them.
@@ -64,6 +72,7 @@ def _warm_on_host(*, payload: Path, app_dir: Path, cache: Path, py, steps, manif
             manifest.update(shake_mod.manifest_summary(rep))
     finally:
         shutil.rmtree(tmp_env, ignore_errors=True)
+        shutil.rmtree(uv_dir, ignore_errors=True)
 
 
 def _stage_script_dependencies(*, manifest: dict, vendor: Path, source: Path, py, tgt,
@@ -84,7 +93,13 @@ def _stage_script_dependencies(*, manifest: dict, vendor: Path, source: Path, py
     say = log or (lambda _m: None)
     say(f"staging {len(deps)} script dependency/ies into the payload: "
         + ", ".join(deps[:6]) + (" …" if len(deps) > 6 else ""))
-    warm_cache_for_script(Path(source), py, cache, sources=sources)
+    # Warm with the PINNED uv, not the host's — same reason as the project path (#53).
+    warm_uv = Path(tempfile.mkdtemp(prefix="haru-scriptuv-"))
+    try:
+        uv_bin = str(bundle_uv(tgt, warm_uv, sources=sources))
+        warm_cache_for_script(Path(source), py, cache, sources=sources, uv_bin=uv_bin)
+    finally:
+        shutil.rmtree(warm_uv, ignore_errors=True)
     manifest["cache_dir"] = "vendor/cache"
 
 
@@ -112,7 +127,8 @@ def stage(*, payload: Path, vendor: Path, manifest: dict, source: Path, tgt, pyt
         if tgt.is_host:
             _warm_on_host(payload=payload, app_dir=app_dir, cache=cache, py=py, steps=steps,
                           manifest=manifest, sources=sources, log=log, shake=shake,
-                          shake_keep=shake_keep, shake_report=shake_report, workdir=workdir)
+                          shake_keep=shake_keep, shake_report=shake_report, workdir=workdir,
+                          tgt=tgt)
         else:
             warm_cache_windows(app_dir, cache, python, sources=sources)
             if steps and wine:

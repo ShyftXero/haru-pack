@@ -5,7 +5,17 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
-### Stage dirs are garbage-collected — the cache no longer grows without bound
+### `--thick` offline was only accidentally offline: the cache is now warmed with the pinned uv
+
+A `--thick` build warms `vendor/cache` so the binary resolves its deps offline. It warmed with
+the build host's `uv` on PATH — but the binary RUNS the pinned/bundled uv, and uv keys its cache
+buckets by its own schema version (`simple-vNN`, `wheels-vNN`). So a cache warmed by a newer host
+uv (e.g. 0.12.12, writing `simple-v24`) is unreadable to the bundled 0.10.4 uv (which reads
+`simple-v20`): every wheel is present, but the "offline" run fails to resolve them and reports
+"wasn't found in the cache". The thick offline guarantee therefore held only when the build host's
+uv happened to equal the pinned uv — it broke on any box with a newer uv (found packing the flex
+top-50 on an aarch64 box). `warm_cache_and_lock`/`warm_cache_for_script` now warm with the pinned
+uv (`bundle_uv`), so the buckets match what the binary reads at run time on any build host (#53).
 
 Every build stages to a new `<staging-root>/<key>-<payload-sha>` dir, so every rebuild left
 another tree behind and nothing removed the old ones (23 MB default tier, 90 MB+ thick, per
