@@ -16,6 +16,23 @@ in-stage target (a hash-verified regular file) — a link swapped for a file, a 
 link, or an alias repointed inside the stage or out are all refused, never silently followed. On
 Windows the alias stays a copy (symlink creation is privileged). See `INV-STAGE-04`. Closes #42.
 
+### busybody's examiner now sits ANY top-N package's suite, from the sdist (#28)
+
+The `examiner` persona was hardcoded to numpy and certifi — the only two top-25 packages whose
+test suite ships in the WHEEL. Every other package's tests ride in the sdist, so the examiner
+silently covered 2 of N.
+
+It now sources each package's suite from its SDIST, reusing the flex exam's `tools/exam_fetch`
+(`pypi_meta` → `fetch_sdist` → `locate_suite` → `make_project` with `test_deps`) rather than a
+forked copy — the same sdist→thick-project→offline-pytest mechanism `tools/exam.py` proves the
+flex top-N with. The defaults are now `iniconfig` and `six` (small, fast, real sdist suites);
+`sit_exam(pkg, work)` sits any caller-supplied package, and `top_n_packages()` is the whole list.
+
+Kept honest: a package whose sdist carries no test tree yields `NO-SUITE` carrying "no test
+suite in sdist" — never a faked pass. Under the sdist mechanism numpy and certifi land there
+themselves, because their suites ship only in the wheel; that is the honest face of the
+coverage the wheel path hid. Governed by `INV-CHAOS-15` (Red-path walked 2026-09-16).
+
 ### `--slim-python`: drop the ~9.5 MB of interpreter furniture a packed app never touches
 
 A `--thick` binary bundles python-build-standalone unmodified, and ~9.5 MB zipped of it is
