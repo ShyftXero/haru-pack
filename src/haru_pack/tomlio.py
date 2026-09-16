@@ -1,9 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-try:
-    import tomllib as _toml            # py3.11+
-except ModuleNotFoundError:            # py3.9/3.10
-    import tomli as _toml
+import tomllib as _toml                 # stdlib since 3.11; the floor is >=3.12
 import tomli_w
 
 def load(path) -> dict:

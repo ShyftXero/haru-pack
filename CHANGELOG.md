@@ -5,6 +5,16 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### The supported-Python floor is now 3.12 (was 3.9)
+
+`requires-python` is `>=3.12`. The tooling already depended on stdlib `tomllib` (3.11+) behind
+`tomli` shims, and the CI floor leg kept catching 3.9/3.10 breakage that no longer reflects a
+version anyone should package *with* — the launcher targets a bundled 3.13, and the flex exam
+projects declare `>=3.12`. So: drop the `tomli` fallback dependency, `import tomllib` directly
+(`haru_pack.tomlio`, `tools/exam_fetch`), and move the CI matrix's pure-Python floor leg from
+3.9 to 3.12 (3.13 stays the toolchain/ceiling leg). Nothing about the packed *output's*
+interpreter changes — this is the floor for running haru-pack itself.
+
 ### The vendored XZ decoder is now provenance-CHECKED, not just recorded
 
 `src/haru_pack/launcher/xz/PROVENANCE.md` has always said where the ~3 400 lines of vendored C
