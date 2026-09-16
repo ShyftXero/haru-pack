@@ -35,7 +35,7 @@ SOURCES = FLEX / "sources.toml"
 CURATION = FLEX / "curation.toml"
 OUT = FLEX / "packages.toml"
 
-DEFAULT_TOP_N = 25
+DEFAULT_TOP_N = 50
 
 
 def _q(s: str) -> str:
