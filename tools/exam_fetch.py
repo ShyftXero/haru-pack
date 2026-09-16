@@ -13,7 +13,10 @@ import json
 import shutil
 import sys
 import tarfile
-import tomllib
+try:
+    import tomllib                 # py3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib        # py3.9/3.10 (CI runs the suite on 3.9 too)
 import urllib.request
 from pathlib import Path
 

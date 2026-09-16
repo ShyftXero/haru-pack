@@ -52,6 +52,9 @@ OUTCOME_MEANING = {
                  "credential from outside the tree, a member name that escapes on "
                  "extraction, or an argv that runs on the customer under the vendor's "
                  "signature"),
+    "NO-SUITE": ("the examiner had no suite to sit: the package's sdist ships no test tree, so "
+                 "there was nothing to run. Honest coverage — recorded, never faked as a pass "
+                 "(INV-CHAOS-15)"),
 }
 W = 78
 
