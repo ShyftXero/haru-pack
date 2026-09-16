@@ -1,4 +1,4 @@
-## haru-pack staging: per-user, content-addressed, atomic, verified on every reuse.
+## haru-pack staging: per-user, content-addressed, atomic, verified on every reuse, self-evicting.
 ##
 ## THREAT MODEL boundary B10. The staged tree is what the launcher executes, so whoever
 ## can populate `<cache>/<key>/` before we do gets code execution under the launcher's
@@ -55,6 +55,14 @@ const
   ## rewritten table can make the launcher write.
   MaxLinkEntries* = 16384
   KeyChars = {'0'..'9', 'a'..'f', 'A'..'F'}
+  ## Stage-dir eviction (retention). `.lastrun` is TOUCHED on every launch (touchStage) and is
+  ## isRuntimeMutable, so it is written AFTER recordTree and never enters `.stage-files` — it
+  ## cannot break verifyTree on reuse (INV-STAGE-01). `.ready` (ReadyName) is what marks a dir
+  ## as a fully-staged eviction candidate; a half-written `<key>.tmp-<pid>` or the `uv-cache`
+  ## sibling carries none, so neither is ever considered.
+  UseMarker* = ".lastrun"       # touched every launch; drives LRU-by-time eviction
+  DefaultKeepDays* = 30         # evict stage dirs unused this long; 0 disables
+  DefaultKeepMax* = 3           # always retain this many most-recent stage dirs
 
 proc baseDir*(): string =
   ## regenerable tree -> LOCALAPPDATA (win) / XDG_CACHE_HOME (linux) / Caches (mac)
@@ -635,7 +643,7 @@ proc isRuntimeMutable*(rel: string): bool =
   ## exception: verification checks the recorded files and ignores unrecorded ones.
   let parts = rel.split('/')
   let base = parts[^1]
-  if base in [ReadyName, FilesName, ".preinstall-done", ".postinstall-done",
+  if base in [ReadyName, FilesName, UseMarker, ".preinstall-done", ".postinstall-done",
               "uv.lock", ".DS_Store"]: return true
   for part in parts:
     if part == ".venv": return true
@@ -1006,3 +1014,58 @@ proc stageZip*(payload: string, key: string, root = baseDir()): string =
   # code returned it unexamined.
   verifyStagedDir(final, key.toLowerAscii, payloadDigest)
   return final
+
+proc touchStage*(dir: string) =
+  ## Record last-use. Called on EVERY launch, including the fast verified-reuse path, so a
+  ## stage dir that is still in regular use never looks stale to the evictor. `.lastrun` is
+  ## isRuntimeMutable, so it is written AFTER recordTree sealed `.stage-files` and is never a
+  ## recorded member — it cannot break verifyTree on the next run (INV-STAGE-01).
+  try: writeFile(dir / UseMarker, $getTime().toUnix)
+  except CatchableError: discard      # a read-only cache dir is not fatal
+
+proc lastUse(dir: string): times.Time =
+  ## Prefer the launch marker; fall back to the `.ready` token for dirs written by an older
+  ## haru-pack that predates `.lastrun`. `times.Time` is qualified because `std/posix` (pulled
+  ## in on POSIX for the ownership checks) also exports a `Time`.
+  for marker in [UseMarker, ReadyName]:
+    try:
+      if fileExists(dir / marker): return getLastModificationTime(dir / marker)
+    except OSError: discard
+  result = fromUnix(0)
+
+proc evictStale*(keepDir: string, keepDays = DefaultKeepDays, keepMax = DefaultKeepMax) =
+  ## Delete stage dirs unused for `keepDays`, always retaining the live one and the
+  ## `keepMax` most-recently-used. `keepDays <= 0` disables eviction entirely.
+  ##
+  ## Scope is the SIBLINGS of the live stage dir — `keepDir.parentDir`, i.e. the resolved
+  ## staging root main.nim actually staged into (the per-user cache, a RAM-backed root, or a
+  ## BASE_PATH). Deriving the sweep root from the live dir rather than a hardcoded `baseDir()`
+  ## is what keeps eviction correct now that a build can stage outside the cache (docs/adr/0004,
+  ## 0007): an --ephemeral run garbage-collects only its own RAM-backed siblings and never
+  ## reaches into the persistent cache.
+  ##
+  ## Only directories carrying a `.ready` (ReadyName) token are candidates, which keeps the
+  ## sibling `uv-cache` tree and any half-written `<key>.tmp-<pid>` dir out of scope. Removal is
+  ## by `removeDir`, which UNLINKS an in-tree relative symlink (an INV-STAGE-04 dedup alias)
+  ## rather than following it, so eviction can only ever delete inside a stage tree — never a
+  ## link target outside it. Removal failures are swallowed: on Windows a dir belonging to a
+  ## concurrently running instance is locked, and retrying on a later launch is the right call.
+  if keepDays <= 0: return
+  let
+    live = keepDir.absolutePath.normalizedPath
+    base = keepDir.parentDir
+    cutoff = getTime() - initDuration(days = keepDays)
+  var cands: seq[tuple[used: times.Time, path: string]]
+  try:
+    for kind, path in walkDir(base):
+      if kind != pcDir: continue
+      if not fileExists(path / ReadyName): continue
+      if path.absolutePath.normalizedPath == live: continue
+      cands.add (lastUse(path), path)
+  except OSError: return                      # cache dir vanished mid-scan; nothing to do
+  cands.sort(proc (a, b: tuple[used: times.Time, path: string]): int = cmp(b.used, a.used))
+  for i, c in cands:
+    if i < keepMax: continue                  # newest keepMax are always retained
+    if c.used > cutoff: continue              # still within the age window
+    try: removeDir(c.path)
+    except CatchableError: discard

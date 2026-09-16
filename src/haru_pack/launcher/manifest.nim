@@ -28,6 +28,8 @@ type
     fetchUv*: bool
     uvVersion*: string
     cacheDir*: string
+    keepDays*: int              # evict stage dirs unused this long; 0 disables
+    keepMax*: int               # always retain this many most-recent stage dirs
     bundle*: seq[BundleStep]
     inject*: seq[(string, string)]   # env-append: KEY=VALUE pairs set before uv + the app
 
@@ -68,6 +70,10 @@ proc parseManifest*(path: string): Manifest =
   result.fetchUv = gb(t, "fetch_uv", false)
   result.uvVersion = gs(t, "uv_version", "0.10.4")
   result.cacheDir = gs(t, "cache_dir", "")
+  # stage-dir retention (eviction): evict trees unused for keep_days, but never drop the
+  # keep_max most recent. keep_days = 0 disables eviction. Defaults mirror stage.DefaultKeep*.
+  result.keepDays = gi(t, "keep_days", 30)
+  result.keepMax = gi(t, "keep_max", 3)
   # inject (env-append): each entry is "KEY=VALUE", split on the FIRST '='. Post-decrypt,
   # so an encrypted build hides these (docs/adr/0003-stub-config-and-canary.md §4). An entry
   # with no '=' is a corrupt manifest -> clean error, never a traceback (INV-LAUNCH-06).

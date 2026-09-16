@@ -5,6 +5,27 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### Stage dirs are garbage-collected — the cache no longer grows without bound
+
+Every build stages to a new `<staging-root>/<key>-<payload-sha>` dir, so every rebuild left
+another tree behind and nothing removed the old ones (23 MB default tier, 90 MB+ thick, per
+version). On every launch the launcher now touches `.lastrun` in its own stage dir, then
+deletes stage dirs that are **both** older than `keep_days` **and** outside the `keep_max`
+most-recently-used. Defaults `keep_days = 30`, `keep_max = 3`; `keep_days = 0` disables it. Set
+them in `haru_pack.toml` — manifest-only, **no env override** (reading a haru-named env input
+outside the canary model would violate `INV-CANARY`, and eviction tuning is not worth a
+canary-protected knob).
+
+Retention is LRU by last *use*, not creation, so a build still run daily is never collected.
+The sweep is scoped to the siblings of the live stage dir — whatever root was staged into — so
+an `--ephemeral` / `BASE_PATH` build GCs only its own trees and never reaches the persistent
+cache; only dirs carrying a `.ready` token are candidates (the sibling `uv-cache` tree and
+half-written `<key>.tmp-<pid>` dirs are skipped); and removal unlinks the `INV-STAGE-04` in-tree
+symlink aliases rather than following them. Residual limit, documented in `docs/TIERS.md`:
+`.lastrun` is touched at launch, not periodically, so an instance running longer than
+`keep_days` can have its tree evicted by a different launch — raise `keep_days` for long-lived
+services.
+
 ### The supported-Python floor is now 3.12 (was 3.9)
 
 `requires-python` is `>=3.12`. The tooling already depended on stdlib `tomllib` (3.11+) behind

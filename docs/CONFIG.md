@@ -68,6 +68,8 @@ python = "3.13"                  # staged Python version
 cwd_policy = "exe"               # "launch" (native cwd, default) | "exe" (exe-adjacent)
 verbose_uv = false
 uv_run_args = ["--isolated"]
+keep_days = 30                   # evict stage dirs unused this long; 0 = never evict
+keep_max = 3                     # always keep this many most-recent stage dirs
 
 # OS-specific run-once hooks (the per-OS-compiled stager runs only matching ones)
 [[post_install]]

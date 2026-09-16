@@ -119,6 +119,11 @@ def _resolve(project: Path, tier: str, python_cli: str,
         "entrypoint": ep,
         "cwd_policy": decl.get("cwd_policy", "launch"),
         "verbose_uv": decl.get("verbose_uv", False),
+        # stage-dir retention: the launcher evicts trees unused for keep_days, but never drops
+        # the keep_max most recent. keep_days = 0 disables eviction. Defaults mirror the
+        # launcher's stage.DefaultKeepDays / DefaultKeepMax (30 / 3).
+        "keep_days": int(decl.get("keep_days", 30)),
+        "keep_max": int(decl.get("keep_max", 3)),
         # PEP 723 inline dependencies, so the thick tier can stage them (INV-TIER-01).
         "script_dependencies": list(disc.get("dependencies") or []),
         # `[shake]` — how to OBSERVE this project, and what to keep regardless. Carried

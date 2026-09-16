@@ -53,6 +53,44 @@ Regenerate with `docs/tapes/record.sh 03`; the tape is `docs/tapes/03-tiers.tape
   at runtime (`UV_OFFLINE=1`). The launcher **discovers the bundled interpreter at runtime**
   (robust to uv's version-alias symlink dir, which the zip doesn't preserve).
 
+## Stage-dir retention (eviction)
+Each build stages to a new `<staging-root>/<key>-<payload-sha>` dir — so **every rebuild is a
+new dir**. Without eviction those accumulate forever (23 MB default tier, 90 MB+ thick, per
+version).
+
+The launcher garbage-collects them. On every run it touches `.lastrun` in its own stage
+dir, then deletes stage dirs that are **both** older than `keep_days` **and** outside the
+`keep_max` most-recently-used. Defaults: `keep_days = 30`, `keep_max = 3`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `keep_days` | `30` | evict dirs unused this long; **`0` disables eviction** |
+| `keep_max` | `3` | always retain this many most-recent dirs, whatever their age |
+
+Set them in `haru_pack.toml`; the value is baked into the payload manifest at build time.
+There is no runtime env override — the launcher does not read a haru-named env input outside
+the canary model (INV-CANARY), and eviction tuning is not worth a canary-protected knob.
+
+Safety rules, all covered by the eviction logic:
+- The **live** stage dir is never evicted — it is touched *before* the sweep, so it stays
+  current even if its previous markers were ancient.
+- The sweep is scoped to the **siblings of the live stage dir** — the staging root the build
+  actually used — so an `--ephemeral` / `BASE_PATH` build garbage-collects only its own trees
+  and never reaches into the persistent cache.
+- Only dirs carrying a `.ready` token are candidates, which excludes the sibling
+  `uv-cache` tree and any half-written `<key>.tmp-<pid>` dir.
+- Removal follows no symlink: the `.haru-links` aliases deduplicated on disk (INV-STAGE-04)
+  are relative, in-tree symlinks, so deleting a stage dir unlinks them without ever touching a
+  target outside the tree.
+- Removal failures are swallowed and retried on a later run — on Windows a dir belonging
+  to a concurrently running instance is locked, and that is the correct outcome.
+- Eviction is skipped entirely under `HARUPACK_DEV_STAGE`.
+
+**Residual risk:** an instance running continuously for longer than `keep_days` has a stale
+`.lastrun` (it is touched at launch, not periodically), so a *different* launch could evict
+the tree underneath it. Raise `keep_days` for long-lived services, or set it to `0`.
+
+
 ## Dependency caching: shared at default, none at thick (by design)
 
 The tiers differ not only in what they *bundle* but in whether two of your apps can *share* a
