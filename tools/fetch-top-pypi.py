@@ -43,10 +43,11 @@ SOURCES = FLEX / "sources.toml"
 
 URL = "https://hugovk.github.io/top-pypi-packages/top-pypi-packages.min.json"
 HOMEPAGE = "https://hugovk.github.io/top-pypi-packages/"
-# How many names to keep in the committed extract. The flex list is 25 today and is meant
-# to grow ~10x; keeping headroom means growing it does not require a refetch (and so does
-# not silently pull in a different month's ranking at the same time).
-KEEP = 300
+# How many names to keep in the committed extract. Keeping headroom means growing the flex
+# matrix (top-25 -> top-250 and beyond) does not require a refetch, and so does not silently
+# pull in a different month's ranking at the same time. Override with --keep; the default is a
+# fresh top-1000, enough for a top-250 exam with curation slack.
+KEEP = 1000
 
 
 def fetch() -> tuple:
@@ -55,11 +56,11 @@ def fetch() -> tuple:
     return raw, json.loads(raw)
 
 
-def extract(doc: dict) -> list:
+def extract(doc: dict, keep: int = KEEP) -> list:
     rows = doc.get("rows") or []
     if not rows:
         raise SystemExit("upstream returned no rows; refusing to write an empty extract")
-    return [r["project"] for r in rows[:KEEP]]
+    return [r["project"] for r in rows[:keep]]
 
 
 def render(names: list, digest: str, last_update: str, source: str) -> str:
@@ -106,11 +107,13 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--check", action="store_true",
                     help="compare the committed extract against a fresh fetch; write nothing")
+    ap.add_argument("--keep", type=int, default=KEEP,
+                    help=f"how many top ranked names to keep in the extract (default {KEEP})")
     a = ap.parse_args()
 
     raw, doc = fetch()
     digest = hashlib.sha256(raw).hexdigest()
-    names = extract(doc)
+    names = extract(doc, a.keep)
     last_update = str(doc.get("last_update", "")).strip()
     source = str(doc.get("source", "")).strip()
 

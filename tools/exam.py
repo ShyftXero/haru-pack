@@ -178,7 +178,8 @@ def run_exam(pkg: str, imp: str, runner, work: Path,
         r["error"] = "no test suite in sdist"
         return r
     r["layout"] = kind + ":" + ",".join(p.name for p in suite)
-    make_project(pkg, imp, meta["version"], kind, suite, test_deps(root), work / "proj")
+    make_project(pkg, imp, meta["version"], kind, suite, test_deps(root), work / "proj",
+                 sdist_root=root)
     out = work / "exam.bin"
     try:
         rc, output = runner.build(work, work / "proj", out, build_timeout)
@@ -295,6 +296,82 @@ def cmd_run(a) -> int:
     return 0
 
 
+_NOSUITE = ("no test suite in sdist", "no sdist on PyPI")
+
+
+def _hud_frame(interval: float) -> str:
+    """One rendered HUD frame from the checkpointed ledger vs the top-N matrix."""
+    pkgs = top_n()
+    total = len(pkgs)
+    led = load_ledger()
+    rows, npass, nfail, nnosuite, ntests = [], 0, 0, 0, 0
+    fails = []
+    for p in pkgs:
+        name = p["name"]
+        e = led.get(name)
+        if not e:
+            rows.append((p.get("rank", 0), name, "pending", ""))
+            continue
+        rank = e.get("rank", p.get("rank", 0))
+        tests = e.get("tests", 0) or 0
+        err = e.get("error", "") or ""
+        if e.get("passed"):
+            npass += 1; ntests += tests
+            rows.append((rank, name, "pass", f"{tests} tests"))
+        elif any(s in err for s in _NOSUITE):
+            nnosuite += 1
+            rows.append((rank, name, "nosuite", err))
+        else:
+            nfail += 1; ntests += tests
+            fails.append(name)
+            rows.append((rank, name, "fail", err[:64]))
+    examined = npass + nfail + nnosuite
+    pct = (examined / total * 100) if total else 0.0
+    cols, height = shutil.get_terminal_size((100, 44))
+    bar_w = 32
+    filled = int(bar_w * examined / total) if total else 0
+    mark = {"pass": "✔", "fail": "✘", "nosuite": "∅", "pending": "·"}
+    out = [
+        f"flex exam HUD   {pct:5.1f}%   [{'#' * filled}{'.' * (bar_w - filled)}]   "
+        f"{examined}/{total} examined",
+        f"  ✔ pass {npass}   ✘ fail {nfail}   ∅ no-suite {nnosuite}   "
+        f"· pending {total - examined}       {ntests:,} tests run",
+        "",
+    ]
+    rows.sort(key=lambda r: r[0])
+    examined_rows = [r for r in rows if r[2] != "pending"]     # the ones carrying a pytest result
+    pending_rows = [r for r in rows if r[2] == "pending"]      # rank order -> next up is first
+    room = max(6, height - len(out) - 6)
+    shown = examined_rows[-room:]                              # most-recent results (frontier)
+    out += [f"  {mark[st]} {rank:>4}  {name:<26.26} {detail}"
+            for rank, name, st, detail in shown]
+    if pending_rows:
+        nxt = ", ".join(n for _, n, _, _ in pending_rows[:6])
+        out += ["", f"  next up ({len(pending_rows)} pending): {nxt}"[:cols - 2]]
+    if fails:
+        out += [f"  fails ({len(fails)}): {', '.join(fails)}"[:cols - 2]]
+    out += [f"  (refresh {interval:g}s · Ctrl-C to quit)"]
+    return "\n".join(out)
+
+
+def cmd_hud(a) -> int:
+    """Live view of an exam run: reads the ledger (checkpointed after every package) against the
+    top-N matrix and redraws every --interval seconds — percent complete, pass/fail/no-suite
+    tallies, total tests run, and each package's pytest result. Run it on the box the exam is on
+    (or against a synced ledger). Ctrl-C to quit."""
+    import time
+    if a.once:
+        print(_hud_frame(a.interval))
+        return 0
+    try:
+        while True:
+            print("\033[2J\033[H" + _hud_frame(a.interval), flush=True)   # clear + home
+            time.sleep(max(0.5, a.interval))
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -303,7 +380,9 @@ def main() -> int:
     pr = sub.add_parser("run", help="sit the exam and update the ledger")
     pr.add_argument("--only", default="", help="comma-separated package names")
     pr.add_argument("--top-n", type=int, default=0, help="only the first N by rank")
-    pr.add_argument("-j", "--jobs", type=int, default=1)
+    pr.add_argument("-j", "--jobs", type=int, default=2,
+                    help="packages built+run in parallel (default 2). Each is a thick build, so "
+                         "keep it low on a small box")
     pr.add_argument("--timeout", type=int, default=1800, help="per-package BUILD timeout (s)")
     pr.add_argument("--run-timeout", type=int, default=420,
                     help="per-package RUN timeout (s); a suite that overruns is a FAIL")
@@ -315,8 +394,12 @@ def main() -> int:
     pr.add_argument("--require-rootless", action="store_true",
                     help="refuse to run against a rootful docker daemon")
     sub.add_parser("emit", help="render top_n_pypi_stats.md from the ledger (offline)")
+    hp = sub.add_parser("hud", help="live HUD of a run: percent, tallies, per-package result")
+    hp.add_argument("--interval", type=float, default=2.0, help="refresh seconds (default 2)")
+    hp.add_argument("--once", action="store_true", help="render a single frame and exit")
     a = ap.parse_args()
-    return {"refresh": cmd_refresh, "run": cmd_run, "emit": lambda _a: emit() or 0}[a.cmd](a)
+    return {"refresh": cmd_refresh, "run": cmd_run, "emit": lambda _a: emit() or 0,
+            "hud": cmd_hud}[a.cmd](a)
 
 
 if __name__ == "__main__":

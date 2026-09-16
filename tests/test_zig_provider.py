@@ -135,3 +135,37 @@ def test_the_receipt_records_which_compiler_built_it(stub_toolchain, script_proj
 @pytest.mark.invariant("INV-TOOL-02")
 def test_providers_are_a_closed_set():
     assert CC_PROVIDERS == ("zig", "system")
+
+
+# ── INV-TOOL-03 — one code path: choosenim binary, else source-build with zig ──
+
+@pytest.mark.invariant("INV-TOOL-03")
+def test_no_choosenim_binary_builds_nim_from_source(monkeypatch):
+    """Where choosenim ships no binary (linux aarch64 — a Pi you build ON), install_nim BUILDS
+    Nim from source with the managed zig instead of dead-ending on 'unsupported host'.
+
+    Red-path: restore the `raise ToolchainError(...build on a supported host...)` in the
+    `if not asset` branch of install_nim — this goes red, and a Pi has no way to get Nim."""
+    monkeypatch.setattr(tc, "find_managed_nim", lambda: None)
+    monkeypatch.setattr(tc, "choosenim_asset", lambda *a, **k: None)   # e.g. linux-aarch64
+    calls = []
+    monkeypatch.setattr(tc, "build_nim_from_source",
+                        lambda force=False, log=print: (calls.append(force), "/managed/nim")[1])
+    got = tc.install_nim(force=True, log=lambda *_: None)
+    assert got == "/managed/nim", "install_nim must return the source-built nim path"
+    assert calls, "install_nim must fall to build_nim_from_source when choosenim has no binary"
+
+
+@pytest.mark.invariant("INV-TOOL-03")
+def test_source_build_shim_runs_the_managed_zig(monkeypatch, tmp_path):
+    """The source build's cc/gcc shim execs the MANAGED zig, so no host gcc / apt / sudo is
+    needed — the whole reason the Pi becomes a first-class build host.
+
+    Red-path: make `_host_zig_cc_shim` write `exec cc "$@"` instead of the managed zig and this
+    goes red (the shim would fall back to a system compiler that may not exist)."""
+    shim_dir = tc._host_zig_cc_shim("/opt/zig/zig", tmp_path / "shim")
+    for name in ("cc", "gcc"):
+        f = shim_dir / name
+        assert "/opt/zig/zig" in f.read_text() and '" cc ' in f.read_text(), \
+            "the shim must exec the managed zig as a C compiler"
+        assert f.stat().st_mode & 0o111, "the shim must be executable"
