@@ -4,7 +4,7 @@
 
 Each package below **sits its own test suite** from inside a haru-pack **thick** binary, with the network denied. A pass is the strongest statement this project makes about a packaged dependency: not that it imports, but that its own tests pass against the code the payload actually carried. Mechanism and rationale: [`docs/FLEX.md`](docs/FLEX.md) · invariant `INV-TIER-01`.
 
-**6 of 25 passing**, 25 examined, as of 2026-09-11.
+**6 of 50 passing**, 50 examined, as of 2026-09-16.
 
 | # | Package | Repo | Exam | Tests | Last passed |
 |--:|---------|------|:----:|------:|-------------|
@@ -33,6 +33,31 @@ Each package below **sits its own test suite** from inside a haru-pack **thick**
 | 23 | [pydantic-core](https://pypi.org/project/pydantic-core/) | [source](https://github.com/pydantic/pydantic/tree/main/pydantic-core) | ❌ |  | — |
 | 24 | [iniconfig](https://pypi.org/project/iniconfig/) | [source](https://github.com/pytest-dev/iniconfig) | ✅ | 49 | 2026-09-11 |
 | 25 | [aiobotocore](https://pypi.org/project/aiobotocore/) | [source](https://github.com/aio-libs/aiobotocore) | ❌ |  | — |
+| 26 | [annotated-types](https://pypi.org/project/annotated-types/) | [source](https://github.com/annotated-types/annotated-types) | ❌ |  | — |
+| 27 | [h11](https://pypi.org/project/h11/) | [source](https://github.com/python-hyper/h11) | ❌ |  | — |
+| 28 | [attrs](https://pypi.org/project/attrs/) | [source](https://github.com/python-attrs/attrs) | ❌ |  | — |
+| 29 | [typing-inspection](https://pypi.org/project/typing-inspection/) | [source](https://github.com/pydantic/typing-inspection) | ❌ |  | — |
+| 30 | [protobuf](https://pypi.org/project/protobuf/) | [source](https://developers.google.com/protocol-buffers/) | ❌ |  | — |
+| 31 | [fsspec](https://pypi.org/project/fsspec/) | [source](https://github.com/fsspec/filesystem_spec) | ❌ |  | — |
+| 32 | [httpx](https://pypi.org/project/httpx/) | [source](https://github.com/encode/httpx) | ❌ |  | — |
+| 33 | [markupsafe](https://pypi.org/project/markupsafe/) | [source](https://github.com/pallets/markupsafe/) | ❌ |  | — |
+| 34 | [httpcore](https://pypi.org/project/httpcore/) | [source](https://github.com/encode/httpcore) | ❌ |  | — |
+| 35 | [s3transfer](https://pypi.org/project/s3transfer/) | [source](https://github.com/boto/s3transfer) | ❌ |  | — |
+| 36 | [python-dotenv](https://pypi.org/project/python-dotenv/) | [source](https://github.com/theskumar/python-dotenv) | ❌ |  | — |
+| 37 | [platformdirs](https://pypi.org/project/platformdirs/) | [source](https://github.com/tox-dev/platformdirs) | ❌ |  | — |
+| 38 | [pandas](https://pypi.org/project/pandas/) | [source](https://github.com/pandas-dev/pandas) | ❌ |  | — |
+| 39 | [jinja2](https://pypi.org/project/jinja2/) | [source](https://github.com/pallets/jinja/) | ❌ |  | — |
+| 40 | [pathspec](https://pypi.org/project/pathspec/) | [source](https://github.com/cpburnz/python-pathspec) | ❌ |  | — |
+| 41 | [grpcio-status](https://pypi.org/project/grpcio-status/) | [source](https://grpc.io) | ❌ |  | — |
+| 42 | [filelock](https://pypi.org/project/filelock/) | [source](https://github.com/tox-dev/py-filelock) | ❌ |  | — |
+| 43 | [pip](https://pypi.org/project/pip/) | [source](https://github.com/pypa/pip) | ❌ |  | — |
+| 44 | [pyjwt](https://pypi.org/project/pyjwt/) | [source](https://github.com/jpadilla/pyjwt) | ❌ |  | — |
+| 45 | [starlette](https://pypi.org/project/starlette/) | [source](https://github.com/Kludex/starlette) | ❌ |  | — |
+| 46 | [uvicorn](https://pypi.org/project/uvicorn/) | [source](https://github.com/Kludex/uvicorn) | ❌ |  | — |
+| 47 | [litellm](https://pypi.org/project/litellm/) | [source](https://github.com/BerriAI/litellm) | ❌ |  | — |
+| 48 | [aiohttp](https://pypi.org/project/aiohttp/) | [source](https://github.com/aio-libs/aiohttp) | ❌ |  | — |
+| 49 | [tqdm](https://pypi.org/project/tqdm/) | [source](https://github.com/tqdm/tqdm) | ❌ |  | — |
+| 50 | [jmespath](https://pypi.org/project/jmespath/) | [source](https://github.com/jmespath/jmespath.py) | ❌ |  | — |
 
 Legend: ✅ passed its own suite offline · ❌ examined, did not pass · · not yet examined.
 
