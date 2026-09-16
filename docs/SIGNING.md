@@ -92,18 +92,59 @@ If a single self-extracting stub still trips strict Defender policies, ship
 **external-payload mode**: `app.exe` (signed, tiny) + `app.uvcap` sidecar. Launcher finds
 the sidecar via `getAppDir()`. Onedir-like, least-suspicious posture.
 
-## Validated (2026-09-09)
+## Validated (2026-09-09, corrected 2026-09-09)
+
 Cross-compiled on Linux, attached payload, signed with `osslsigncode` (throwaway cert),
 `osslsigncode verify` reported matching Authenticode digests, and the Nim exe (under wine)
-relocated its footer + verified its payload sha256 from its own **signed** image. Only the
-cert *chain* failed (self-signed) — any publicly-trusted code-signing cert resolves that.
-See `docs/PLAN.md` §10.
+relocated its footer from its own **signed** image. Only the cert *chain* failed
+(self-signed) — any publicly-trusted code-signing cert resolves that. See `docs/PLAN.md` §10.
+
+**Correction, and then a correction to the correction.** The original wording claimed the
+launcher "verified its payload sha256". When that was written it was false: `main.nim`
+hex-encoded the footer digest and used the first 16 characters as a staging-directory name,
+never comparing it to anything. It is now true — `INV-LAUNCH-01` landed on 2026-09-09 and
+the launcher refuses to stage or decrypt a payload whose SHA-256 does not match its footer.
+Both states are recorded here because a doc that quietly flips from wrong to right teaches
+you nothing about how much to trust the next sentence.
+
+What is covered by tests today:
+
+| Claim | Evidence |
+|---|---|
+| The launcher verifies the payload digest before staging or executing it | `INV-LAUNCH-01` — `tests/test_launcher_integrity.py` |
+| The footer round-trips and detects payload modification at build time | `INV-PAYLOAD-02` — `tests/test_overlay_integrity.py` |
+| The footer survives data appended after it (the cert table) | `INV-PAYLOAD-02` |
+| The payload is **signature**-verified rather than digest-checked | **Not implemented.** `INV-LAUNCH-03`, `proposed` |
+
+The digest is **not a MAC.** It lives in the same footer an attacker would edit, so someone
+who modifies the payload can recompute it and still execute. It catches corruption and naive
+edits; it is not tamper-evidence. On Windows that comes from Authenticode over the overlay.
+An unsigned ELF has no equivalent, which is why `INV-LAUNCH-03` stays open.
 
 ## Known gap: the payload we stage is not covered by our signature
 Signing the launcher says nothing about the uv and CPython it stages. uv's own binaries are
 signed and notarized as of uv 0.12.12; **python-build-standalone artifacts are not signed at
 all**. Under Windows Smart App Control — which requires every binary to be recognized or
 signed, not just the entry point — a signed stub confers nothing on an unsigned staged
-interpreter. Mitigation is to pin a SHA256 per staged artifact at build time, store it in
-the payload *before* signing, and fail closed on mismatch. See `research/05` Part 5 (#3) and
-Part 9.4.
+interpreter.
+
+Partially mitigated as of 2026-09-09 — but read what the mitigation covers, because "every
+staged artifact is verified by us" is not true and was claimed here until 2026-09-15. Three
+different levels of assurance go into one payload:
+
+- **The two staged binaries — uv and the CPython interpreter — are ours to check.** Each is
+  verified at build time against a SHA-256 pinned in `src/haru_pack/pins.toml` before it enters
+  the payload, and an unpinned artifact is refused rather than fetched (`INV-SUPPLY-01`,
+  `INV-SUPPLY-06`, `INV-SUPPLY-07`).
+- **The application's own wheels are hash-verified, but not by us.** `INV-SUPPLY-08` makes the
+  install hash-checked; the hashes come from the lockfile and **uv** enforces them. That is
+  delegated verification — good, and a different thing from a pin in this repository.
+- **The Nim compiler that builds the launcher is not pinned at all.** haru-pack pins the
+  choosenim installer; choosenim fetches the toolchain from nim-lang.org and nothing here hashes
+  it (`INV-SUPPLY-01`, residual-gap Note). It is not *staged*, so it is outside this section's
+  gap — but it is in the exe you are about to sign.
+
+On top of that the payload as a whole is digest-checked at launch (`INV-LAUNCH-01`, with the
+caveats above — it is not a MAC). Together that closes "did we stage the bytes upstream
+published" for the two staged binaries; it does not make the staged interpreter *signed*, so
+Smart App Control's requirement is still unmet. See `research/05` Part 5 (#3) and Part 9.4.

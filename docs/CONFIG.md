@@ -5,9 +5,17 @@
 - **kind** — `pyproject.toml` with `[project]` → project; a single `.py` (or a `.py` path) →
   PEP 723 script.
 - **Python version** — `requires-python` (pyproject or PEP 723 block) → `.python-version` →
-  else `3.12`. Override with `--python X.Y` or `haru_pack.toml` `python`.
-- **entrypoint** — `[project.scripts]` first entry, else `python -m <name>` for a project;
-  the script filename for a script.
+  else `3.13`. Override with `--python X.Y` or `haru_pack.toml` `python`.
+- **entrypoint** — the single `[project.scripts]` entry (two or more and it refuses, naming
+  them); else `python -m <name>` **if `<name>/__main__.py` exists**; else the script
+  filename for a script. An importable-but-not-executable package is refused rather than
+  turned into a `python -m` that fails on the target.
+
+  A `module:callable` entrypoint is also checked: if that module is in the project tree and
+  does not define the attribute, the build refuses. Note that `app:main` means "import
+  `main` from module `app`" — it is **not** the `if __name__ == "__main__":` block, which
+  cannot be imported and called. If your logic lives in that guard, either move it into a
+  function or put it in `<pkg>/__main__.py` and let discovery emit `python -m <pkg>`.
 - **name** — `[project].name` or the script stem.
 
 ## `haru-pack init` — scaffold it
@@ -19,14 +27,44 @@ haru-pack init ./myproject     # writes a commented haru_pack.toml, pre-filled
 installed packages, so it can suggest bundle/post_install steps (e.g. a Playwright browser)
 even when they aren't in `pyproject.toml`. Add `--force` to overwrite.
 
+## Where directives live
+Two places, and a project may use either or both:
+
+```
+discovery  <  [tool.haru-pack] in pyproject.toml  <  haru_pack.toml  <  CLI flags
+```
+
+- **`[tool.haru-pack]` in `pyproject.toml`** — for a project that is already a package. It
+  already declares everything else about itself; asking for a second file to say "this is
+  how I am bundled" is friction for no gain. Same keys as below, one table deeper.
+- **`haru_pack.toml`** — the only option for a tree with *no* pyproject (a bare script, a
+  folder of `.py` files), the local override for one that has it, and what `haru-pack init`
+  writes. Wins where both speak.
+
+The merge is per top-level key, not deep: a `[[bundle]]` list in `haru_pack.toml` **replaces**
+the one in `pyproject.toml` rather than appending to it, so a directive can be removed and
+not just added to.
+
+`[tool.haru_pack]` (underscore) is **refused, not ignored** — a config table read by nobody
+is worse than a missing one, because you believe it took effect. `INV-BUILD-07`.
+
+PEP 723 allows `[tool]` tables inside a script's inline metadata block; that is not read yet.
+
+```toml
+# in pyproject.toml
+[tool.haru-pack]
+entrypoint = "myapp"
+cwd_policy = "exe"
+```
+
 ## haru_pack.toml (optional, at the project root)
-Declare overrides + extras. Precedence: discovery < `haru_pack.toml` < CLI flags.
+Declare overrides + extras. Precedence as above.
 ```toml
 name = "myapp"                   # usually discovered
 kind = "project"                 # usually discovered
 app_subdir = "app"               # where source is placed inside the payload
 entrypoint = ["python", "-m", "myapp"]   # string (script) or argv (command)
-python = "3.12"                  # staged Python version
+python = "3.13"                  # staged Python version
 cwd_policy = "exe"               # "launch" (native cwd, default) | "exe" (exe-adjacent)
 verbose_uv = false
 uv_run_args = ["--isolated"]
@@ -48,6 +86,15 @@ into = "vendor/ms-playwright"
 PLAYWRIGHT_BROWSERS_PATH = "{into}"        # {into} -> stage dir at runtime
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
 
+# --shake (thick only): how to OBSERVE this project so unused payload files can be pruned.
+# Full semantics and limits: docs/SHAKE.md
+[shake]
+test = ["pytest", "-q"]          # required; a bare tests/ dir is discovered as ["pytest"]
+also_run = [["python", "-m", "myapp", "--selftest"]]   # extra observation runs
+keep = ["torch/lib/libtorch_cpu.so"]   # never prune these, whatever the trace says
+follow_lazy_imports = true       # keep the AST closure of function-level imports too
+shake_interpreter = true         # also apply the CPython rulepack (test/, idlelib, tk, ...)
+
 # encryption — same fields as the --encrypt CLI flags; the SECRET is never stored here
 [encryption]
 enabled = true
@@ -57,6 +104,66 @@ machine = "<machine-id>"         # cryptographic bind (haru-pack machine-id on t
 user = "alice"                   # cryptographic bind
 embed_secret = false
 ```
+
+## `[sources]` — where third-party artifacts are downloaded from
+
+haru-pack downloads three things while building: the `uv` binary, a standalone Python
+interpreter, and your project's wheels. By default all three come from their upstream
+publishers on github.com and PyPI. If your environment can't reach those — an air-gapped
+build host, a corporate proxy, a mandated mirror — point them somewhere else:
+
+```toml
+[sources]
+uv_base     = "https://mirror.example/uv/releases/download"
+python_base = "https://mirror.example/python-build-standalone/releases/download"
+index_url   = "https://pypi.example/simple"
+```
+
+Or per-invocation, which is usually what CI wants:
+
+```sh
+HARUPACK_UV_BASE=... HARUPACK_PYTHON_BASE=... HARUPACK_INDEX_URL=... haru-pack build ./app
+```
+
+`haru_pack.toml` wins over the environment; the environment wins over the defaults.
+
+**A mirror must be a path-preserving reverse proxy.** Everything after the base URL is
+reused verbatim, so `<uv_base>/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz` has to resolve.
+That's the same shape `uv python install --mirror` expects, so a mirror that works for uv
+works here.
+
+### Changing where bytes come from does not change whether they're checked
+
+Every artifact these settings redirect — the `uv` release asset and the
+python-build-standalone interpreter — is verified against a SHA-256 pinned **in this
+repository**, and the pin is chosen by the artifact's *upstream* identity before the download
+point is rewritten (`INV-SUPPLY-01`, `INV-SUPPLY-10`). The pins live in
+`src/haru_pack/pins.toml`, the single source of truth; `src/haru_pack/pins.py` loads it and
+`bundle.py` just holds what `pins.uv_digests()` / `pins.python_digests()` returned. Edit the
+TOML, not a Python constant. So:
+
+- Pointing at a hostile or stale mirror gives you a `DigestMismatch` and a failed build,
+  not a compromised binary.
+- An artifact with **no pin is refused rather than downloaded** — haru-pack will not stage
+  something unverified into a binary you're about to sign.
+
+Two things this does **not** say. `index_url` points at a package index, and the
+application's own wheels are hash-verified by **uv** against the lockfile's hashes rather than
+by us (`INV-SUPPLY-08`) — a real check, but a delegated one. And the Nim compiler is not pinned
+here at all: haru-pack pins the choosenim *installer*, and choosenim then downloads the Nim
+toolchain from nim-lang.org under its own TLS with nothing in this repository hashing the
+result. There is no mirror setting for it, and `INVARIANTS.md` calls it the widest blast radius
+of any unpinned input in the project. (The aarch64 docker image is the exception — it fetches a
+Nim pinned in `pins.toml` and refuses an unpinned one.)
+
+If a mirror produces a digest mismatch, the mirror is wrong or out of date. **Do not edit
+the pin to make it pass.** Fix the mirror, or set the base back to upstream. Bumping a
+pinned version means recording the publisher's real digest — from the release's
+`<asset>.sha256` sidecar or the release API — never a value you computed from whatever the
+mirror happened to serve.
+
+The build receipt records which sources were used, so `haru-pack build` output tells you
+whether a mirror was in play for that artifact.
 
 ## Generated `manifest.toml`
 `haru-pack build` writes a resolved `manifest.toml` **into the payload** (kind, entrypoint,

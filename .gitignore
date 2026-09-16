@@ -2,8 +2,18 @@
 nimcache/
 *.exe
 !examples/**/*.exe
-build/
-dist/
+# Anchored to the repo root on purpose: these are what `python -m build` leaves there.
+# The unanchored `build/` also matched `src/haru_pack/build/` — the build-command package —
+# and silently kept every file in it untracked (caught 2026-09-13, when that package was
+# split out of build.py). A packaging-artifact pattern must never be able to eat source.
+/build/
+/dist/
+# ...and re-included explicitly, because a pattern this repo does not control can eat it
+# too: a global core.excludesFile with a bare `build/` (a very common one) matches
+# src/haru_pack/build/ as well, and `git add` says nothing at all when it does. A repo
+# .gitignore outranks the global one, so this line is what makes the package committable on
+# a machine that has one.
+!src/haru_pack/build/
 # staged payloads (large binaries not committed)
 payload/
 vendor/uv*
@@ -14,15 +24,35 @@ vendor/python*
 .DS_Store
 Thumbs.db
 
-# build-fuzzer run artifacts
-.haru-pack-fuzz/
-
 # python packaging
-dist/
+/dist/
 *.egg-info/
 __pycache__/
 .venv/
 .venv-*/
 
-# session worktrees / local
-.claude/
+# Session worktrees and local session state.
+#
+# `.claude/*` rather than `.claude/`, because git does not descend into an excluded
+# DIRECTORY — a re-include under it is never even considered. Excluding the CONTENTS leaves
+# the directory readable so the two exceptions below can work. (The same shape as the
+# `/build/` anchoring fix, approached from the other direction.)
+.claude/*
+# The two mechanical gates have to be TRACKED to exist for anyone else. A hook that lives in
+# one worktree protects one worktree and then dies with it — and the entire reason these two
+# rules are hooks rather than documentation is that they are the ones nobody should have to
+# remember.
+#
+# `.claude/release-ack.json` stays ignored by the rule above: it is evidence about one
+# machine's run on one sha, not a fact about the project, and a committed ack would travel
+# to a checkout that never ran anything.
+!.claude/settings.json
+!.claude/hooks/
+.claude/hooks/__pycache__/
+
+# flex harness: fetched upstream data and per-package build output
+flex/snapshots/
+flex/out/
+
+# busybody chaos-run artifacts
+busybody/out/

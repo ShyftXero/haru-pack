@@ -1,0 +1,318 @@
+# haru-pack — pinned artifact digests.
+#
+# Every artifact haru-pack fetches ITSELF is verified against a digest recorded here BEFORE
+# it is extracted or executed (INV-SUPPLY-01), and an artifact with no entry is refused rather
+# than downloaded. That is the choosenim installer, the zig archive, the uv release asset and
+# the python-build-standalone interpreter.
+#
+# It is NOT every artifact that ends up on the build host. choosenim downloads the Nim
+# compiler itself from nim-lang.org, against nothing recorded here — INV-SUPPLY-01 names that
+# as its residual gap, and it is the compiler that builds the launcher inside every shipped
+# binary. Do not restore the older, broader wording of this comment.
+#
+# This file is data, not code, and it is meant to be read and edited by hand. Add an entry
+# with `tools/add-pin.py`, which fetches the digest from the publisher and writes it here
+# with its provenance. Do NOT compute a digest by downloading the file and hashing it:
+# that pins whatever the server happened to send you, which is a different statement from
+# 'this is what the publisher says it published'.
+#
+# NEVER edit a digest to make a failing check pass. A mismatch means the artifact is not
+# the one this repo pinned — investigate it. See docs/CONFIG.md.
+
+schema_version = 1
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-aarch64-apple-darwin.tar.gz"
+sha256 = "a6852e4dc565c8fedcf5adcdf09fca7caf5347739bed512bd95b15dada36db51"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-apple-darwin.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-apple-darwin.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-aarch64-pc-windows-msvc.zip"
+sha256 = "77f859cfc26181bdfb94087ce42336d9e2d9e0700bc42f6668445cde517198ce"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-pc-windows-msvc.zip"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-pc-windows-msvc.zip.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-aarch64-unknown-linux-gnu.tar.gz"
+sha256 = "c84a6e6405715caa6e2f5ef8e5f29a5d0bc558a954e9f1b5c082b9d4708c222e"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-unknown-linux-gnu.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-aarch64-unknown-linux-gnu.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-armv7-unknown-linux-gnueabihf.tar.gz"
+sha256 = "d1824ed14f3ad0e7cb7835b46bc0299859cd8141d039a66274a135ca9797bf9c"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-armv7-unknown-linux-gnueabihf.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-armv7-unknown-linux-gnueabihf.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-x86_64-apple-darwin.tar.gz"
+sha256 = "df6dd1c3ebeab4369a098c516c15c233c62bf789a40a4864b30dad1d38d7604e"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-apple-darwin.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-apple-darwin.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-x86_64-pc-windows-msvc.zip"
+sha256 = "0f0e22d7507633bfb38d9b42fb6a0341f1f74b8e80b070a31231c354812432a3"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-pc-windows-msvc.zip"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-pc-windows-msvc.zip.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "uv"
+version = "0.10.4"
+asset = "uv-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "6b52a47358deea1c5e173278bf46b2b489747a59ae31f2a4362ed5c6c1c269f7"
+url = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "0a4647b7df3c8eca11071d6cea68a14a4b102bd6fc6afae314e9852510654b7d"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-apple-darwin-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "0354f70e7d3e2d0c36308edc1815c563d9bae1a3221830f7e222f6bb0a7e1a3a"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-armv7-unknown-linux-gnueabihf-install_only_stripped.tar.gz"
+sha256 = "5c5dd5237712f0e5edf88b886df005887a408d453a6829bb6a16da3bb1c3a755"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-armv7-unknown-linux-gnueabihf-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "ee338839315bdd8af5fc935f9595eca20ebebdd250726c5816b2d0cf94d1e661"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-pc-windows-msvc-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "a36bc60c38fe146e908e2e71fc21266c8558b24a9407226b1d887212839437ef"
+provenance = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9%2B20250317-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz.sha256"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "29d38bd5fbe267b37cecac990015c662796edcf51c2f5e321d59ec06a1850816"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-aarch64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "3a7068f8a0bc197d6a62908f62a3e2c177ef4ed8d63b78bcbff7a24996638aba"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "fdc5d80488b64fcef3b99f297618f68e5374c13d89e888a66abeff4967afd308"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-armv7-unknown-linux-gnueabihf-install_only_stripped.tar.gz"
+sha256 = "10e8297747b13b224de6a4728edd5ea5b9bf682366eb8dd03f085874abe1fc8b"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-aarch64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "4611a41c8653fd074f75999f5ae806ee151b59828fbe7d218e02e125187263fe"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "93bf8e8c05ede0077b197a29c99ebdaf253497f27190097494265150b4e70ba8"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.12.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "1dbaa624a09e15afe7efbdac08d42993135a68db8d34f986ef6977a6d77bdc3c"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.13.12%2B20260211-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "b73415a86dcf298a2f4a585c5371fb1cf003576d2bdc2b80a34d5321284b2ed4"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.13.12%2B20260211-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "bab0e2aeec8a32a7f5cb62240d088d50ea468ef6d7522681bc171d527a5ba6f8"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260211)"
+retrieved = "2026-09-09"
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_linux_amd64"
+sha256 = "1034e03564b3e5b5321646f9ce290cc4d3cdff0cf0e9b523d43f0db8b9a45c74"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_linux_amd64"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_macosx_amd64"
+sha256 = "6ecda2fe114ed9a32a9068047672fb8d37ef0b99dae3ddfe7107c33f1d22b2fa"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_macosx_amd64"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_macosx_arm"
+sha256 = "e7d50eafdbe8b1ce820b23ac1e818398d792a7ddf49c35504c09e3c79a26b953"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_macosx_arm"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "choosenim"
+version = "0.8.16"
+asset = "choosenim-0.8.16_windows_amd64.exe"
+sha256 = "1a6411b4bfe6401a244a8262e705c469ed2fac760ee84229fa176cce3e4bfe55"
+url = "https://github.com/nim-lang/choosenim/releases/download/v0.8.16/choosenim-0.8.16_windows_amd64.exe"
+provenance = "release API per-asset digest (https://api.github.com/repos/nim-lang/choosenim/releases/tags/v0.8.16)"
+retrieved = "2026-09-09"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "1bc9a94ab2425fb6ae58e45f69cab61647759b57895649701390822d976fa923"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-10"
+
+[[artifact]]
+kind = "python"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.13.9%2B20251120-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "f4c22b31ddbf8d7824cbcba2d8707621c2c8fab1fb6d2c1810c2bb0304d8e9a8"
+provenance = "release API per-asset digest (https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20251120)"
+retrieved = "2026-09-10"
+
+# ── zig ──────────────────────────────────────────────────────────────────────
+# The C cross-compiler for the launcher (docs/ZIG_TOOLCHAIN.md). One pinned download
+# replaces build-essential + mingw-w64 + gcc-aarch64-linux-gnu +
+# gcc-arm-linux-gnueabihf, needs no sudo, and covers every target haru-pack builds
+# for. Keyed by BUILD HOST: zig runs on the machine doing the build and never ships
+# in a payload.
+#
+# Digests are zig's own, from the publisher's index, not computed from a download.
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "linux-x86_64"
+sha256 = "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+url = "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "linux-aarch64"
+sha256 = "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"
+url = "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "macos-x86_64"
+sha256 = "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7"
+url = "https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "macos-aarch64"
+sha256 = "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
+url = "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+[[artifact]]
+kind = "zig"
+version = "0.16.0"
+asset = "windows-x86_64"
+sha256 = "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"
+url = "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip"
+provenance = "https://ziglang.org/download/index.json (release API: the publisher's own release index, which carries each tarball's shasum)"
+retrieved = "2026-09-11"
+
+# ── nim, from source ─────────────────────────────────────────────────────────
+# For build hosts choosenim does not publish a binary for — linux aarch64 is the one that
+# matters here (docs/adr/0005 §8, issue #32). `haru_pack.toolchain` documents the supported
+# set: linux x86_64, macOS x86_64/arm64, Windows. Nothing for linux arm64.
+#
+# The VERSION is chosen to match what choosenim installs on the platforms it does cover, so
+# an arm64 build and an amd64 build use the same compiler rather than two that merely both
+# work. Bump this and CHOOSENIM's pinned toolchain together, or the two arches drift.
+#
+# This tarball ships `c_code/` — 11,473 prebuilt C files — and a `build.sh`, so bootstrapping
+# needs no git clone and no network beyond this one verified download. `build_all.sh` is the
+# script that WOULD clone csources; it is deliberately not the one used.
+
+[[artifact]]
+kind = "nim"
+variant = "source"
+version = "2.2.6"
+asset = "nim-2.2.6.tar.xz"
+sha256 = "657b0e3d5def788148d2a87fa6123fa755b2d92cad31ef60fd261e451785528b"
+url = "https://nim-lang.org/download/nim-2.2.6.tar.xz"
+provenance = "https://nim-lang.org/download/nim-2.2.6.tar.xz.sha256 (the publisher's own digest file)"
+retrieved = "2026-09-15"
+
+# A `variant = "binary"` entry belongs here too, and is the PRIMARY path once it exists:
+# linux-aarch64 Nim built from the source pinned above by `.github/workflows/nim-aarch64.yml`
+# and attached to a release. It is absent today because this repository is still private, so
+# an unauthenticated fetch of a release asset cannot work; until then `auto` compiles.
+#
+# When it is added, its `provenance` must be the WORKFLOW RUN URL, not a person. That is the
+# whole difference between "a maintainer's Raspberry Pi produced this" and "here is the public
+# log of the job that produced it, from the source tarball digest above".

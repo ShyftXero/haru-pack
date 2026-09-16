@@ -53,6 +53,69 @@ imports it, `haru-pack build` it, run it in an airgapped subdir, record pass/fai
 One afternoon; immediately finds the "needs post-install" and "native wheel per-platform"
 classes.
 
+
+## 1b. Second round from lotek's BusyBody — what transferred (2026-09-11)
+
+lotek sent back a list of what to steal next, having seen us take its journal / heartbeat /
+ledger / severity machinery. Its headline: our cases run standalone, deterministic,
+one-each, so the failure mode we structurally could not reach was a **whole-system stall
+that no single case observes because it is emergent from concurrency**.
+
+Triaged four ways. Three landed; the declined one contributed its transferable half. Kept
+here because the reasoning is why the design looks the way it does.
+
+### Landed, re-aimed: `herd` + a watchdog
+lotek composes N personas at chosen ratios against one shared board. We have no board, no
+queue and no worker pool — a launcher stages and execs. But there is exactly one shared
+mutable resource under a lock: **the stage cache, keyed by digest**, and `twin` already
+raced N=2 on it, so the shape was right and only the scale and the observer were missing.
+
+Built as three cases at `--herd-n` (default 16) plus a `StallWatch` thread and a `STALLED`
+outcome. The half that would have been easy to miss is the **cascade tagging**: one stall
+would otherwise have entered the ledger as N fingerprints and ranked a single bug N times.
+See docs/BUSYBODY.md for the mechanism and the honest state of the threshold.
+
+Note on naming: this work originally called the outcome `WEDGED`. It was renamed to
+`STALLED` on landing, because by then `wedge` meant a config contradiction here — a whole
+persona and the `SILENT-WEDGE` outcome — and two meanings for one word in one report is
+unreadable.
+
+### Landed: a seed, and announcing a fault before performing it
+Every fault we injected landed at a fixed moment; the axis is continuous and we sampled one
+point of it. `--seed` draws the moment and the victim. The rule worth copying verbatim was
+lotek's: journal the perturbation **before** performing it, or the harness's own jitter
+reads as a product defect.
+
+lotek's framing of this — "a persona that executes its script perfectly was *too competent*,
+the one thing no real operator is" — applies to us only halfway. Our runtime operator is a
+shell invoking `./myapp`, and a perfect executor really is the realistic case there. The
+human fumbling that matters for haru-pack happens at **build** time, which is the item
+below.
+
+### Landed: the eager admin, folded into `wedge`
+The persona that lives in configuration flipping things until something desyncs. We grew the
+surface for exactly this (`[tool.haru-pack]` directives, `INV-BUILD-07`) and nothing
+attacked it.
+
+It arrived as a separate `settings-tinkerer` persona with its own build-time case kind, and
+was **merged into the existing `wedge` persona on landing** — `wedge` had been built
+independently in the meantime, with a better classifier (`sides` and `damage`, and a
+`REFUSED-UNRELATED` guard against a case that refuses for the wrong reason) and with
+`per_fixture=False` already solving once-per-run. Seven cases were kept; the parallel
+machinery was dropped. Three of them report real defects, listed in docs/BUSYBODY.md.
+
+### Declined: WebUI-first
+There is no web UI. haru-pack is a CLI and a Nim launcher, and building a UI in order to
+have one to drive would be the tail wagging the dog. The transferable half — *drive the
+surface a human actually touches* — became one `mute` case comparing a pty against a pipe
+against the rich output (`INV-UI-01`). Not a new harness.
+
+### The reciprocal, if anyone is routing it back
+A composed run with a watchdog has to attribute a stall to the harness or to the product,
+which is what our `blame` field and `APP-CRASHED` outcome exist for. A watchdog that calls
+its own scheduling starvation a product stall is the `tight_address_space` mistake — a
+threshold that looks thorough and discriminates nothing.
+
 ## 2. More feature ideas
 - **`haru-pack doctor <project>`** — static pre-flight: detects playwright/spacy/nltk/torch
   (post-install needed), native exts (per-platform bundle), reads-`__file__` smells,
@@ -134,3 +197,22 @@ Linux**, and the **build-fuzzer** as a correctness story pyapp doesn't have.
 > tool in the Python-uv space has either — pyapp verifies nothing and accepts `http://`),
 > **Linux→Windows cross-compile including thick**, the **explicit tier ladder**, **PEP 723
 > ingestion**, and **licensing/expiry/machine binding**.
+
+## 5. Ideas that were costed and declined (so they stop resurfacing)
+
+Unlike the rest of this file, these were worked out far enough to decide against. Each has
+its reasoning written down somewhere durable; the point of listing them here is that this
+is the file people reach for when an idea feels new.
+
+- **UPX-packing the bundled `uv` binary.** Declined 2026-09-10. The size win is real but it
+  belongs to LZMA, not to packing, and it is obtainable without modifying a signed
+  third-party executable — packing destroys uv's Authenticode signature, matches no
+  publisher digest, trips AV packer heuristics, needs `paxctl -m` under hardened kernels,
+  breaks macOS arm64 codesigning, and pays decompression on *every* launch. Shipping the
+  payload *member* XZ-compressed got 55.59 MB → 14.17 MB (vs 22.25 MB deflated) with the
+  staged binary byte-identical to the release. Implemented instead: `INV-PAYLOAD-04`.
+- **A thick tier that ships no `uv` at all.** Declined 2026-09-10, with the design and
+  measurements kept in [`UV_FREE_THICK.md`](UV_FREE_THICK.md). The prize fell to ~14 MB of
+  exe once uv shipped compressed, and the obvious implementation — a prebuilt virtualenv —
+  cannot work cross-platform at all. The version that *can* work (a flat `uv pip install
+  --target` tree on `PYTHONPATH`) was validated, so read the doc rather than re-deriving it.

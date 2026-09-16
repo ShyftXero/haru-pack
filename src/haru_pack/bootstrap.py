@@ -1,17 +1,26 @@
+"""Toolchain discovery and the Nim library pins.
+
+Installing Nim lives in `toolchain.py` — one path, choosenim. This module finds what is
+already there and pins the Nim libraries the launcher links against.
+"""
 from __future__ import annotations
-import os, platform, shutil, subprocess, sys, tarfile, tempfile, urllib.request
+import shutil, subprocess, sys
 from pathlib import Path
-from .paths import nim_dir, toolchain_dir
 
-NIM_VERSION = "2.2.6"  # pinned; bump deliberately
+from .toolchain import (CHOOSENIM_VERSION, NIM_VERSION, ToolchainError,  # noqa: F401
+                        find_managed_nim, install_nim, sudo_command, system_packages)
 
-# ---------- Nim ----------
 def find_nim() -> str | None:
-    """Prefer a managed Nim, then one on PATH."""
-    managed = nim_dir() / "bin" / ("nim.exe" if sys.platform == "win32" else "nim")
-    if managed.exists():
+    """haru-pack's own Nim first, then one on PATH.
+
+    A system Nim is accepted as a courtesy for people who already have one, but haru-pack
+    never installs there and never upgrades it.
+    """
+    managed = find_managed_nim()
+    if managed:
         return str(managed)
     return shutil.which("nim")
+
 
 def nim_version(nim: str) -> str | None:
     try:
@@ -20,56 +29,31 @@ def nim_version(nim: str) -> str | None:
     except Exception:
         return None
 
-def _nim_archive_url() -> tuple[str, str]:
-    m = platform.machine().lower()
-    if sys.platform.startswith("linux"):
-        arch = {"x86_64": "linux_x64", "aarch64": "linux_arm64"}.get(m)
-        if not arch:
-            raise RuntimeError(f"no prebuilt Nim for linux/{m}; install Nim manually or via choosenim")
-        return f"https://nim-lang.org/download/nim-{NIM_VERSION}-{arch}.tar.xz", "tar.xz"
-    if sys.platform == "win32":
-        return f"https://nim-lang.org/download/nim-{NIM_VERSION}_x64.zip", "zip"
-    raise RuntimeError("macOS: install Nim via `brew install nim` or choosenim (https://nim-lang.org/install.html)")
+NIM_DEPS = {
+    "zippy": "0.10.12",
+    "puppy": "2.1.2",
+    "parsetoml": "0.7.2",
+    "nimcrypto": "0.7.3",
+}
 
-def install_nim(force: bool = False) -> str:
-    """Download + extract a pinned Nim into the managed toolchain dir."""
-    existing = find_nim()
-    if existing and not force:
-        return existing
-    url, kind = _nim_archive_url()
-    dest = nim_dir()
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as td:
-        arc = Path(td) / f"nim.{kind}"
-        urllib.request.urlretrieve(url, arc)
-        extract_to = Path(td) / "x"
-        if kind == "tar.xz":
-            with tarfile.open(arc) as t:
-                t.extractall(extract_to)
-        else:
-            import zipfile
-            with zipfile.ZipFile(arc) as z:
-                z.extractall(extract_to)
-        inner = next(p for p in extract_to.iterdir() if p.is_dir())
-        shutil.move(str(inner), str(dest))
-    nim = find_nim()
-    if not nim:
-        raise RuntimeError("Nim install failed (binary not found after extract)")
-    return nim
-
-NIM_DEPS = ("zippy", "puppy", "parsetoml", "nimcrypto")   # launcher imports these (puppy pulls webby)
+def nim_dep_specs() -> list:
+    """`nimble install` arguments. `pkg@version` is nimble's exact-version syntax."""
+    return [f"{pkg}@{ver}" for pkg, ver in NIM_DEPS.items()]
 
 def ensure_nim_deps(nim: str) -> bool:
-    """The launcher imports zippy + puppy; make sure nimble has them."""
+    """The launcher imports zippy + puppy; make sure nimble has them, at pinned versions."""
     nimble = str(Path(nim).with_name("nimble" + (".exe" if sys.platform == "win32" else "")))
     if not Path(nimble).exists():
         nimble = shutil.which("nimble") or "nimble"
     ok = True
-    for pkg in NIM_DEPS:
+    # INV-SUPPLY-02 (`proposed`) — this argv is the REQUEST half of that invariant and
+    # nothing more. `build.compile_launcher` runs a bare `nim c` with no lockfile, no
+    # project `.nimble` and no `--nimblePath`, so Nim resolves each import to the highest
+    # version present in the package directory no matter what we installed here. Pinning
+    # the installer controls which versions arrive, not which one gets linked.
+    for spec in nim_dep_specs():
         try:
-            r = subprocess.run([nimble, "install", "-y", pkg], capture_output=True, text=True, timeout=600)
+            r = subprocess.run([nimble, "install", "-y", spec], capture_output=True, text=True, timeout=600)
             ok = ok and r.returncode == 0
         except Exception:
             ok = False
@@ -97,22 +81,64 @@ def _distro_mingw_cmd() -> str:
         return "brew install mingw-w64"
     return "install the 'mingw-w64' cross toolchain from your package manager"
 
-def detect_c_toolchain(target: str) -> dict:
-    """target: 'host' or 'windows'. Returns {ok, compiler, advice}."""
-    if target == "windows" and sys.platform != "win32":
-        cc = shutil.which("x86_64-w64-mingw32-gcc")
-        if cc:
-            return {"ok": True, "compiler": cc, "advice": ""}
+def detect_c_toolchain(target) -> dict:
+    """Is there a C compiler that can produce a binary for `target`? Returns {ok, compiler, advice}.
+
+    Cross-compiling is the whole reason this project uses Nim, so a missing toolchain has to
+    produce a sentence the operator can act on — the package name for their distro — rather
+    than a link error from deep inside a Nim build.
+    """
+    from .targets import Target, TargetError
+    try:
+        tgt = target if hasattr(target, "os") else Target.parse(target)
+    except TargetError as e:
+        return {"ok": False, "compiler": None, "advice": str(e)}
+
+    if tgt.is_host:
+        for c in ("cc", "gcc", "clang"):
+            p = shutil.which(c)
+            if p:
+                return {"ok": True, "compiler": p, "advice": ""}
+        if sys.platform == "win32":
+            return {"ok": False, "compiler": None,
+                    "advice": "no C compiler found; run `choosenim` (bundles mingw) or install "
+                              "MSVC Build Tools"}
         return {"ok": False, "compiler": None,
-                "advice": ("cross-compiling Linux->Windows needs the mingw-w64 toolchain "
-                           f"(provides x86_64-w64-mingw32-gcc):\n    {_distro_mingw_cmd()}")}
-    # host target
-    for c in ("cc", "gcc", "clang"):
-        p = shutil.which(c)
-        if p:
-            return {"ok": True, "compiler": p, "advice": ""}
-    if sys.platform == "win32":
+                "advice": "no C compiler found; install gcc/clang from your package manager"}
+
+    cc, pkg = tgt.cross_cc()
+    if cc is None:
         return {"ok": False, "compiler": None,
-                "advice": "no C compiler found; run `choosenim` (bundles mingw) or install MSVC Build Tools"}
+                "advice": f"haru-pack has no cross-compiler mapping for {tgt}. Build natively on "
+                          f"a {tgt} machine, or add one to targets._CROSS_CC."}
+    found = shutil.which(cc)
+    if found:
+        return {"ok": True, "compiler": found, "advice": ""}
     return {"ok": False, "compiler": None,
-            "advice": "no C compiler found; install gcc/clang from your package manager"}
+            "advice": (f"cross-compiling to {tgt} needs {cc}:\n"
+                       f"    {_install_hint(pkg)}\n"
+                       f"Alternatively, build natively on a {tgt} machine.")}
+
+
+def _install_hint(pkg: str) -> str:
+    """Best-effort package-manager line for this host. Wrong guesses are cheap; a bare
+    package name with no command is not actionable."""
+    info = {}
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1); info[k] = v.strip().strip('"')
+    except Exception:
+        pass
+    ident = (info.get("ID", "") + " " + info.get("ID_LIKE", "")).lower()
+    if sys.platform == "darwin":
+        return f"brew install {pkg}"
+    if any(d in ident for d in ("debian", "ubuntu", "raspbian")):
+        return f"sudo apt install {pkg}"
+    if any(d in ident for d in ("fedora", "rhel", "centos")):
+        return f"sudo dnf install {pkg}"
+    if "arch" in ident:
+        return f"sudo pacman -S {pkg}"
+    if any(d in ident for d in ("suse", "opensuse")):
+        return f"sudo zypper install {pkg}"
+    return f"install '{pkg}' with your package manager"

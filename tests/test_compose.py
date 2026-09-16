@@ -1,0 +1,450 @@
+"""INV-CHAOS-08 — composition, per-action perturbation probability, and the determinism
+that makes both usable.
+
+A persona that runs alone asks a closed question. "Does staging cope with umask 077?" has
+the same answer forever, and answering it is integration testing. The open question — which
+COMBINATION of individually-survivable conditions is not survivable — cannot be answered by
+running them one at a time, and that is what these guard.
+
+Nothing here builds a binary. The engine is pure: selection, conflict handling, firing, and
+the shape of the pass condition. The expensive part is exercised by
+`python tools/busybody.py --compose 2`.
+"""
+from __future__ import annotations
+
+import ast
+import importlib.util
+import inspect
+import sys
+from pathlib import Path
+
+import pytest
+
+from _source import harness_source
+
+
+def _compose_family(bb):
+    """`compose_sweep` plus the helpers it was broken into on 2026-09-13.
+
+    The assertions below are about the composed sweep's RULES — the FATAL floor, the
+    reproduction line, what the fingerprint keys on — and those rules now live in
+    `_stack_record` / `_finish_compose` / `_compose_combos` rather than in one function
+    body. Reading the whole family keeps the assertion pointed at the rule instead of at
+    a line number.
+    """
+    import ast
+    import inspect
+
+    from busybody_sweep import (_announce_compose, _compose_combos, _finish_compose,
+                                _run_one_stack, _stack_record, compose_sweep)
+    return "\n".join(ast.unparse(ast.parse(inspect.getsource(fn)))
+                     for fn in (compose_sweep, _compose_combos, _announce_compose,
+                                _stack_record, _run_one_stack, _finish_compose))
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tools"))
+
+import busybody_compose as bc  # noqa: E402
+import busybody_traits  # noqa: E402,F401  (registers the catalogue)
+
+
+def _busybody():
+    spec = importlib.util.spec_from_file_location("bb_c", REPO / "tools" / "busybody.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ---------------------------------------------------------------- the catalogue
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_the_catalogue_covers_every_persona():
+    """Eleven personas were commissioned; a trait file that quietly covers eight is the
+    failure mode here, because nothing else would notice."""
+    prefixes = {n.split("_")[0] for n in bc.TRAITS}
+    expected = {"greenhorn", "foreman", "crosseyed", "babel", "understudy", "revenant",
+                "quotamaster", "packrat", "auditor", "tourist", "archivist"}
+    assert expected <= prefixes, f"personas with no traits: {expected - prefixes}"
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_every_trait_declares_what_it_models():
+    """A trait nobody can motivate is a trait nobody will maintain, and it will be deleted
+    by the next person on the grounds that it looks arbitrary."""
+    for name, t in bc.TRAITS.items():
+        assert t["why"] and len(t["why"]) > 40, f"{name} has no real rationale"
+        assert t["phase"] in bc.PHASES
+        assert t["layer"] in bc.LAYERS
+        assert 0.0 < t["fires"] <= 1.0
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_a_malformed_trait_is_rejected_at_import():
+    """The registry validates rather than trusting. This caught a phase typo of mine on the
+    first run, before it could become a trait that silently never fired."""
+    with pytest.raises(ValueError, match="phase"):
+        bc.trait("bogus_phase", "sideways", "env", "x" * 50)(lambda ctx: None)
+    with pytest.raises(ValueError, match="layer"):
+        bc.trait("bogus_layer", "run", "nowhere", "x" * 50)(lambda ctx: None)
+    with pytest.raises(ValueError, match="fires"):
+        bc.trait("bogus_fires", "run", "env", "x" * 50, fires=0.0)(lambda ctx: None)
+    with pytest.raises(ValueError, match="duplicate"):
+        name = next(iter(bc.TRAITS))
+        bc.trait(name, "run", "env", "x" * 50)(lambda ctx: None)
+
+
+# ---------------------------------------------------------------- selection
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_selection_is_deterministic_in_the_seed():
+    """A finding that cannot be reproduced is an anecdote. The seed is printed in the report
+    precisely so a stack can be run again."""
+    a = bc.sample_combos(list(bc.TRAITS), 3, 40, seed=11)
+    b = bc.sample_combos(list(bc.TRAITS), 3, 40, seed=11)
+    assert a == b and len(a) == 40
+    assert a != bc.sample_combos(list(bc.TRAITS), 3, 40, seed=12)
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_cancelling_pairs_are_never_selected():
+    """Declared conflicts are pairs where one trait CANCELS the other — a read-only cache
+    and an absent HOME cannot both be the thing under test. Such a stack tests less than
+    either member alone, which is worse than useless because it looks like coverage.
+
+    Pairs that BREAK together are not conflicts. Those are the findings.
+    """
+    for k in (2, 3):
+        for combo in bc.sample_combos(list(bc.TRAITS), k, 300, seed=5):
+            assert not bc.conflicts_in(combo), f"selected a cancelling stack: {combo}"
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_selection_prefers_stacks_that_cross_layers():
+    """Three filesystem traits is a weaker test than one filesystem, one env and one process
+    trait: the interesting interactions are between mechanisms, not between variations of
+    one mechanism."""
+    combos = bc.sample_combos(list(bc.TRAITS), 3, 30, seed=3)
+    spreads = [len({bc.TRAITS[n]["layer"] for n in c}) for c in combos]
+    assert min(spreads) == 3, (
+        f"a selected 3-stack touched only {min(spreads)} layer(s); layer spreading is off"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_sampling_does_not_blow_up_on_the_real_catalogue():
+    """The first version computed max(...) inside a comprehension over the combination
+    space — O(n^2), which hung outright at k=3 over 40 traits (9,880 combinations, ~97M
+    evaluations). Noted because `packrat_many_tiny_files` exists to catch this shape in
+    haru-pack, and the harness had it first."""
+    import time
+    t0 = time.monotonic()
+    got = bc.sample_combos(list(bc.TRAITS), 3, 200, seed=1)
+    assert len(got) == 200
+    assert time.monotonic() - t0 < 5.0, "sampling the real catalogue should be instant"
+
+
+# ------------------------------------------ per-action perturbation probability
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_a_fallible_trait_sometimes_declines_to_act():
+    """The whole point. If greenhorn always fumbles, then "greenhorn fumbled AND auditor
+    left a .env behind" is the only thing ever tested, and "greenhorn got it right, auditor
+    still left the .env" is a different code path that never runs."""
+    fallible = [n for n, t in bc.TRAITS.items() if t["fires"] < 1.0]
+    assert fallible, ("every trait has probability 1, so every persona is a fixture "
+                      "rather than a person")
+
+    combo = tuple(fallible[:3])
+    seen = {bc.realize(combo, 99, i) for i in range(60)}
+    assert len(seen) > 1, f"{combo} produced one outcome in 60 runs; firing is not varying"
+    assert any(len(x) < len(combo) for x in seen), "no run had a trait decline"
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_firing_is_deterministic_and_survives_a_bigger_catalogue():
+    """Per-trait draws, not one sequential stream: adding a trait must not reshuffle every
+    other trait's decisions in every other run, or a recorded seed stops meaning what it
+    meant when the finding was filed."""
+    combo = ("greenhorn_output_over_the_input", "auditor_plants_credentials")
+    first = [bc.realize(combo, 7, i) for i in range(20)]
+    assert first == [bc.realize(combo, 7, i) for i in range(20)]
+
+    # a trait's decision depends only on (seed, run_index, its own name)
+    solo = [bc.realize(("auditor_plants_credentials",), 7, i) for i in range(20)]
+    in_pair = [("auditor_plants_credentials" in f) for f in first]
+    assert [bool(x) for x in solo] == in_pair, (
+        "a trait's firing changed because another trait was present in the stack"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_firing_does_not_depend_on_python_version_internals():
+    """`random.Random(tuple)` raises on 3.14, and where it works the seed-to-stream mapping
+    is an implementation detail. A printed reproduction line has to survive an interpreter
+    upgrade, so the draw comes from a digest."""
+    src = inspect.getsource(bc.realize)
+    assert "sha256" in src, "firing must be derived from a stable digest"
+    assert "random.Random((" not in src, (
+        "seeding Random with a tuple raises on 3.14 and is not version-stable"
+    )
+    # a known digest-derived decision, pinned so a refactor cannot silently change it
+    assert bc.realize(("greenhorn_output_over_the_input",), 7, 3) == \
+        ("greenhorn_output_over_the_input",)
+    assert bc.realize(("greenhorn_output_over_the_input",), 7, 1) == ()
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_the_baseline_pass_forces_every_trait_to_fire():
+    """k=1 IS the attribution baseline. "Does trait A fail alone?" cannot be answered by a
+    run where A did not fire, and a baseline with holes makes every composed finding
+    unattributable."""
+    fallible = next(n for n, t in bc.TRAITS.items() if t["fires"] < 1.0)
+    assert bc.realize((fallible,), 1, 0, force=True) == (fallible,)
+    # and the runner turns it on for exactly the two passes that need it
+    src = harness_source()
+    assert "force = bool(a.compose_only) or a.compose == 1" in src, (
+        "the baseline and --compose-only must force every probability to 1"
+    )
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_a_control_run_is_kept_not_resampled():
+    """A run where nothing fired is a control, and one arriving through the same machinery
+    is worth more than one bolted on beside it: if the baseline is broken, that is where it
+    shows."""
+    src = inspect.getsource(bc.realize)
+    assert "control" in src.lower(), "the empty case must be a documented decision"
+    combo = tuple(n for n, t in bc.TRAITS.items() if t["fires"] <= 0.5)[:2]
+    if combo:
+        outcomes = [bc.realize(combo, 4242, i) for i in range(80)]
+        assert () in outcomes, "no control run appeared in 80 draws of two coin-flip traits"
+
+
+# ---------------------------------------------------------------- the pass condition
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_a_stack_is_only_a_finding_if_it_hit_the_fatal_floor():
+    """Deliberately weak, and it must stay weak. Nobody has reasoned about combination
+    7,431 of 11,000, so asserting "haru-pack works under any three of these" would be an
+    overclaim of exactly the kind INVARIANTS.md exists to prevent. The floor is the claim:
+    it works, or it refuses intelligibly."""
+    bb = _busybody()
+    src = _compose_family(bb)
+    assert "ok = r['outcome'] not in FATAL" in src, (
+        "a composed stack must be judged against the FATAL floor and nothing narrower"
+    )
+    # Pinned exactly rather than loosely: the floor is the pass condition for every composed
+    # stack, so a name appearing in or leaving it has to be stated HERE, in one place, by
+    # whoever changed it. Two additions landed on 2026-09-11 from branches that were each
+    # green alone and red together, which is exactly what this assertion is for:
+    #   STALLED            the herd persona    (INV-CHAOS-09)
+    #   ESCAPED, SMUGGLED  the trojan persona  (#7)
+    assert set(bb.FATAL) == {"CRASHED", "HUNG", "SILENT", "SILENT-WEDGE", "STALLED",
+                             "ESCAPED", "SMUGGLED"}
+    for good in ("RAN", "REFUSED", "APP-CRASHED"):
+        assert good not in bb.FATAL, f"{good} is an acceptable outcome for a stack"
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_every_finding_prints_its_own_reproduction_line():
+    """A finding nobody can reproduce is an anecdote. The remedy field carries the exact
+    command, seed included."""
+    bb = _busybody()
+    src = _compose_family(bb)
+    assert "--compose-only" in src and "--compose-seed" in src, (
+        "a composed finding must print the command that reproduces it"
+    )
+    assert "compose_seed=seed" in src, "the seed must be journalled, not only printed"
+
+
+@pytest.mark.invariant("INV-CHAOS-08")
+def test_the_fired_set_identifies_the_run_not_the_selected_set():
+    """Fingerprinting on the selected set would group two genuinely different runs — one
+    where three traits acted and one where one did — under a single root cause."""
+    bb = _busybody()
+    src = _compose_family(bb)
+    assert "sorted(fired)" in src, "the fingerprint must key on what actually fired"
+    assert "'selected': list(combo)" in ast.unparse(
+        ast.parse(inspect.getsource(bb.run_stack))), "both sets must be recorded"
+
+
+# ---------------------------------------------------------------- cross-target statics
+
+@pytest.mark.invariant("INV-TIER-03")
+def test_elf_machine_decoding_is_right():
+    """The cross-target checks rest entirely on this. 0x3E is x86-64 and 0xB7 is aarch64;
+    getting them backwards would make the aarch64 check pass on an x86 payload."""
+    bb = _busybody()
+    x86 = b"\x7fELF\x02\x01\x01" + b"\x00" * 9 + b"\x02\x00" + b"\x3e\x00"
+    arm = b"\x7fELF\x02\x01\x01" + b"\x00" * 9 + b"\x02\x00" + b"\xb7\x00"
+    assert bb._elf_machine(x86) == "x86-64"
+    assert bb._elf_machine(arm) == "aarch64"
+    assert bb._elf_machine(b"MZ\x90\x00") == "", "a PE file is not an ELF"
+    assert bb._elf_machine(b"") == ""
+
+
+@pytest.mark.invariant("INV-TIER-03")
+def test_a_foreign_target_is_checked_statically_rather_than_run():
+    """A Windows payload cannot be executed here, but it can be read. That is what makes the
+    cross-target check possible at all rather than needing a second machine."""
+    for name in ("crosseyed_target_windows", "crosseyed_target_aarch64"):
+        assert bc.TRAITS[name]["no_run"] is True, f"{name} must not attempt a local run"
+    bb = _busybody()
+    src = ast.unparse(ast.parse(inspect.getsource(bb.run_stack)))
+    assert "_static_verdict" in src, (
+        "a stack that chose a foreign target must fall through to static verification"
+    )
+
+
+@pytest.mark.invariant("INV-TIER-03")
+def test_the_cross_target_check_does_not_flag_source_files_named_manylinux():
+    """The compose-1 baseline flagged pip's vendored `_manylinux.py` — the platform-detection
+    module, pure Python source — as a "linux wheel in a Windows payload". A binary object is
+    identified by its bytes and a wheel by a `.whl` name; neither is "any path containing
+    manylinux". Red-path: match the substring against all members again and this fails."""
+    bb = _busybody()
+    src = ast.unparse(ast.parse(inspect.getsource(bb._static_verdict)))
+    assert "_is_wheel" in src, "wheel detection must be by filename, not substring-in-path"
+    # the detector module names that tripped it, as they appear in a real payload
+    innocuous = [
+        "vendor/python/python/Lib/site-packages/pip/_vendor/packaging/_manylinux.py",
+        "vendor/.../__pycache__/_manylinux.cpython-312.pyc",
+        "app/uses_linux_x86_64_in_a_comment.py",
+    ]
+    for name in innocuous:
+        assert not (name.endswith(".whl")), "test data should not be actual wheels"
+
+
+# ------------------------------------------------- the golden run, and did the fault land?
+
+
+def test_the_golden_run_is_prepended_and_is_not_optional():
+    """Every campaign includes one un-perturbed control, first, through the same code path.
+
+    Not a flag. A baseline somebody can forget is a baseline that is missing on the run where
+    it mattered, and the three things that depend on it — attributability, detecting
+    nondeterminism in the product rather than the harness, and defining `fault window` — are
+    all silently weaker rather than loudly absent when it is skipped.
+    """
+    import ast
+    import inspect
+
+    from busybody_sweep import compose_sweep
+
+    src = ast.unparse(ast.parse(inspect.getsource(compose_sweep)))
+    assert "[()] + list(combos)" in src, (
+        "compose_sweep no longer prepends the empty stack. The golden run is the control "
+        "every other result in the campaign is read against."
+    )
+    assert "golden=i == 0" in src or "golden=(i == 0)" in src, (
+        "the first stack is no longer marked as the golden run, so nothing downstream can "
+        "tell the control from a draw that happened to fire nothing"
+    )
+
+
+def test_a_control_run_and_a_golden_run_are_named_differently():
+    """An accident is not a control, and the report must not call one the other.
+
+    A stack where a probabilistic draw fired nothing looks identical to the deliberate empty
+    stack in every field except this one. Conflating them is how a campaign with no baseline
+    reads as a campaign with one.
+    """
+    from busybody_sweep import _stack_record
+
+    base = {"outcome": "RAN", "rc": 0, "seconds": 1.0, "blame": "none",
+            "stdout": "", "stderr": ""}
+    golden = _stack_record({**base, "fired": [], "golden": True}, (), 7)
+    accident = _stack_record({**base, "fired": [], "golden": False}, ("a", "b"), 7)
+
+    assert golden["name"] == "(golden run)"
+    assert accident["name"] == "(nothing fired)"
+    assert golden["name"] != accident["name"]
+    assert "baseline is broken" in golden["remedy"], (
+        "the golden run's remedy must say what a FINDING on the control means: that nothing "
+        "else in the campaign is evidence"
+    )
+
+
+def test_a_trait_that_changes_nothing_is_reported_as_a_harness_finding():
+    """A fault swallowed before it reaches the target must not read as tolerance.
+
+    This is the whole point of the check. A deliberately injected fault that never lands
+    produces silence, and silence is indistinguishable from "the system absorbed it
+    correctly" — so the run looks like evidence of robustness and is evidence of nothing.
+    """
+    import busybody_compose_run as bcr
+    from busybody_compose import BuildCtx
+
+    real, inert = [], []
+
+    bcr.TRAITS["_t_real"] = {"name": "_t_real", "phase": "build", "layer": "cli",
+                             "fn": lambda ctx: ctx.cli.append("--tier=thin")}
+    bcr.TRAITS["_t_inert"] = {"name": "_t_inert", "phase": "build", "layer": "cli",
+                              "fn": lambda ctx: None}
+    try:
+        ctx = BuildCtx(proj=Path("/nonexistent"))
+        inert = bcr._apply_traits(["_t_real", "_t_inert"], ctx)
+        real = ctx.cli
+    finally:
+        bcr.TRAITS.pop("_t_real", None)
+        bcr.TRAITS.pop("_t_inert", None)
+
+    assert real == ["--tier=thin"], "the live trait did not act; the fixture is wrong"
+    assert inert == ["_t_inert"], (
+        f"expected only the no-op trait to be reported inert, got {inert}. A trait that "
+        f"fires and leaves the injection point unchanged never reached the target."
+    )
+
+
+def test_the_snapshot_sees_every_kind_of_mutation_a_trait_makes():
+    """The injection-point check is only as good as what the snapshot can see.
+
+    Every trait in this catalogue acts by mutating its context — appending to a list,
+    setting a dict key, rebinding a scalar, appending a callable to `post`. If the snapshot
+    missed one of those shapes, real traits would be reported inert and the check would be
+    noise that everyone learns to skip.
+    """
+    import busybody_compose_run as bcr
+    from busybody_compose import BuildCtx, RunCtx
+
+    mutations = [
+        ("append to a list", lambda c: c.cli.append("-o")),
+        ("set a dict key", lambda c: c.files.__setitem__("a.py", "x")),
+        ("rebind a scalar", lambda c: setattr(c, "entry", "other.py")),
+        ("flip a bool", lambda c: setattr(c, "runnable", False)),
+        ("append a callable", lambda c: c.post.append(lambda p: None)),
+    ]
+    for label, mutate in mutations:
+        ctx = BuildCtx(proj=Path("/nonexistent"))
+        before = bcr._snapshot(ctx)
+        mutate(ctx)
+        assert bcr._snapshot(ctx) != before, f"the snapshot cannot see: {label}"
+
+    rctx = RunCtx()
+    before = bcr._snapshot(rctx)
+    rctx.env["HOME"] = "/nowhere"
+    assert bcr._snapshot(rctx) != before, "the snapshot cannot see a run-phase env change"
+
+
+def test_a_harness_finding_never_reaches_the_findings_ledger():
+    """`inert` is a statement about busybody. The ledger is the record of what haru-pack did.
+
+    Mixing them would put busybody's own bugs into `--triage`, ranked against product
+    defects, which is the exact category error the `blame` field and the CASE-ERROR outcome
+    already exist to prevent one level down.
+    """
+    import ast
+    import inspect
+
+    from busybody_sweep import _finish_compose, _run_one_stack
+
+    ledger_src = ast.unparse(ast.parse(inspect.getsource(_finish_compose)))
+    assert '"inert"' not in ledger_src and "'inert'" not in ledger_src, (
+        "_finish_compose names `inert` in the ledger-row field list. A test-infrastructure "
+        "finding must not be recorded as a product finding."
+    )
+    stack_src = ast.unparse(ast.parse(inspect.getsource(_run_one_stack)))
+    assert "harness_finding" in stack_src, (
+        "an inert trait is no longer journalled under its own record kind, so nothing "
+        "distinguishes it from a product finding in the journal"
+    )

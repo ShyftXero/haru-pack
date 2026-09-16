@@ -97,7 +97,7 @@ def venv_info(venv: Path) -> tuple[str, list[str]]:
 def render(disc: dict, deps: list[str], learned_from_venv: bool = False) -> str:
     ep = disc["entrypoint"]
     ep_toml = '"%s"' % ep[0] if len(ep) == 1 else "[" + ", ".join('"%s"' % x for x in ep) + "]"
-    py = disc.get("python") or "3.12"
+    py = disc.get("python") or "3.13"
     L = [
         "# haru_pack.toml — declarations for `haru-pack build`.",
         "# Most fields are auto-discovered; keep only what you want to override.",
