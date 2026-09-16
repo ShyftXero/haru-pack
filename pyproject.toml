@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "haru-pack"
 dynamic = ["version"]
-description = "Pack a Python project (PEP 723 script or full project) into a single, EV-signable native launcher that stages uv + a standalone Python and runs it like a compiled binary."
+description = "Pack a Python project (PEP 723 script or full project) into a single, EV-signable native launcher with Windows as a first-class target and primary deployment goal."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
