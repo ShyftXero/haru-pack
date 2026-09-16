@@ -5,6 +5,34 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### The vendored XZ decoder is now provenance-CHECKED, not just recorded
+
+`src/haru_pack/launcher/xz/PROVENANCE.md` has always said where the ~3 400 lines of vendored C
+came from; nothing ever checked that the record was true. `tools/verify-vendored-xz.py` closes
+that: it fetches the pinned upstream tag, checks the archive against the recorded SHA-256, and
+compares every vendored file byte-for-byte with the upstream file it claims to be — refusing
+any vendored `.c`/`.h` with no upstream mapping. `INV-PAYLOAD-05` already compared vendored
+files against per-file digests recorded in this same repo; both halves of that check lived
+here, so an edited `.c` with its digest updated to match passed cleanly regardless. The
+tarball's SHA-256 was the only link to something outside the repo, and it lived nowhere but
+prose.
+
+Run: the tarball hashes to the recorded `ee12fa8c…8977d` and all eight files are
+byte-identical to upstream `v2024-12-30`, no local modifications. `.github/workflows/vendored-xz.yml`
+runs it Mondays, on dispatch, and on any push touching the vendored tree — not in `ci.yml`,
+because it needs the network and the gate on every push must not depend on GitHub being up.
+The case worth the weekly run is a **moved tag**: `v2024-12-30` resolving to different bytes
+than it did when vendored would be a supply-chain event in someone else's repository, invisible
+from here any other way.
+
+`PROVENANCE.md` also gains the upstream path for each vendored file and answers the question
+every security reader will ask: this is **xz-embedded**, not xz-utils. CVE-2024-3094 was
+injected into xz-utils release tarballs via `build-to-host.m4` and was absent from that
+project's git tree; xz-embedded is a separate decoder-only codebase with no autotools, no
+build scripts and no compressor, and the vendored tag postdates that discovery by nine months.
+Shared authorship is why the question comes up — the answer offered is the verification
+command, not the name.
+
 ### A staged thick tree stops carrying ~90 MB of duplicate interpreter bytes
 
 On POSIX the launcher now stages a `.haru-links` alias (`bin/python`, `libpython…`, the ~1000
