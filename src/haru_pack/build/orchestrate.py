@@ -89,6 +89,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           obfuscate: str = "none", obfuscate_args=(),
           python: str = "", wine: bool = False, encrypt: bool = False,
           entry_point: str = "", shake: bool = False, shake_keep=(),
+          slim_python: bool = False,
           env_canary: str = "", env_canary_random: bool = False,
           stub_env_secret_canary: str = "", stub_env_uv_ver_canary: str = "",
           stub_env_source_url_canary: str = "", stub_env_base_path_canary: str = "",
@@ -138,13 +139,15 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         manifest["inject"] = injects
 
     shake_report: dict = {}
+    slim_report: dict = {}
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         try:
             payload_dir = assemble_payload(source, manifest, tier, tgt, pyver, tdp / "asm",
                                            wine, sources=sources, log=log, shake=shake,
                                            shake_keep=shake_keep,
-                                           shake_report=shake_report)
+                                           shake_report=shake_report,
+                                           slim=slim_python, slim_report=slim_report)
         except shake_mod.ShakeError as e:
             # A shake that cannot be PROVEN safe is a failed build, not a smaller one. The
             # alternative — warn and ship the unshaken payload — hands the operator a
@@ -190,7 +193,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                    compiler=tc["compiler"], out=out, enc=enc, manifest=manifest, pyver=pyver,
                    canary=canary, reap=reap, overwrite=overwrite, ram_only=ram_only,
                    base_path=base_path, source_url=source_url, unpacked_bytes=unpacked_bytes,
-                   shake_report=shake_report)
+                   shake_report=shake_report, slim_report=slim_report)
     emitkit.write_nim_kit(emit_nim, info=info, tgt=tgt, provider=provider, payload=payload,
                           stub_config=sc_bytes, flags=flags, source_url=source_url, out=out,
                           say=say)

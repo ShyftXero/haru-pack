@@ -139,7 +139,8 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
                      python: str, workdir: Path, wine: bool = False,
                      sources: Sources | None = None, eager_deps: bool = False,
                      log=None, shake: bool = False, shake_keep=(),
-                     shake_report: dict | None = None) -> Path:
+                     shake_report: dict | None = None, slim: bool = False,
+                     slim_report: dict | None = None) -> Path:
     sources = sources or Sources()
     tgt = target if isinstance(target, Target) else Target.parse(target)
     _check_shake_preconditions(shake, tier, tgt, manifest)
@@ -155,7 +156,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
         thick_mod.stage(payload=payload, vendor=vendor, manifest=manifest, source=source,
                         tgt=tgt, python=python, wine=wine, sources=sources, log=log,
                         shake=shake, shake_keep=shake_keep, shake_report=shake_report,
-                        workdir=workdir)
+                        workdir=workdir, slim=slim, slim_report=slim_report)
     _warn_post_install_at_thick(manifest, tier, log)
 
     manifest.pop("script_dependencies", None)   # build-time only; not for the launcher

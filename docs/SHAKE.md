@@ -185,10 +185,16 @@ the interpreter rulepack and the dev-group drop, and is not worth the build time
 
 ## Related
 
+- `--slim-python`, the sibling flag: [`SLIM.md`](SLIM.md). It drops a **fixed, known-unused**
+  slice of the bundled interpreter (pip, ensurepip, tkinter/tcl-tk, idlelib, pydoc_data, C
+  headers, man pages) with no test suite required — where `--shake` only prunes the
+  interpreter on a traced observation. Kept a separate flag on purpose; the tkinter trap is
+  the same one, and `SLIM.md` states it.
 - Tiers, and why thick carries what it carries: [`TIERS.md`](TIERS.md)
 - `tools/file-trace.py` — the tracer as a standalone diagnostic. Answers "what does this
   command actually open, under this directory, biggest-unused first" for any command, not
   just a haru-pack payload.
-- `INV-SHAKE-01` … `INV-SHAKE-04` in [`../INVARIANTS.md`](../INVARIANTS.md).
+- `INV-SHAKE-01` … `INV-SHAKE-05` in [`../INVARIANTS.md`](../INVARIANTS.md).
   `INV-SHAKE-04` is `proposed`, not implemented: a shaken binary does not yet fail at
-  startup with a pointer to its own receipt when a pruned import is hit.
+  startup with a pointer to its own receipt when a pruned import is hit. `INV-SHAKE-05`
+  governs `--slim-python` (see [`SLIM.md`](SLIM.md)).

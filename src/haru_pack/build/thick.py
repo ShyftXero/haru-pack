@@ -18,6 +18,7 @@ from ..bundle import (bundle_python, install_dev_tools, run_bundle_step,
                       run_bundle_steps_wine, warm_cache_and_lock, warm_cache_for_script,
                       warm_cache_windows)
 from ..entrypoints import verify_console_script
+from . import slim as slim_mod
 from .errors import BuildError
 from .tree import target_is_host
 
@@ -89,7 +90,7 @@ def _stage_script_dependencies(*, manifest: dict, vendor: Path, source: Path, py
 
 def stage(*, payload: Path, vendor: Path, manifest: dict, source: Path, tgt, python: str,
           wine: bool, sources, log, shake: bool, shake_keep, shake_report,
-          workdir: Path) -> None:
+          workdir: Path, slim: bool = False, slim_report: dict | None = None) -> None:
     """Everything `--thick` adds to a payload, in order."""
     steps = manifest.get("bundle") or []
     if steps and not tgt.is_host and not wine:
@@ -98,6 +99,13 @@ def stage(*, payload: Path, vendor: Path, manifest: dict, source: Path, tgt, pyt
             f"{tgt} from here. Re-run with --wine, build --thick on a {tgt} machine, or "
             f"fetch by URL.")
     py = bundle_python(tgt, vendor, version=python, sources=sources)
+    # ORDER IS THE INVARIANT (INV-SHAKE-05): the interpreter is fetched and digest-verified
+    # by `bundle_python` (INV-SUPPLY-01) BEFORE `--slim-python` removes a single file, so the
+    # provenance chain is "verified PBS artifact, then these N files removed by us". Moving
+    # this above `bundle_python` prunes an unverified tree — do not.
+    slim_rep = slim_mod.maybe_slim(vendor / "python", payload, slim=slim, log=log)
+    if slim_report is not None and slim_rep:
+        slim_report.update(slim_rep)
     if manifest.get("kind") == "project" or steps:
         app_dir = payload / manifest["app_subdir"]
         cache = vendor / "cache"; cache.mkdir(parents=True, exist_ok=True)

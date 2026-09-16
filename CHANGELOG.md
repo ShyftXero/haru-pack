@@ -5,6 +5,26 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### `--slim-python`: drop the ~9.5 MB of interpreter furniture a packed app never touches
+
+A `--thick` binary bundles python-build-standalone unmodified, and ~9.5 MB zipped of it is
+furniture most packed apps never reach: tcl/tk + tkinter, pip in the interpreter's
+site-packages, ensurepip's bundled wheels, `share/man`, the C headers under `include/`,
+idlelib, pydoc_data. The new **opt-in** `--thick --slim-python` removes that fixed set.
+
+- **Never the default.** A build without the flag prunes nothing, so the staged interpreter
+  stays byte-for-byte the pinned published artifact — which is what makes `INV-SUPPLY-01`'s
+  digest check repeatable by a third party.
+- **Prune only after verification, and record it.** The prune runs *after* `bundle_python`
+  fetches and digest-verifies the interpreter, and every removed path (and size) lands on the
+  build receipt, so the provenance reads "verified PBS artifact, then these N files removed by
+  haru-pack" (`INV-SHAKE-05`).
+- **Distinct from `--shake`, not folded into it.** `--shake` prunes on a traced test run and
+  refuses without a suite; `--slim-python` drops a known-unused set with no suite required.
+- **The tkinter trap:** a project that imports `tkinter`, or shells out to pip/ensurepip at
+  runtime, must NOT use `--slim-python` — it is opt-in because that safety cannot be proven
+  statically. See `docs/SLIM.md`. Closes #43.
+
 ### Four README claims checked against the code; four were wrong
 
 Eli asked whether two paragraphs of the "Decisions" section were accurate. Reading every

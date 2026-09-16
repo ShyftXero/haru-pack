@@ -61,6 +61,14 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                    "files nothing touched; refuses to ship if the suite then fails"),
           shake_keep: List[str] = typer.Option(None, "--shake-keep", metavar="GLOB",
               help="never prune paths matching GLOB (repeatable)"),
+          slim_python: bool = typer.Option(False, "--slim-python",
+              help="thick only: after the interpreter is fetched and digest-verified, remove "
+                   "a fixed known-unused set from it — pip, ensurepip, tkinter/tcl-tk, "
+                   "idlelib, pydoc_data, C headers and man pages (terminfo is kept). No test "
+                   "suite required, unlike --shake. TRAP: a project that imports tkinter, or "
+                   "shells out to pip/ensurepip at runtime, must NOT use this — it is opt-in "
+                   "because that safety cannot be proven statically. Every removed path is "
+                   "recorded on the build receipt. See docs/SLIM.md"),
           env_canary: str = typer.Option("", "--env-canary", metavar="TOKEN",
               help="canary prefix for ALL stub knobs (default HARU); knob K is read at runtime "
                    "as <TOKEN>_<K> (e.g. HARU_SECRET). Must match ^[A-Za-z_][A-Za-z0-9_]*$"),
@@ -136,7 +144,8 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                geo_restrict_consensus=geo_restrict_consensus, python=python,
                entry_point=entry_point,
                wine=wine, obfuscate=obfuscate, obfuscate_args=obfuscate_args,
-               shake=shake, shake_keep=shake_keep, env_canary=env_canary,
+               shake=shake, shake_keep=shake_keep, slim_python=slim_python,
+               env_canary=env_canary,
                env_canary_random=env_canary_random,
                stub_env_secret_canary=stub_env_secret_canary,
                stub_env_uv_ver_canary=stub_env_uv_ver_canary,
