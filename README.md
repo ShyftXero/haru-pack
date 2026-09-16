@@ -198,8 +198,10 @@ haru-pack stages a `uv` binary and gets out of the way.
 
 **The launcher is Nim.** It has to be a real native executable Windows will let you
 Authenticode-sign, and it has to cross-compile from Linux without a Windows machine. Nim
-compiles to C and does both, in a ~500-line stub. Why not rewrite it in Zig, given a `zig cc`
-is already pinned? Costed and declined in [`docs/COMMON_CRITIQUES.md`](docs/COMMON_CRITIQUES.md).
+compiles to C and does both. It is ~2 400 lines of Nim across seven modules — staging and
+verification is most of it, `main.nim` itself is under 400 — plus ~3 400 lines of vendored C
+for the XZ decoder. Why not rewrite it in Zig, given a `zig cc` is already pinned? Costed and
+declined in [`docs/COMMON_CRITIQUES.md`](docs/COMMON_CRITIQUES.md).
 
 **Encryption protects the binary at rest; it cannot protect a secret from someone who runs
 it.** The launcher stages the payload to disk in plaintext so the interpreter can run it, and
@@ -222,13 +224,19 @@ with `--target linux-aarch64`. You need no toolchain on the Pi to get a Pi binar
 own Nim and haru-pack will use it — then it is yours to maintain.)
 
 **Every artifact haru-pack fetches with its own downloader is pinned.** `uv`, the Python
-interpreter, and the choosenim *installer* are each checked against a SHA-256 in
-[`pins.toml`](src/haru_pack/pins.toml) before unpacking. No pin means the build refuses; it
-does not fall back to trusting TLS. Three things that does **not** cover, because haru-pack
-does not fetch them: the Nim compiler itself (choosenim's business), the PyPI sdists the flex
-harness pulls, and — the gap that matters, because it is in every customer binary — the nimble
-libraries linked into the launcher, which are pinned to exact versions but never
-digest-checked.
+interpreter, the `zig` toolchain, and the choosenim *installer* are each checked against a
+SHA-256 in [`pins.toml`](src/haru_pack/pins.toml) before unpacking. No pin means the build
+refuses; it does not fall back to trusting TLS.
+
+Two things that does **not** cover, because haru-pack does not fetch them: the Nim compiler
+itself (choosenim's business) and the PyPI sdists the flex harness pulls. And one it fetches
+but does not control, which is the gap that matters because it ends up in every customer
+binary: **the nimble libraries linked into the launcher are not pinned at link time.**
+`bootstrap` installs `zippy`, `puppy`, `parsetoml` and `nimcrypto` at exact versions, but
+`compile_launcher` then runs a bare `nim c` with no lockfile, no project `.nimble` and no
+`--nimblePath` — so Nim links the *highest* version sitting in the package directory,
+whatever that happens to be. Pinning the installer controls which versions arrive, not which
+one gets compiled in. `INV-SUPPLY-02`, still `proposed`.
 
 **Mirrors change where, never whether.** Point `[sources]` at a mirror if you cannot reach
 github.com. The pin is chosen by the artifact's upstream identity *before* the URL is
@@ -256,8 +264,10 @@ fails on the customer's machine, which is the worst place to find out.
 regress, each with a *red-path*: the exact edit that makes its test fail. CI enforces both
 halves — that every `active` entry is claimed by a test, and that the claiming tests actually
 run. A claiming test that **skips** fails the gate too, which is what makes a green run mean
-something: a CI job with no Nim installed used to exit 0 with five active invariants defended
-by nothing that ran. This exists because an audit found five documented, dated "Verified"
+something: a CI job with no Nim installed used to exit 0 with **fourteen** active invariants
+whose every claiming test skipped — the payload-digest check itself (`INV-LAUNCH-01`) among
+them. Measured, not estimated: hide Nim, run the claimants, count what never executed.
+This exists because the first adversarial review found five documented, dated "Verified"
 security claims here that were never implemented.
 
 ## Commands

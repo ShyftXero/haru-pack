@@ -11,9 +11,13 @@ fallback: each would be a second and third way for this to behave differently on
 else's machine, which is exactly the failure mode this project keeps finding in itself.
 
 Nim goes into haru-pack's own data directory, with `CHOOSENIM_DIR` and `NIMBLE_DIR` pointed
-there too. The system's Nim is ignored, and the user's `~/.nimble` is left alone: a
-packaging tool should not quietly take over a global toolchain, and it should not behave
-differently depending on what the host happens to have lying around.
+there too. haru-pack never *installs* into the system's Nim and leaves the user's `~/.nimble`
+alone: a packaging tool should not quietly take over a global toolchain.
+
+Read that as a statement about installing, not about resolving — `bootstrap.find_nim` prefers
+the managed Nim but does fall back to one on `PATH`, which is what makes "bring your own Nim"
+work on an arm64 host where choosenim publishes nothing. So a build CAN use a system Nim; it
+is `install_nim` and `find_managed_nim` that never touch one.
 
 ## Build hosts vs targets — these are not the same list
 
