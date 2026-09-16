@@ -1,0 +1,51 @@
+name: vendored-xz
+
+# Prove the vendored XZ decoder is still upstream's code, unmodified.
+#
+# WHY THIS IS NOT IN ci.yml
+#
+# It needs the network to fetch the upstream tarball, and a unit test that reaches the
+# internet is a unit test that fails when GitHub has a bad afternoon. `ci.yml` gates every
+# push and must not depend on a third party being up.
+#
+# WHAT IT CATCHES THAT THE UNIT TEST CANNOT
+#
+# `INV-PAYLOAD-05` (tests/test_uv_compression.py) checks the vendored files against the
+# per-file digests in PROVENANCE.md. Both halves of that live in this repo, so a single
+# commit that edits a .c file AND updates its recorded digest passes cleanly. The tarball
+# digest in PROVENANCE.md is the only link to upstream, and nothing checked it until this
+# workflow existed.
+#
+# It also catches a MOVED TAG. `v2024-12-30` pointing at different bytes than it did on
+# 2026-09-10 is a supply-chain event, and the only way to see it is to re-fetch and compare.
+# That is the case worth running this weekly for: it is not our repo that would change.
+#
+# On failure, do NOT update the recorded digest to make it green. Find out why it changed.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"        # Mondays, 06:00 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/haru_pack/launcher/xz/**"
+      - "tools/verify-vendored-xz.py"
+      - ".github/workflows/vendored-xz.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: vendored xz is byte-identical to upstream
+        run: python tools/verify-vendored-xz.py --tags
+
+      - name: the in-repo digest record also agrees
+        run: |
+          python -m pip install -q -e .
+          python -m pytest tests/test_uv_compression.py \
+            -k the_vendored_decoder_matches_its_recorded_digests -q

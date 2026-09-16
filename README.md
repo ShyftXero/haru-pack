@@ -238,6 +238,16 @@ binary: **the nimble libraries linked into the launcher are not pinned at link t
 whatever that happens to be. Pinning the installer controls which versions arrive, not which
 one gets compiled in. `INV-SUPPLY-02`, still `proposed`.
 
+The one piece of third-party **source** in the launcher is handled differently again: the XZ
+decoder is ~3 400 lines of C vendored from
+[xz-embedded](https://github.com/tukaani-project/xz-embedded) (the decoder the Linux kernel
+boots with), copied unmodified and reviewable in a diff rather than fetched at build time.
+`python tools/verify-vendored-xz.py` re-downloads the pinned upstream tag and proves every
+vendored byte matches it; a weekly workflow runs it, which is also how a *moved tag* would be
+noticed. Each file's upstream path, the license, what was deliberately left out, and why this
+is not the project that had the 2024 backdoor are in
+[`PROVENANCE.md`](src/haru_pack/launcher/xz/PROVENANCE.md).
+
 **Mirrors change where, never whether.** Point `[sources]` at a mirror if you cannot reach
 github.com. The pin is chosen by the artifact's upstream identity *before* the URL is
 rewritten, so a hostile mirror gets you a failed build, not a compromised one.

@@ -28,14 +28,20 @@ needs nothing preinstalled.
 
 ## What is vendored, and what is deliberately not
 
-| File | Lines | Role |
-|---|---|---|
-| `xz.h` | 448 | public API |
-| `xz_dec_lzma2.c` | 1345 | LZMA2 decoder |
-| `xz_dec_stream.c` | 984 | `.xz` container framing |
-| `xz_crc32.c` | 58 | CRC32 for the stream check |
-| `xz_private.h`, `xz_stream.h`, `xz_lzma2.h` | 453 | internal headers |
-| `xz_config.h` | 138 | upstream's userspace (non-kernel) config |
+Every file is copied **unmodified**. The upstream path is given so the vendoring can be
+re-derived by hand from the tarball above — and `tools/verify-vendored-xz.py` does exactly
+that, automatically (see "Verifying it", below).
+
+| File | Lines | Upstream path in the tarball | Role |
+|---|---|---|---|
+| `xz.h` | 448 | `linux/include/linux/xz.h` | public API |
+| `xz_dec_lzma2.c` | 1345 | `linux/lib/xz/xz_dec_lzma2.c` | LZMA2 decoder |
+| `xz_dec_stream.c` | 984 | `linux/lib/xz/xz_dec_stream.c` | `.xz` container framing |
+| `xz_crc32.c` | 58 | `linux/lib/xz/xz_crc32.c` | CRC32 for the stream check |
+| `xz_private.h` | 189 | `linux/lib/xz/xz_private.h` | internal header |
+| `xz_stream.h` | 61 | `linux/lib/xz/xz_stream.h` | internal header |
+| `xz_lzma2.h` | 203 | `linux/lib/xz/xz_lzma2.h` | internal header |
+| `xz_config.h` | 138 | `userspace/xz_config.h` | upstream's userspace (non-kernel) config |
 
 **Not vendored:** `xz_dec_bcj.c` (BCJ branch-conversion filters), `xz_crc64.c`,
 `xz_dec_syms.c` (kernel module symbol exports), `xz_dec_test.c`, `xz_sha256.c`. The build
@@ -60,9 +66,44 @@ same commit or the decoder will reject the stream at runtime, on the customer's 
 The aarch64 run used the same `XZ_SINGLE` call shape as `xzdec.nim` against the same stream
 the build produces, so it exercises the production path rather than a toy input.
 
+## "Is this the library that had the backdoor?" — no, and here is how to check
+
+The 2024 backdoor (CVE-2024-3094) was in **xz-utils**, a different project: the payload was
+injected into `liblzma` through `build-to-host.m4` in the *release tarballs*, and was not
+present in that project's git tree. This is **xz-embedded** — a separate, much smaller
+decoder-only codebase, the one the Linux kernel carries in `lib/xz/` to boot XZ-compressed
+kernels. It has no autotools, no build scripts, and no compressor. The tag vendored here
+(`v2024-12-30`) postdates the xz-utils discovery by nine months.
+
+Both projects list Lasse Collin as author, which is why the question comes up. The answer
+this repository can actually offer is not "trust the name" — it is that every byte of the
+vendored C is checked against the upstream archive, and the archive against a digest recorded
+here, by a command you can run yourself.
+
+## Verifying it
+
+```sh
+python tools/verify-vendored-xz.py          # add --tags to list upstream releases
+```
+
+Fetches the tag above, checks the archive against the recorded SHA-256, and compares every
+vendored file byte-for-byte with the upstream file it came from. This is the only check that
+reaches **outside** this repository, and that is the point: `INV-PAYLOAD-05` proves the
+vendored files match the digests recorded at the bottom of this page, but both halves of that
+live in this repo, so one commit that edits a `.c` and updates its digest would pass. The
+tarball digest is the link to upstream, and `verify-vendored-xz.py` is what checks it.
+
+It also catches a **moved tag** — `v2024-12-30` resolving to different bytes than it did on
+2026-09-10 would be a supply-chain event in someone else's repository, invisible from here
+any other way. `.github/workflows/vendored-xz.yml` runs it weekly for that reason.
+
+If it ever fails, do **not** update the recorded digest to make it green. Find out why the
+bytes changed first.
+
 ## Updating it
 
-1. Download the new tag's tarball and record its SHA-256 in the table above.
+1. Download the new tag's tarball and record its SHA-256 in the table above, then run
+   `python tools/verify-vendored-xz.py` — it re-derives every file from that archive.
 2. Copy the same file list. Do not add files without reading them.
 3. Re-run `pytest tests/test_uv_compression.py`, which round-trips a real payload through
    the vendored decoder on the host and asserts byte-identity.
