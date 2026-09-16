@@ -122,7 +122,8 @@ import busybody_traits           # noqa: E402,F401  (the composable trait catalo
 
 # ── re-exported so `import busybody as bb` still reaches what it always did ────────────
 import busybody_config as cfg  # noqa: E402
-from busybody_cases_exam import EXAMS, _exam_script, _sit_exam  # noqa: E402,F401
+from busybody_cases_exam import (EXAM_PACKAGES, NO_SUITE, exam_project_from_root,  # noqa: E402,F401
+                                 sit_exam, top_n_packages)
 from busybody_cases_reveng import _reveng_build  # noqa: E402,F401
 from busybody_cli import main  # noqa: E402
 from busybody_compose_run import (_build_composed, _elf_machine, _payload_members,  # noqa: E402,F401

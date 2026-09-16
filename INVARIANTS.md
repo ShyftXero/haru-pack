@@ -100,9 +100,12 @@ OWN test suite from inside the thick binary with the network denied at the proce
 This is a stronger statement than a hello-world fixture can make. `import numpy` succeeds
 long before numpy is usable — the failure modes of a bundled native package live in the
 parts an import never touches: a lazily-loaded `.so`, an f2py-generated extension, a
-packaged data file. Checked across all 25 top-PyPI packages, only these two ship a runnable
-suite in the wheel; the other 23 would need sdists, which is a second acquisition path for
-no extra assurance.
+packaged data file. The figures above are the WHEEL-path measurement: checked across all 25
+top-PyPI packages, only numpy and certifi ship a runnable suite in the wheel. As of
+2026-09-16 the examiner sources each package's suite from its SDIST instead (INV-CHAOS-15),
+reusing the flex exam's `tools/exam_fetch`, so it now covers any top-N package rather than
+that pair — and numpy and certifi, whose suites ride only in the wheel, are themselves
+recorded honestly as "no test suite in sdist".
 Note: A vacuous pass is prevented twice over. The generated script verifies the test paths
 exist and exits 2 with `PAYLOAD INCOMPLETE` if they do not, and pytest itself returns 5
 rather than 0 when it collects nothing. The success marker is printed only on rc == 0.
@@ -685,6 +688,35 @@ red on every non-clean journal. Walked 2026-09-12 on this Linux host.
 Source: adopted from lotek BusyBody #418/#682 (analyze doubles as a gate; refuse a false-clean).
 docs/BUSYBODY.md. Found by auditing haru-pack's `--analyze` against lotek's false-clean hardening.
 Territory: tools/busybody*.py, tools/busybody_analyze.py, tests/test_busybody_ledger.py
+
+### INV-CHAOS-15
+Status: active
+Statement: The examiner sources each package's real test suite from its SDIST — reusing
+`tools/exam_fetch` (`pypi_meta`/`fetch_sdist`/`locate_suite`/`test_deps`/`make_project`), never a
+forked copy — so it covers ANY top-N package rather than a hardcoded pair, and records "no test
+suite in sdist" rather than reporting a pass it did not run. A package whose sdist carries no test
+tree yields NO-SUITE, and one whose suite errors is a real result, not a skip.
+Actors: an operator (or a reviewer) who reads a green examiner run as "a thick payload carried a
+WORKING library". A wheel-only examiner that silently covers 2 of N — or one that fakes a pass for
+a package it never actually ran a suite for — is the false assurance this forbids.
+Assets: the honesty of the examiner's coverage. The exam persona is the strongest statement the
+harness makes about a packed library (it runs the library's OWN suite, offline); a claim that
+tests a hardcoded pair while reading as "any package", or that reports a pass with no suite behind
+it, makes every other exam result suspect.
+Red-path: In `busybody_cases_exam.exam_project_from_root` replace the `if kind == "none": return
+None, NO_SUITE` branch with `return proj, "faked"`, so a suiteless sdist yields a project instead
+of the honest no-suite verdict; `test_a_sdist_with_no_test_tree_is_no_suite_not_a_pass` goes red
+(a project was written for a package that ships no suite). Separately, re-freeze the pair with
+`EXAM_PACKAGES = ("numpy", "certifi")` and `test_the_examiner_is_not_frozen_to_numpy_and_certifi`
+goes red. Separately, paste `locate_suite`'s body in as a local def and
+`test_the_examiner_reuses_exam_fetch_and_does_not_fork_it` goes red (identity broken, fork named).
+Walked 2026-09-16 on this Linux host — all three observed green->red, then restored.
+Source: 2026-09-16, issue #28. The examiner hardcoded numpy+certifi — the only two top-25 packages
+whose suite ships in the WHEEL — so it covered 2 of N. The flex exam (PR #29) had already factored
+the sdist->thick-project->offline-pytest machinery into `tools/exam_fetch`; the examiner just did
+not use it.
+Territory: tools/busybody.py, tools/busybody_cases_exam.py, tools/busybody_report.py,
+tests/test_examiner_fixtures.py
 
 ### INV-FLEX-01
 Status: active

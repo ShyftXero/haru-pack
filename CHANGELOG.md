@@ -5,6 +5,23 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### busybody's examiner now sits ANY top-N package's suite, from the sdist (#28)
+
+The `examiner` persona was hardcoded to numpy and certifi — the only two top-25 packages whose
+test suite ships in the WHEEL. Every other package's tests ride in the sdist, so the examiner
+silently covered 2 of N.
+
+It now sources each package's suite from its SDIST, reusing the flex exam's `tools/exam_fetch`
+(`pypi_meta` → `fetch_sdist` → `locate_suite` → `make_project` with `test_deps`) rather than a
+forked copy — the same sdist→thick-project→offline-pytest mechanism `tools/exam.py` proves the
+flex top-N with. The defaults are now `iniconfig` and `six` (small, fast, real sdist suites);
+`sit_exam(pkg, work)` sits any caller-supplied package, and `top_n_packages()` is the whole list.
+
+Kept honest: a package whose sdist carries no test tree yields `NO-SUITE` carrying "no test
+suite in sdist" — never a faked pass. Under the sdist mechanism numpy and certifi land there
+themselves, because their suites ship only in the wheel; that is the honest face of the
+coverage the wheel path hid. Governed by `INV-CHAOS-15` (Red-path walked 2026-09-16).
+
 ### Four README claims checked against the code; four were wrong
 
 Eli asked whether two paragraphs of the "Decisions" section were accurate. Reading every
