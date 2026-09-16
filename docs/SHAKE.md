@@ -164,6 +164,13 @@ numpy 753), 13.3 MB of interpreter, 6.3 MB of uv cache buckets.
 > pluggy, iniconfig, pygments, hatchling, editables, pathspec, tomlkit, trove-classifiers,
 > packaging) is now never downloaded instead of being pruned afterwards. Re-measure before
 > quoting this table.
+>
+> **They also predate `INV-PAYLOAD-06`** (2026-09-15), which stopped the payload storing
+> python-build-standalone's symlink targets once per alias. That takes ~35 MB off the
+> *zipped* column of any thick build, baseline and shaken alike, so both zipped figures here
+> are high by roughly that much. It does not change the unpacked column — the aliases are
+> re-created as copies at stage time — nor the "13.3 MB of interpreter" that `--shake`
+> prunes, which is measured on the unpacked tree.
 
 **Set your expectations from the floor, not the percentage.** A thick payload contains a
 `uv` binary (~55 MB unpacked, a single executable — unprunable) and a CPython. That is the
