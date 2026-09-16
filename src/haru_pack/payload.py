@@ -3,6 +3,19 @@ import io, shutil, time, zipfile
 from . import tomlio
 from pathlib import Path
 
+PAYLOAD_FORMAT = 1
+"""The payload-format version stamped into every manifest.toml (INV-PAYLOAD-07).
+
+Bump this when a change to the payload's CONTENTS — a new member, or a layout the launcher
+must understand to stage correctly — would make an OLDER launcher mis-handle a NEWER payload.
+`.haru-links` (#40) was exactly such a change: a pre-#40 launcher stages it as a plain 60 KB
+file and the ~1000 aliases it lists never appear, so `bin/python` goes missing with no error.
+
+The launcher refuses a payload whose declared format exceeds the highest it understands
+(`MaxSupportedPayloadFormat` in `launcher/main.nim`); a payload with NO key is treated as
+legacy/0 and still accepted, so pre-#44 payloads keep launching. Keep the two constants in step.
+"""
+
 # The zip/DOS date format cannot encode a year before 1980. Real payloads carry files that
 # predate it — an sdist shipped with mtime 0 (1970), a vendored artifact with a zeroed
 # timestamp — and `ZipFile.write`, which reads each file's mtime, then dies with
