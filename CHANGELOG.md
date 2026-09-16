@@ -5,6 +5,17 @@ version of any security claim lives in `INVARIANTS.md`; this file is the human-r
 
 ## 2026-09-16
 
+### A staged thick tree stops carrying ~90 MB of duplicate interpreter bytes
+
+On POSIX the launcher now stages a `.haru-links` alias (`bin/python`, `libpython…`, the ~1000
+terminfo aliases) as a **symlink** to the one stored copy instead of a full copy, so the staged
+tree on disk drops the duplicate bytes the shipped binary already stopped carrying (#41). That
+stays inside `INV-STAGE-01`: `recordTree` now records each alias as a `symlink:<target>` line and
+`verifyTree` re-checks, on every reuse, that it is still a symlink still resolving to that same
+in-stage target (a hash-verified regular file) — a link swapped for a file, a file swapped for a
+link, or an alias repointed inside the stage or out are all refused, never silently followed. On
+Windows the alias stays a copy (symlink creation is privileged). See `INV-STAGE-04`. Closes #42.
+
 ### busybody's examiner now sits ANY top-N package's suite, from the sdist (#28)
 
 The `examiner` persona was hardcoded to numpy and certifi — the only two top-25 packages whose
