@@ -756,13 +756,17 @@ proc materialiseLinks(root: string) =
   ## payload, since DEFLATE cannot dedupe across members. Now it stores each once and lists
   ## the aliases in `.haru-links`.
   ##
-  ## They are re-created as COPIES, not symlinks, and that is deliberate. `recordTree`
-  ## walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
-  ## `pcLinkToFile`: a symlink here would be absent from `.stage-files`, and `verifyTree`
-  ## only checks what was recorded (see `isRuntimeMutable`'s note). Staging a symlink would
-  ## buy disk at the cost of leaving the interpreter's own name unverified on every reuse.
-  ## So the staged tree is byte-identical to one from a payload built before this existed,
-  ## the saving is in the shipped binary, and INV-STAGE-01 is untouched.
+  ## On POSIX they are re-created as relative SYMLINKS, so the alias costs a link entry
+  ## rather than a full copy — the on-disk dedup (INV-STAGE-04), ~90 MB per staged thick
+  ## payload. That is only safe because `recordTree` now yields `pcLinkToFile` and records
+  ## each alias as a `symlink:<target> <rel>` line, and `verifyTree` re-checks on every reuse
+  ## that the path is still a symlink still pointing at the SAME in-stage target — whose own
+  ## bytes are hash-verified by its regular-file line. So the alias stays inside `.stage-files`
+  ## and INV-STAGE-01 holds; a copy would only have been a way to get it recorded at all.
+  ##
+  ## On Windows, creating a symlink is privileged, so the alias stays a COPY and is recorded
+  ## as an ordinary file. The two platforms' staged trees differ in size, not in content, and
+  ## each is verified against a manifest generated on the same machine that staged it.
   ##
   ## Same ordering rule as `expandCompressedMembers`, for the same reason: this runs before
   ## `recordTree`, so the copies are inside the sealed manifest rather than written after it.
@@ -799,25 +803,52 @@ proc materialiseLinks(root: string) =
         "payload contains both " & linkRel & " and a " & LinksName & " entry for it; " &
         "refusing to choose")
     createDir(parentDir(linkPath))
-    # Permissions come with it: `bin/python` is only useful if it is still executable.
-    copyFileWithPermissions(targetPath, linkPath)
+    when defined(posix):
+      # A RELATIVE symlink, so the staged tree stays relocatable (the cache dir can move) and
+      # the alias is deduplicated on disk instead of copied. recordTree records it as a symlink
+      # line; verifyTree re-checks it still points here. (INV-STAGE-04)
+      createSymlink(relativePath(targetPath, parentDir(linkPath)), linkPath)
+    else:
+      # Windows: symlink creation is privileged, so keep the copy. Permissions come with it —
+      # `bin/python` is only useful if it is still executable — and recordTree records it as an
+      # ordinary file.
+      copyFileWithPermissions(targetPath, linkPath)
   removeFile(table)
 
 proc recordTree(root: string): tuple[manifest: string, count: int] =
   var rels: seq[string]
-  for p in walkDirRec(root, relative = true):
+  # `pcLinkToFile` too, now that materialiseLinks stages aliases as symlinks on POSIX: a
+  # symlink absent from `.stage-files` would go unverified, which is exactly the hole the copy
+  # path used to avoid. `followFilter` stays default (`{pcDir}`), so real directories are
+  # recursed and symlinked directories are not.
+  for p in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile}, relative = true):
     let rel = p.replace('\\', '/')
     if isRuntimeMutable(rel): continue
     rels.add rel
   sort(rels)
   var sb = ""
   for rel in rels:
+    # The manifest is one entry per line, space-separated; a newline in a path would forge a
+    # second entry. Real payload paths never contain one — refuse rather than record ambiguously.
+    if '\n' in rel or '\r' in rel:
+      raise newException(StageError, "refusing to record a path containing a newline: " & rel)
+    let full = root / rel
     when defined(posix):
+      if symlinkExists(full):
+        # A deduplicated alias (INV-STAGE-04). Record it AS a symlink and its in-stage target,
+        # not the followed bytes: the target is itself a recorded, hash-verified regular file,
+        # so "still a symlink, still pointing here" is what keeps the alias accountable without
+        # storing the bytes a second time. `expandSymlink` returns the relative value we wrote.
+        let tgtRel = normalizedPath(parentDir(rel) / expandSymlink(full)).replace('\\', '/')
+        if '\n' in tgtRel or '\r' in tgtRel:
+          raise newException(StageError, "refusing to record a symlink target with a newline: " & rel)
+        sb.add "symlink:" & tgtRel & " " & rel & "\n"
+        continue
       try:
-        let perms = getFilePermissions(root / rel)
-        setFilePermissions(root / rel, perms - {fpGroupWrite, fpOthersWrite})
+        let perms = getFilePermissions(full)
+        setFilePermissions(full, perms - {fpGroupWrite, fpOthersWrite})
       except OSError: discard
-    sb.add sha256File(root / rel) & " " & rel & "\n"
+    sb.add sha256File(full) & " " & rel & "\n"
   result = (sb, rels.len)
 
 proc verifyTree(root, manifest: string) =
@@ -825,12 +856,46 @@ proc verifyTree(root, manifest: string) =
     if line.len == 0: continue
     let sp = line.find(' ')
     if sp <= 0: raise newException(StageError, "malformed " & FilesName & " entry: " & line)
-    let want = line[0 ..< sp]
+    let tok = line[0 ..< sp]
     let rel = line[sp + 1 .. ^1]
     let full = root / rel
+    if tok.startsWith("symlink:"):
+      # A deduplicated alias (INV-STAGE-04). Three things must still hold, and none of them is
+      # "follow it and hash whatever is there" — that silent follow is how this class of bug
+      # comes back. `fileExists`/`sha256File` both follow symlinks, so a bare content check
+      # would accept a file swapped in for the link, or a link repointed at matching bytes.
+      let tgtRel = tok["symlink:".len .. ^1]
+      when defined(posix):
+        # (1) still a symlink — not a regular file (or dir) swapped in where the alias was.
+        if not symlinkExists(full):
+          raise newException(StageError, "staged alias is no longer a symlink: " & rel)
+        # (2) still pointing at the SAME in-stage target. Recompute the stage-relative target
+        #     from the link exactly as recordTree did; reject a repoint (at `/etc`, `..`, or a
+        #     different member). `unsafeEntryPath` rejects any target that escapes the stage.
+        let got = normalizedPath(parentDir(rel) / expandSymlink(full)).replace('\\', '/')
+        if unsafeEntryPath(tgtRel) or got != tgtRel:
+          raise newException(StageError,
+            "staged alias points somewhere new: " & rel & " -> " & got &
+            " (recorded " & tgtRel & ")")
+        # (3) the target is a real, present regular file — its own manifest line hash-verifies
+        #     its bytes, so the alias inherits that guarantee.
+        let tgtFull = root / tgtRel
+        if symlinkExists(tgtFull) or not fileExists(tgtFull):
+          raise newException(StageError,
+            "staged alias target is missing or not a regular file: " & rel & " -> " & tgtRel)
+      else:
+        # materialiseLinks never stages a symlink on Windows (it copies), so a symlink line here
+        # is a manifest from another platform — refuse rather than guess at its meaning.
+        raise newException(StageError, "unexpected symlink record on this platform: " & rel)
+      continue
     if not fileExists(full):
       raise newException(StageError, "staged file is missing: " & rel)
-    if sha256File(full) != want:
+    when defined(posix):
+      # Recorded as a regular file but now a symlink: the file->symlink swap, refused before the
+      # hash check (which would follow the link and could be satisfied by matching bytes).
+      if symlinkExists(full):
+        raise newException(StageError, "staged file is now a symlink: " & rel)
+    if sha256File(full) != tok:
       raise newException(StageError, "staged file was modified since staging: " & rel)
 
 # ---------------------------------------------------------------- .ready token

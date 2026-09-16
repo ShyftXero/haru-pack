@@ -505,7 +505,10 @@ def staged_root(out: str) -> Path:
 
 
 @pytest.mark.invariant("INV-PAYLOAD-06")
-def test_a_link_entry_is_materialised_as_a_real_copy(harness, tmp_path):
+def test_a_link_entry_is_materialised(harness, tmp_path):
+    """The alias resolves to the stored bytes and the link table is gone. HOW it is
+    materialised — a symlink on POSIX, a copy on Windows — is INV-STAGE-04's concern; here we
+    only require that the alias is present, correct, and the table cleaned up."""
     cache = tmp_path / "cache"; cache.mkdir()
     z = make_zip(tmp_path / "p.zip", linked_payload(b"vendor/alias.bin\tvendor/real.bin\n"))
     r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
@@ -516,10 +519,11 @@ def test_a_link_entry_is_materialised_as_a_real_copy(harness, tmp_path):
     assert not (root / LINKS).exists(), "the link table was left in the staged tree"
 
 
-@pytest.mark.invariant("INV-PAYLOAD-06")
-def test_a_materialised_copy_is_inside_the_recorded_manifest(harness, tmp_path):
-    """The whole reason these are copies, not symlinks: walkDirRec skips pcLinkToFile, so a
-    symlink here would be absent from .stage-files and verifyTree would never check it."""
+@pytest.mark.invariant("INV-STAGE-04")
+def test_a_materialised_alias_is_inside_the_recorded_manifest(harness, tmp_path):
+    """However it is staged, the alias MUST be in .stage-files — else verifyTree would never
+    check it. That recording is what let the copy become a symlink without a hole: recordTree
+    now yields pcLinkToFile and writes a `symlink:<target>` line for it."""
     cache = tmp_path / "cache"; cache.mkdir()
     z = make_zip(tmp_path / "p.zip", linked_payload(b"vendor/alias.bin\tvendor/real.bin\n"))
     r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
@@ -527,6 +531,9 @@ def test_a_materialised_copy_is_inside_the_recorded_manifest(harness, tmp_path):
     recorded = (staged_root(r.stdout) / ".stage-files").read_text()
     assert "vendor/alias.bin" in recorded, (
         "the alias is not in .stage-files, so verifyTree would never check it:\n" + recorded)
+    if os.name == "posix":
+        assert "symlink:vendor/real.bin vendor/alias.bin" in recorded, (
+            "on POSIX the alias must be recorded as a symlink line, not a copy:\n" + recorded)
 
 
 @pytest.mark.invariant("INV-PAYLOAD-06")
@@ -576,3 +583,94 @@ def test_a_payload_with_no_link_table_still_stages(harness, tmp_path):
     z = make_zip(tmp_path / "p.zip", GOOD_PAYLOAD)
     r = run(harness, "stage", str(z), "aabbccdd11223344", cache=cache)
     assert r.returncode == 0, r.stderr
+
+
+# ------------------------------------------------ symlink dedup on disk (INV-STAGE-04)
+#
+# On POSIX a `.haru-links` alias is staged as a symlink, not a copy, so a staged thick tree
+# stops carrying ~90 MB of duplicate interpreter bytes. That only stays inside INV-STAGE-01
+# because recordTree records the alias and verifyTree re-checks, on every reuse, that it is
+# still a symlink still pointing at the same in-stage target — never following it blind.
+
+SYMLINK_KEY = "aabbccdd11223355"
+
+
+def _stage_linked(harness, tmp_path) -> tuple[Path, Path]:
+    """Stage a payload with one aliased member; return (cache, staged_root)."""
+    cache = tmp_path / "cache"; cache.mkdir()
+    z = make_zip(tmp_path / "p.zip", linked_payload(b"vendor/alias.bin\tvendor/real.bin\n"))
+    r = run(harness, "stage", str(z), SYMLINK_KEY, cache=cache)
+    assert r.returncode == 0, r.stderr
+    return cache, staged_root(r.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks are the POSIX materialisation")
+@pytest.mark.invariant("INV-STAGE-04")
+def test_a_deduped_alias_is_staged_as_a_symlink_and_reused(harness, tmp_path):
+    """The saving itself: the alias is a symlink to the one stored copy, and a clean tree is
+    accepted on the second run (verifyTree is happy with a symlink it recorded)."""
+    cache, root = _stage_linked(harness, tmp_path)
+    alias = root / "vendor" / "alias.bin"
+    assert alias.is_symlink(), "the alias was copied, not symlinked — no on-disk dedup"
+    real = root / "vendor" / "real.bin"
+    assert real.is_file() and not real.is_symlink()
+    assert alias.read_bytes() == b"REALBYTES\n"
+    z = tmp_path / "p.zip"
+    r2 = run(harness, "stage", str(z), SYMLINK_KEY, cache=cache)
+    assert r2.returncode == 0, f"a clean symlinked tree was refused on reuse: {r2.stderr}"
+    assert staged_root(r2.stdout) == root
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks are the POSIX materialisation")
+@pytest.mark.invariant("INV-STAGE-04")
+def test_an_alias_swapped_for_a_regular_file_is_refused(harness, tmp_path):
+    """Kind check: a recorded symlink replaced by a regular file — even byte-identical — is a
+    mismatch, not a silent follow."""
+    cache, root = _stage_linked(harness, tmp_path)
+    alias = root / "vendor" / "alias.bin"
+    alias.unlink(); alias.write_bytes(b"REALBYTES\n")     # same bytes, wrong kind
+    r2 = run(harness, "stage", str(tmp_path / "p.zip"), SYMLINK_KEY, cache=cache)
+    assert r2.returncode == 3, f"a symlink swapped for a file was reused: {r2.stdout!r}"
+    assert "no longer a symlink" in r2.stderr, r2.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks are the POSIX materialisation")
+@pytest.mark.invariant("INV-STAGE-04")
+def test_a_regular_file_swapped_for_a_symlink_is_refused(harness, tmp_path):
+    """The reverse kind check: a recorded regular file replaced by a symlink is refused before
+    the hash follows the link."""
+    cache, root = _stage_linked(harness, tmp_path)
+    # A plain recorded file that is NOT an alias target, so this exercises the file branch's
+    # kind check rather than the alias's target check. It points at a real in-stage file, so
+    # `fileExists` (which follows) is true — the refusal must come from the kind, not absence.
+    victim = root / "app" / "pkg" / "mod.py"
+    victim.unlink(); victim.symlink_to("../../vendor/real.bin")
+    r2 = run(harness, "stage", str(tmp_path / "p.zip"), SYMLINK_KEY, cache=cache)
+    assert r2.returncode == 3, f"a file swapped for a symlink was reused: {r2.stdout!r}"
+    assert "now a symlink" in r2.stderr, r2.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks are the POSIX materialisation")
+@pytest.mark.invariant("INV-STAGE-04")
+def test_an_alias_repointed_outside_the_stage_is_refused(harness, tmp_path):
+    """TOCTOU guard: an alias repointed at a file OUTSIDE the stage (whose bytes an attacker
+    could swap after verification) is refused — the recorded target is exact."""
+    cache, root = _stage_linked(harness, tmp_path)
+    alias = root / "vendor" / "alias.bin"
+    alias.unlink(); alias.symlink_to("/etc/hostname")
+    r2 = run(harness, "stage", str(tmp_path / "p.zip"), SYMLINK_KEY, cache=cache)
+    assert r2.returncode == 3, f"an alias repointed outside the stage was reused: {r2.stdout!r}"
+    assert "points somewhere new" in r2.stderr, r2.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks are the POSIX materialisation")
+@pytest.mark.invariant("INV-STAGE-04")
+def test_an_alias_repointed_at_a_different_member_is_refused(harness, tmp_path):
+    """Even a repoint that stays INSIDE the stage is refused: the binding is to the exact
+    recorded target, not merely to 'somewhere under the stage'."""
+    cache, root = _stage_linked(harness, tmp_path)
+    alias = root / "vendor" / "alias.bin"
+    alias.unlink(); alias.symlink_to("../app/hello.py")
+    r2 = run(harness, "stage", str(tmp_path / "p.zip"), SYMLINK_KEY, cache=cache)
+    assert r2.returncode == 3, f"an in-stage repoint was reused: {r2.stdout!r}"
+    assert "points somewhere new" in r2.stderr, r2.stderr

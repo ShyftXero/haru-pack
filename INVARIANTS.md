@@ -1716,6 +1716,44 @@ Territory: not yet claimed. The behaviour lives in src/haru_pack/launcher/stage.
 (`stageZip`'s `<key>.tmp-<pid>` plus the atomic `moveDir`); the harness that probes it is the
 `herd` persona in tools/busybody*.py.
 
+### INV-STAGE-04
+Status: active
+Statement: On POSIX the launcher stages a `.haru-links` alias as a relative **symlink** to its
+in-stage target, not a copy — so a staged thick tree stops carrying its duplicate interpreter
+bytes (~90 MB). That stays inside INV-STAGE-01 because `recordTree` now yields `pcLinkToFile`
+and records each alias as a `symlink:<target> <rel>` line, and `verifyTree`, on every reuse,
+checks that the path is **still a symlink** **still resolving to that same in-stage target** —
+whose own bytes are hash-verified by its regular-file line — rather than following the link and
+hashing whatever it reaches. A recorded regular file that is later a symlink, an alias replaced
+by a regular file, and an alias repointed (inside the stage or out) are all refused. On Windows,
+where creating a symlink is privileged, the alias stays a copy and is recorded as an ordinary
+file; the two platforms' staged trees differ in size, not in what each is verified against.
+Actors: for the saving, not an attacker — an operator staging thick payloads on a small disk,
+each staged tree ~90 MB lighter. For the checks, anyone who can write into a staged tree between
+runs, to whom a symlink is a redirect primitive: repoint `bin/python` at `/etc` or a file whose
+bytes they can swap after verification (a TOCTOU the copy never exposed), or swap a verified
+regular file for a link to matching content.
+Assets: ~90 MB of duplicate on-disk bytes per staged thick payload, and INV-STAGE-01's integrity
+chain extended over the alias — the launcher must never execute a `bin/python` that now points
+somewhere it did not record. The target is required to be a present, non-symlink regular file, so
+the alias can only resolve to a member the manifest itself hash-verifies.
+Red-path: two, both walked 2026-09-16 on this linux host:
+(0) drop the `got != tgtRel` target-equality check in `verifyTree`'s symlink branch — rebuild,
+stage, then repoint `vendor/alias.bin` at `/etc/hostname` and at another in-stage member. Both
+`test_an_alias_repointed_outside_the_stage_is_refused` and
+`test_an_alias_repointed_at_a_different_member_is_refused` went green-to-red: the launcher reused
+the tampered stage (exit 0 instead of 3);
+(1) force `materialiseLinks` back to `copyFileWithPermissions` on POSIX (`when false and ...`) —
+`test_a_deduped_alias_is_staged_as_a_symlink_and_reused` went red (`is_symlink()` false) and the
+on-disk saving disappeared. Both reverted before commit.
+Source: INV-PAYLOAD-06 took the *shipped-binary* saving 2026-09-15 and left the ~186 MB *staged*
+footprint as "a separate question [that] would have to solve the recording problem first" — a
+symlink was absent from `.stage-files` and so unverified. Issue #42 is that follow-up: recordTree
+records symlinks and verifyTree gained the kind + target rules that let the staged tree hold them
+without a hole. Deliberately not casual, per the issue: it touches the one file whose whole job is
+making the staged tree accountable.
+Territory: src/haru_pack/launcher/stage.nim, tests/test_stage_hardening.py
+
 ---
 
 ## SECRET — key material does not leak sideways
@@ -2118,8 +2156,8 @@ Territory: src/haru_pack/launcher/xz/, tests/test_uv_compression.py
 ### INV-PAYLOAD-06
 Status: active
 Statement: A file symlink inside the payload is stored **once**, with its aliases listed in
-`.haru-links`, and the launcher re-creates each alias as a **copy** between `extractAll` and
-`recordTree` — so the staged tree is byte-identical to one built before this existed and
+`.haru-links`, and the launcher re-creates each alias between `extractAll` and `recordTree` —
+as a **symlink** on POSIX (the on-disk dedup, INV-STAGE-04) or a **copy** on Windows — so
 every alias is inside the sealed `.stage-files` manifest. Both halves of every entry are
 treated as untrusted: a link or target path that could reach outside the stage
 (`unsafeEntryPath`), a target the payload does not contain, a collision with a real member,
@@ -2141,13 +2179,12 @@ python-build-standalone ships `bin/python` and `bin/python3` as symlinks to `pyt
 DEFLATE compresses each member independently, so the duplication survived compression:
 2 x 12,074,129 + 10,107,799 = **34.3 MB of an 84.5 MB payload**. After the fix the same
 binary is **85,405,022 -> 50,425,885 bytes**, a 41% cut, and it still runs.
-Note — why copies and not symlinks, which would also save disk at stage time: `recordTree`
-walks with `walkDirRec`, whose default yield filter is `{pcFile}` and therefore skips
-`pcLinkToFile`. A symlink would be absent from `.stage-files`, and `verifyTree` only checks
-what was recorded — so the interpreter's own name would go unverified on every reuse. The
-saving is taken in the shipped binary, where it is wanted, and not in a way that quietly
-punches a hole in `INV-STAGE-01`. Reducing the ~186 MB staged footprint is a separate
-question and would have to solve the recording problem first.
+Note — this is the *shipped-binary* saving; the *on-disk* staged tree once kept the aliases
+as copies because `recordTree` walked `walkDirRec` with its default `{pcFile}` filter and so
+skipped `pcLinkToFile` — a symlink would have been absent from `.stage-files` and gone
+unverified. `INV-STAGE-04` closed that: `recordTree` now records symlinks (as `symlink:<target>`
+lines) and `verifyTree` re-checks them, so on POSIX the alias is a symlink and the ~186 MB
+staged footprint drops by the duplicate bytes too, without punching a hole in `INV-STAGE-01`.
 Red-path: four, all walked 2026-09-15:
 (0) replace the `unsafeEntryPath` guard in `stage.materialiseLinks` with `if false:` — a
 table naming `../escape.bin` or `/etc/cron.d/x` is then materialised outside the stage.
