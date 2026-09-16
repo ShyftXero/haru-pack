@@ -3,7 +3,8 @@
 A single-file, **signable native launcher** that carries an arbitrary Python project
 (PEP 723 script *or* a full multi-folder project), stages `uv` + a standalone Python into
 per-user appdata on first run, and runs the project **as if it were a compiled binary in
-the folder the exe sits in**. Windows-first, Linux supported. Written in **Nim**.
+the folder the exe sits in**. Windows is a first-class target and a primary deployment
+goal; Linux is also supported. Written in **Nim**.
 
 > Research backing every decision here: `research/01`–`05`. TL;DR of the big one:
 > **astral `war` is NOT a builder** — it's a draft archive-format spec with *no binary
