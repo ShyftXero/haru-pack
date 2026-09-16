@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import tomlio
 from ..bundle import UV_SHA256, UV_VERSION, bundle_uv, compress_uv
+from ..payload import PAYLOAD_FORMAT
 from ..obfuscate import ObfuscationError, get_engine
 from ..sources import Sources
 from ..targets import Target
@@ -160,5 +161,10 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
 
     manifest.pop("script_dependencies", None)   # build-time only; not for the launcher
     manifest.pop("shake_declared", None)        # ditto — the launcher never re-shakes
+    # INV-PAYLOAD-07: stamp the payload-format version so a launcher can REFUSE a payload
+    # newer than it understands rather than silently mis-staging a member it does not know
+    # about (the .haru-links-as-plain-file skew #44 filed). A payload with no key is legacy/0
+    # and still accepted, so this never breaks a payload built before the field existed.
+    manifest["payload_format"] = PAYLOAD_FORMAT
     tomlio.dump(manifest, payload / "manifest.toml")
     return payload
