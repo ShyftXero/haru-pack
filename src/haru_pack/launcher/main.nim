@@ -66,11 +66,16 @@ proc findUv(stageRoot: string, m: Manifest): string =
   die("no uv binary bundled and none on PATH")
 
 proc findBundledPython(stageRoot: string): string =
-  ## Scan the staged tree for a real interpreter (robust to uv's version-alias
-  ## symlink dir, which the zip does not preserve).
+  ## Scan the staged tree for a real interpreter. python-build-standalone ships `bin/python`
+  ## and `bin/python3` as SYMLINKS to `python3.NN`; since INV-STAGE-04 the launcher stages
+  ## those aliases as on-disk symlinks (POSIX), so `walkDirRec` must yield `pcLinkToFile` or
+  ## the only names we match here (`python3`/`python`) are skipped and a thick payload looks
+  ## interpreter-less. `fileExists(py)` at the call site follows the link. On Windows the alias
+  ## stays a copy (a regular file), so the default filter would suffice there — but yielding
+  ## links is harmless on Windows and keeps one code path.
   let base = stageRoot / "vendor" / "python"
   if not dirExists(base): return ""
-  for p in walkDirRec(base):
+  for p in walkDirRec(base, yieldFilter = {pcFile, pcLinkToFile}):
     if "venv" in p.toLowerAscii: continue          # skip the stdlib venv-template python
     let fn = p.extractFilename
     when defined(windows):

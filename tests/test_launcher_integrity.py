@@ -69,11 +69,15 @@ def _fake_uv(path: Path, marker: str) -> Path:
 
 
 def make_payload_dir(root: Path, *, tier: str = "default", uv_marker: str | None = None,
-                     entrypoint: str = '["hello.py"]', bundled_python: bool = False) -> Path:
+                     entrypoint: str = '["hello.py"]', bundled_python: bool = False,
+                     python_as_symlink: bool = False) -> Path:
     """A minimal but *real* payload tree: manifest + app + (optionally) a bundled uv.
 
     `bundled_python` writes the shape `findBundledPython` looks for — vendor/python/**/bin
     /python3 — which a thick build must have before the launcher will run at all.
+    `python_as_symlink` writes the REAL python-build-standalone shape: the interpreter is
+    `python3.NN` and `python3`/`python` are symlinks to it, which INV-STAGE-04 stages as
+    on-disk symlinks — the case `findBundledPython` must handle.
     """
     root.mkdir(parents=True, exist_ok=True)
     (root / "app").mkdir(exist_ok=True)
@@ -85,7 +89,13 @@ def make_payload_dir(root: Path, *, tier: str = "default", uv_marker: str | None
     if uv_marker:
         _fake_uv(root / "vendor" / "uv", uv_marker)
     if bundled_python:
-        _fake_uv(root / "vendor" / "python" / "install" / "bin" / "python3", "STAGED_PY")
+        bindir = root / "vendor" / "python" / "install" / "bin"
+        if python_as_symlink:
+            _fake_uv(bindir / "python3.12", "STAGED_PY")
+            bindir.joinpath("python3").symlink_to("python3.12")
+            bindir.joinpath("python").symlink_to("python3.12")
+        else:
+            _fake_uv(bindir / "python3", "STAGED_PY")
     return root
 
 
@@ -308,6 +318,22 @@ def test_thick_tier_prefers_its_own_uv_over_path(release_launcher, planted_uv, t
     r = run_exe(exe, tmp_path, path_dirs=[planted_uv])
     assert "PAYLOAD_UV_RAN" in r.stdout, (r.returncode, r.stdout, r.stderr)
     assert "PATH_UV_RAN" not in r.stdout
+
+
+@pytest.mark.invariant("INV-LAUNCH-04")
+def test_thick_tier_finds_a_symlinked_interpreter(release_launcher, planted_uv, tmp_path):
+    """Regression (aaba3f7 / INV-STAGE-04): python-build-standalone ships `bin/python3` as a
+    symlink to `python3.NN`, and the launcher now stages it as an on-disk symlink. When it
+    does, the thick launcher must still find its own interpreter and run — with the default
+    `walkDirRec` filter (`{pcFile}`) `findBundledPython` skipped the symlink, found no name it
+    recognised, and every thick POSIX launch died 'no Python interpreter staged'."""
+    src = make_payload_dir(tmp_path / "payload", tier="thick", uv_marker="PAYLOAD_UV_RAN",
+                           bundled_python=True, python_as_symlink=True)
+    exe = tmp_path / "app.exe"
+    build_exe(release_launcher, build_payload_zip(src), exe)
+    r = run_exe(exe, tmp_path, path_dirs=[planted_uv])
+    assert "no Python interpreter staged" not in r.stderr, (r.returncode, r.stdout, r.stderr)
+    assert "PAYLOAD_UV_RAN" in r.stdout, (r.returncode, r.stdout, r.stderr)
 
 
 @pytest.mark.invariant("INV-LAUNCH-04")
