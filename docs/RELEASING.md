@@ -4,16 +4,18 @@
 
 ```sh
 ./scripts/cut-release.sh --check      # run the gate, tag nothing. Safe anywhere, any branch.
-./scripts/cut-release.sh 0.2.0        # verify, stamp, tag, and offer to push
+./scripts/cut-release.sh              # verify, tag the current commit, and offer to push
 ```
+
+There is no version argument: the version is **derived from the commit** you are releasing.
 
 Everything below explains why the script does what it does. You do not need it to ship —
 run `--check`, read what it prints, and the script tells you the rest.
 
 ## The model
 
-After the first release, work flows: **branch → PR → merge to `main` → stamp a `main` commit
-you like as a release.** Tags are cut from commits that are already merged and pushed. There
+After the first release, work flows: **branch → PR → merge to `main` → pick a `main` commit
+you like and release it.** Tags are cut from commits that are already merged and pushed. There
 is no release branch and no long-lived staging.
 
 That means a release is a *decision about an existing commit*, not a separate build. The
@@ -49,12 +51,22 @@ avoid the most common one (a shared `/tmp/pytest-of-$USER` owned by another uid)
 
 ## Versioning
 
-`__version__` in `src/haru_pack/__init__.py` is the single source; hatchling reads it at
-build time (`[tool.hatch.version]`). The script rewrites that line, commits it as
-`release: X.Y.Z`, and tags `vX.Y.Z`.
+The version is **git-derived** — the HEAD commit's committer date (UTC) as a single 14-digit
+segment, `YYYYMMDDHHMMSS`. `src/haru_pack/_version.py` is the one formatter; `hatch_build.py`
+(a hatchling metadata hook) bakes it into the wheel at build time, and a git checkout computes
+it live at runtime. There is nothing to stamp or bump — a release is fully determined by its
+commit, so the script takes no version argument. The tag is `vYYYYMMDDHHMMSS`.
 
-Versions are `N.N.N`, optionally with an `a`/`b`/`rc` suffix. The pattern is deliberately
-strict: a typo becomes a permanent filename on PyPI.
+**In a checkout, `haru-pack version` shows `YYYYMMDDHHMMSS+g<shorthash>`** — the extra `+g<hash>`
+pins exactly which commit you are running. **The published PyPI version drops it**: PyPI refuses
+PEP 440 local versions (the `+…` segment) on upload, so the wheel and the tag carry the bare
+timestamp. (This is the one place haru-pack diverges from lotek's identical scheme — lotek is
+deploy-only and never uploads, so it keeps the hash in its published version.)
+
+Why one 14-digit segment and not `YYYY.MM.DD.HHMMSS`: PEP 440 normalisation strips leading zeros
+from dotted components, so a dotted, zero-padded form would parse back to something the tag no
+longer matches. A single integer segment has no leading zero to strip (the year never starts with
+`0`), stays fixed-width, and sorts chronologically as both a string and a version.
 
 ## Publishing
 
@@ -72,12 +84,12 @@ The script prints the undo commands when it stops after tagging. Before the tag 
 everything is local and reversible:
 
 ```sh
-git tag -d v0.2.0          # remove the tag
-git reset --hard HEAD~1    # drop the version-bump commit
+git tag -d vYYYYMMDDHHMMSS   # remove the tag (there is no version-bump commit to undo)
 ```
 
 Once a tag is pushed and PyPI has accepted an upload, **that version is spent**. Yanking
-removes it from resolution but the filename is never reusable. Cut `0.2.1`.
+removes it from resolution but the filename is never reusable. Cut a new release from a newer
+commit — its timestamp advances automatically.
 
 ## Bumping a pinned dependency
 
