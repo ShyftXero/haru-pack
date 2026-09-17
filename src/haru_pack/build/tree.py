@@ -10,6 +10,7 @@ Split out of build.py 2026-09-13 (INV-MODULARITY-01). Behaviour unchanged.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 # INV-PAYLOAD-01: a payload is appended to a binary that gets distributed, and often
@@ -22,19 +23,83 @@ _SECRET_PATTERNS = ("*.env", ".env", ".env.*", ".envrc", ".direnv",
                     "credentials", "credentials.*", "secrets.*", "*.secret",
                     ".npmrc", ".pypirc", "service-account*.json")
 
-_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv", "*.egg-info",
-                                 "dist", "build", ".git", "haru_pack.toml", ".mypy_cache",
-                                 ".pytest_cache", ".ruff_cache", "*.exe",
+# Excluded at ANY depth — never legitimate project source wherever it appears, and (for the
+# credential patterns, INV-PAYLOAD-01) excluded even when git-TRACKED: a tracked `.env` must
+# never ship regardless of where it sits in the tree.
+_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".git", "*.exe", "haru_pack.toml",
+                                 "*.egg-info", ".mypy_cache", ".pytest_cache", ".ruff_cache",
                                  *_SECRET_PATTERNS)
+
+# Excluded ONLY at the project root: build/env artifact directories whose names also occur as
+# legitimate source subpackages. `src/haru_pack/build/` is a package — a bare "build" pattern
+# matched at ANY depth silently dropped it, shipping a binary that died with
+# `ModuleNotFoundError: No module named 'haru_pack.build'`. Anchoring to the root keeps a
+# project's top-level build output out while letting nested source through. (`.venv` is also
+# .gitignored, but `build`/`dist` are not, so the denylist — not only the .gitignore layer —
+# has to cover them.)
+_ROOT_ONLY = {"dist", "build", ".venv", "venv"}
+
+
+def _git_ignored(source: Path) -> set[Path]:
+    """Absolute paths git considers ignored under `source` (whole ignored dirs collapsed to
+    the dir). Empty when `source` is not a git work tree or git is unavailable — so a non-git
+    project's behaviour is exactly the old denylist-only one.
+
+    This is what stops a dev box's gitignored-but-present junk from being published: a 759 MB
+    `.claude/` of agent worktrees, a `.busybody/` run dir, an `emit/` toolchain cache. None of
+    it is project source; all of it is already in `.gitignore`; none of it belonged in a 15 MB
+    payload that shipped at 438 MB because the exclusion list was a fixed denylist that never
+    heard of those directories.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(source), "ls-files", "--others", "--ignored",
+             "--exclude-standard", "--directory", "-z"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if out.returncode != 0:
+        return set()
+    ignored: set[Path] = set()
+    for rel in out.stdout.split("\0"):
+        rel = rel.rstrip("/")
+        if rel:
+            ignored.add(source / rel)
+    return ignored
 
 
 def copy_app_tree(source: Path, app: Path) -> None:
-    """Copy the project (or the single script) into the payload's app directory."""
+    """Copy the project (or the single script) into the payload's app directory.
+
+    Three exclusion layers:
+      * `_IGNORE` — the always-on any-depth denylist: credential patterns (INV-PAYLOAD-01),
+        `__pycache__`, `.git`, caches. Applied even to git-TRACKED files, because a tracked
+        `.env` must never ship regardless of what `.gitignore` says.
+      * `_ROOT_ONLY` — `build`/`dist`/`.venv`/`venv`, excluded only at the project root, so a
+        top-level build dir goes but the `src/haru_pack/build/` source package stays.
+      * `.gitignore` — anything the project already ignores (a dev's `.venv`, `.claude/`
+        agent worktrees, `.busybody/` run dirs, generated caches). Not project source, and
+        the cause of a payload ballooning from ~15 MB to hundreds of MB. Honoured only when
+        `source` is a git work tree; a non-git project falls back to the denylist alone.
+    """
     if source.is_file():
         app.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, app / source.name)
-    else:
-        shutil.copytree(source, app, ignore=_IGNORE)
+        return
+    ignored = _git_ignored(source)
+    src_resolved = source.resolve()
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        skip = set(_IGNORE(directory, names))
+        base = Path(directory)
+        if base.resolve() == src_resolved:                  # root-only build/env artifacts
+            skip.update(n for n in names if n in _ROOT_ONLY)
+        if ignored:
+            skip.update(n for n in names if base / n in ignored)
+        return skip
+
+    shutil.copytree(source, app, ignore=_ignore)
 
 
 def target_is_host(tgt) -> bool:

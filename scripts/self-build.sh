@@ -63,6 +63,15 @@ VERSION="$(uv run --quiet python -c 'import pathlib; from haru_pack._version imp
 Release artifacts are named for the commit being released; guessing a version is how a release
 ships mislabelled."
 
+# A packed binary carries the project source but NOT .git (tree.copy_app_tree excludes it), so
+# the git-derived version can't be recomputed on the target — a downloaded binary would report
+# `haru-pack 0+unknown`. Freeze it: write _frozen_version.py, which copy_app_tree ships in the
+# payload and _version.read_frozen() reads when git is absent. Untracked and NOT gitignored (so
+# copy_app_tree includes it); removed on exit so it never lingers in the checkout.
+FROZEN="src/haru_pack/_frozen_version.py"
+printf 'VERSION = "%s"\n' "$VERSION" > "$FROZEN"
+trap 'rm -f "$FROZEN"' EXIT
+
 # Use the haru-pack from THIS tree, not one on PATH — the point is to demonstrate the
 # commit being released, and a stale global install would quietly demonstrate something else.
 HARU=(uv run --quiet haru-pack)

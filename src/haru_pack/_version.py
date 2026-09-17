@@ -77,10 +77,34 @@ def git_build_id(root: Path, *, with_hash: bool = True) -> str | None:
     return format_build_id(int(parts[0]), parts[1] if with_hash else None)
 
 
+def read_frozen(pkg_dir: Path | None = None) -> str | None:
+    """A build-time-frozen version, for a source tree with no `.git`.
+
+    A haru-pack binary's payload carries the project source but NOT `.git` (INV-PAYLOAD /
+    tree.py excludes it), so `git_build_id` can't recompute the version on the target and the
+    binary would otherwise report `0+unknown`. `scripts/self-build.sh` writes
+    `_frozen_version.py` next to this file just before packing; it ships in the payload (and,
+    kept as a `.py`, in the wheel's `**/*.py` include) and is absent in a normal checkout.
+    """
+    d = pkg_dir or Path(__file__).parent
+    f = d / "_frozen_version.py"
+    if not f.exists():
+        return None
+    for line in f.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("VERSION"):
+            _, _, val = s.partition("=")
+            return val.strip().strip('"').strip("'") or None
+    return None
+
+
 def _resolve_version() -> str:
     from_git = git_build_id(_REPO_ROOT)
     if from_git:
         return from_git
+    frozen = read_frozen()               # a packed binary's payload: no .git, but a frozen version
+    if frozen:
+        return frozen
     try:  # an installed wheel has no .git — read the version baked at build time (see hatch_build.py)
         from importlib.metadata import PackageNotFoundError, version
         try:
