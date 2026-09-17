@@ -25,7 +25,11 @@ def _bare_build_id(root: Path) -> str:
         return "0+unknown"
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.git_build_id(root, with_hash=False) or "0+unknown"
+    # git (a normal build) -> frozen version (building the source shipped inside a haru-pack
+    # binary, which has no .git) -> 0+unknown. Bare form throughout; PyPI rejects local versions.
+    return (mod.git_build_id(root, with_hash=False)
+            or mod.read_frozen(root / "src" / "haru_pack")
+            or "0+unknown")
 
 
 class CustomMetadataHook(MetadataHookInterface):
