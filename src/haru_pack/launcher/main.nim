@@ -7,7 +7,7 @@
 ## (run-in-place), exposing exe-dir + stage-dir to the child.
 import std/[os, osproc, strutils, sequtils]
 import nimcrypto/sha2
-import overlay, stage, manifest, uvfetch, cryptbox, stubconfig
+import overlay, stage, manifest, uvfetch, cryptbox, stubconfig, ed25519
 when defined(posix):
   import std/posix
   # A CUSTOM handler (not SIG_IGN) is reset to SIG_DFL across exec, so the child
@@ -33,6 +33,13 @@ const
                             ## than mis-stage a member/layout we do not know about. A payload
                             ## with no key is legacy/0 and accepted; this fires only above the
                             ## ceiling below.
+  ExitBadSignature*   = 13  ## --self-signed (v3 footer): the embedded Ed25519 signature does
+                            ## not verify over the footer's structural + digest fields under
+                            ## the embedded public key (INV-SIGN-01). Checked AFTER the payload
+                            ## and stub digests, so a failure means the signature and the
+                            ## (digest-matched) content disagree — a post-build edit that did
+                            ## not re-sign. NOT tamper-evidence: an editor who ALSO swaps the
+                            ## embedded key re-signs and passes (documented honest limit).
 
   ## The highest payload_format this launcher can stage. Mirrors overlay.footerSizeFor and
   ## expandCompressedMembers: an unknown/newer version is refused, not guessed at. Bump in
@@ -124,6 +131,26 @@ proc verifyStubDigest(stub: string, want: array[32, byte]) =
     stderr.writeLine "haru-pack:   expected sha256 " & hexOf(want)
     stderr.writeLine "haru-pack:   actual   sha256 " & hexOf(got.data)
     quit(ExitBadStub)
+
+proc verifyPayloadSignature(ft: Footer) =
+  ## INV-SIGN-01 (--self-signed). Verify the Ed25519 signature over the footer's structural +
+  ## digest fields (formatVer, flags, payloadOff/Len, payloadSha, stubOff/Len, stubSha) under
+  ## the public key EMBEDDED in the v3 footer tail.
+  ##
+  ## Order matters: this runs AFTER verifyPayloadDigest and verifyStubDigest, which bind
+  ## payloadSha/stubSha to the actual bytes on disk (INV-LAUNCH-01 / INV-STUB-01). Only then
+  ## does a signature over those digests transitively cover the bytes. Verifying the signature
+  ## first would prove nothing about the payload.
+  ##
+  ## HONEST LIMIT: the public key sits in the same file, OUTSIDE the signed region. This
+  ## detects a post-build edit by anyone who does not ALSO rewrite the embedded key; it is NOT
+  ## tamper-evidence unless the key fingerprint is pinned OUT OF BAND. It deliberately does not
+  ## satisfy INV-LAUNCH-03 (which requires out-of-band-anchored verification).
+  if not ed25519Verify(ft.sig, ft.signed, ft.pubKey):
+    stderr.writeLine "haru-pack: self-signed signature check FAILED — this executable's " &
+                     "payload no longer matches the embedded signature, or the signature " &
+                     "was produced by a different key than the one embedded."
+    quit(ExitBadSignature)
 
 proc runChild(exe: string, args: seq[string], workDir: string): int =
   let p = startProcess(exe, workingDir = workDir, args = args,
@@ -268,6 +295,12 @@ proc launch(): int =
     else:
       payload = readPayload(self, ft, footerAt)
     verifyPayloadDigest(payload, ft.payloadSha)   # INV-LAUNCH-01 / INV-REMOTE-01 — before decrypt
+    # --self-signed (v3): the payload and stub digests are now bound to the real bytes, so a
+    # signature over those digests transitively covers the content. Check it here, after the
+    # digests and before staging/decrypt (INV-SIGN-01). A v1/v2 footer has hasSig=false and
+    # skips this — v2 binaries keep loading unchanged.
+    if ft.hasSig:
+      verifyPayloadSignature(ft)
     let shahex = hexOf(ft.payloadSha)
     if (ft.flags and FooterFlagEncrypted) != 0'u16 or isEncrypted(payload):
       # SECRET knob (INV-CANARY-01): the decryption key's env NAME is sc.envForKnob(kSecret)

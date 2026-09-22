@@ -229,8 +229,17 @@ Proven on this Linux box, no Windows machine:
 4. `builder/verify.py` and, under wine, **the Nim exe reading its own signed self** both
    relocate the footer by backward scan and confirm `payload_sha256` intact.
 
-Real-cert path (see `docs/SIGNING.md`): EV keys are non-exportable (FIPS/HSM), so sign
-with a hardware token (`osslsigncode` via PKCS#11 engine) or, preferred/modern, a cloud
-signer — **Azure Trusted Signing** / Key Vault / AWS KMS via **`jsign`** — all runnable
-from Linux CI. Always RFC3161-timestamp (`-ts`/`/tr`) so signatures outlive cert expiry.
-EV also grants immediate SmartScreen reputation.
+Real-cert path (see `docs/SIGNING.md`): code-signing private keys are non-exportable
+(FIPS HSM/token) — this is the June-2023 CA/Browser Forum baseline for **all** publicly-trusted
+code-signing certificates, OV included, not an EV-specific rule — so sign with a hardware token
+(`osslsigncode` via PKCS#11 engine) or, preferred/modern, a cloud signer — **Azure Trusted
+Signing** / Key Vault / AWS KMS via **`jsign`** — all runnable from Linux CI. Always
+RFC3161-timestamp (`-ts`/`/tr`) so signatures outlive cert expiry.
+
+> **Correction (2026-09-22).** An earlier version of this line ("EV also grants immediate
+> SmartScreen reputation" / attributing FIPS non-exportability to EV specifically) is now
+> FALSE and has been removed. Since February 2024 Microsoft no longer recognizes EV
+> code-signing certificates, and by August 2024 it removed EV OIDs from Trusted Root roots —
+> all code-signing certificates are treated equally and EV grants no instant SmartScreen
+> reputation. Reputation accrues to the file hash and the publisher cert regardless of class.
+> Section 10 below is superseded by `docs/SIGNING.md`; prefer that file for the signing story.

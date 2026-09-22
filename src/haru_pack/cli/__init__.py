@@ -22,7 +22,7 @@ from .buildcmd import build
 from .builddriver import _run_build
 from .doctorcmd import doctor
 from .bootstrapcmd import bootstrap
-from .inspectcmd import init, machine_id_cmd, verify, version
+from .inspectcmd import init, keygen, machine_id_cmd, verify, version
 from .naming import prog
 from .report import _report_ambiguity, _report_capabilities
 from .root import app
@@ -34,7 +34,7 @@ def main():
 
 __all__ = [
     "app", "main", "prog",
-    "bootstrap", "build", "doctor", "init", "machine_id_cmd", "verify", "version",
+    "bootstrap", "build", "doctor", "init", "keygen", "machine_id_cmd", "verify", "version",
     "_report_ambiguity", "_report_capabilities", "_run_build",
 ]
 

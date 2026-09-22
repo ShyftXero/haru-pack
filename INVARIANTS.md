@@ -1205,6 +1205,14 @@ is not a signature.
 Source: Adversarial review 2026-09-09, finding C3. Directly analogous to lotek's runner
 self-upgrade gate, where a SHA-256 manifest match only *proposes* an upgrade and a valid
 Ed25519 signature is required to act on it.
+Note: **`--self-signed` (INV-SIGN-01, `active`) does NOT satisfy this and is not claimed to.**
+It verifies an Ed25519 signature over the footer digests, but under a public key embedded in
+the same file, so an editor who re-keys the binary re-signs it (walked, case iii). That is
+edit-detection, not the out-of-band-anchored verification this invariant requires. The real
+fix on Windows is Authenticode (`--cert-file`, deferred to docs/SIGNING.md's HSM/cloud flow);
+on ELF/macOS it would need a key anchored outside the artifact (a pinned fingerprint, a
+distribution-signature, or notarization) — none of which this entry yet claims, so it stays
+`proposed`.
 Territory: src/haru_pack/launcher/main.nim, src/haru_pack/overlay.py
 
 ### INV-LAUNCH-04
@@ -1329,6 +1337,53 @@ Territory: src/haru_pack/launcher/main.nim, src/haru_pack/launcher/manifest.nim
 
 ---
 
+## SIGN — --self-signed detects a post-build edit (and says exactly what it does not)
+
+### INV-SIGN-01
+Status: active
+Statement: On a `--self-signed` (v3-footer) binary the launcher verifies an Ed25519 signature
+over the footer's structural + digest fields (formatVer, flags, payloadOff, payloadLen,
+payloadSha, stubOff, stubLen, stubSha) under the public key embedded in the footer tail, AFTER
+it has verified the payload and stub digests against the real bytes — so an edit that recomputes
+the footer digest but does not re-sign is refused (exit 13), and an edit re-signed by a
+different key without also swapping the embedded key is refused; an edit re-signed AND with the
+embedded key swapped is accepted, which is the documented honest limit and is asserted so it
+cannot be over-claimed.
+Actors: anyone who can write to a distributed binary — a mirror, a shared fileserver, malware
+resident on the target. NOT an attacker who is trusted to re-key the binary out of band; that is
+the limit, not a defended case.
+Assets: detection of a post-build payload/stub edit, and — crucially — an HONEST boundary on
+what that detection is worth. Over-claiming here (calling it tamper-evidence) is the failure
+this entry exists to prevent (INV-DOC-02).
+Red-path: Neutralize `verifyPayloadSignature` in `main.launch` (replace its body with
+`discard`, or make `ed25519.ed25519Verify` return `true`), rebuild, and run
+`tests/test_self_signed.py`. Walked 2026-09-22: with the check neutralized, cases (i) and (ii)
+(`test_case_i_...`, `test_case_ii_...`) go RED — the launcher ran to `PAYLOAD_UV_RAN` on a
+digest-repacked and on an other-key-re-signed binary — while case (iii) and the v2-still-loads
+regression stay green. Restored: 10 green. Separately, the vendored verifier itself is walked
+against the RFC 8032 §7.1 vectors (`tests/launcher_ed25519_test.nim`, run by
+`test_launcher_ed25519_matches_rfc8032`): flip one signature byte and the vector goes red.
+Source: Issue #61. Builds on INV-LAUNCH-01 (payload digest) and INV-STUB-01 (stub digest): those
+bind the digests to the bytes, and this binds a signature to the digests. The signing key lives
+on the Python side (`cryptography`); the launcher only verifies, with a vendored Ed25519
+(`launcher/ed25519.nim`) because nimcrypto ships no public-key primitive.
+Note: **This is NOT tamper-evidence and must not be described as such.** The public key is
+embedded in the same file, OUTSIDE the signed region (a signature cannot authenticate itself),
+so anyone who edits the payload can re-sign with their own key and swap the embedded key — case
+(iii), which PASSES on purpose. It becomes meaningful only when the key FINGERPRINT
+(`pubkey_sha256`, emitted on the build receipt and by `build/signing.py`) is pinned OUT OF BAND
+by the recipient. What it buys with no out-of-band pin is edit-detection: it turns a silent
+digest-repack into a refusal. It deliberately does **not** claim INV-LAUNCH-03, which requires
+out-of-band-anchored verification and stays `proposed`.
+Note: Determinism. Ed25519 is deterministic (RFC 8032), so signing adds no per-build randomness
+and a `--self-signed` build stays byte-identical on rebuild (the reproducible-build property
+`tools/busybody_cases_repro.py` depends on). No salt was added.
+Territory: src/haru_pack/overlay.py, src/haru_pack/launcher/main.nim,
+src/haru_pack/launcher/overlay.nim, src/haru_pack/launcher/ed25519.nim,
+src/haru_pack/build/signing.py, tests/test_self_signed.py
+
+---
+
 ## SUPPLY — what we execute that we did not write
 
 ### INV-SUPPLY-01
@@ -1403,7 +1458,15 @@ each import to the HIGHEST version present in the multi-version package director
 what was installed. Pinning the installer only controls which versions arrive, not which one the
 compiler picks. Marking this active would be exactly the over-claim this file exists to prevent.
 The fix is a project `.nimble` or an explicit `--nimblePath` at compile time.
-Territory: src/haru_pack/bootstrap.py, src/haru_pack/build/
+Note: **The launcher's Ed25519 verifier is the one crypto primitive NOT exposed to this gap,
+because it is not a nimble dependency at all.** `nimcrypto` (the launcher's crypto library)
+ships no public-key primitive — SHA-2, HMAC, PBKDF2 and AES only — so `--self-signed`'s
+verification (INV-SIGN-01) is VENDORED in-repo as `src/haru_pack/launcher/ed25519.nim` (a
+TweetNaCl port, public domain). Being in-tree, its exact bytes are fixed by the commit rather
+than resolved by `nim c` from the multi-version package dir, so it does not inherit the
+highest-version-wins ambiguity this entry describes. SHA-512 for it still comes from nimcrypto
+and is subject to the gap. This narrows the surface but does not close the entry.
+Territory: src/haru_pack/bootstrap.py, src/haru_pack/build/, src/haru_pack/launcher/ed25519.nim
 
 ### INV-SUPPLY-04
 Status: active

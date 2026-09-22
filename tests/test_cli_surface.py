@@ -19,7 +19,8 @@ from haru_pack import cli
 
 # The complete surface. Spelled out rather than derived, so that ADDING a command is a
 # deliberate edit to this list and REMOVING one cannot happen by accident.
-EXPECTED = {"bootstrap", "build", "doctor", "init", "machine-id", "verify", "version"}
+EXPECTED = {"bootstrap", "build", "doctor", "init", "keygen", "machine-id", "verify",
+            "version"}
 
 
 def _registered() -> set[str]:

@@ -65,3 +65,29 @@ def machine_id_cmd():
     """Print this machine's id (give it to a vendor to bind an --encrypt license)."""
     from ..crypto import machine_id
     print(machine_id())
+
+
+@app.command()
+def keygen(project: Path = typer.Argument(Path("."),
+               help="project the key is for (its default keystore path is derived from this)"),
+           key: str = typer.Option("", "--key", metavar="PATH",
+               help="write the key here instead of the per-project keystore"),
+           force: bool = typer.Option(False, "--force",
+               help="overwrite an existing key (rotates it — recipients who pinned the old "
+                    "fingerprint will no longer verify)")):
+    """Generate an Ed25519 signing key for `--self-signed`, then print its fingerprint.
+
+    A build never mints a key itself (that would rotate it on every ephemeral CI home); this
+    is the deliberate one-time act. Record and PUBLISH the printed fingerprint out of band —
+    without that pin, `--self-signed` is only edit-detection, not tamper-evidence.
+    """
+    from ..build import signing
+    path = Path(key) if key else signing.default_key_path(project)
+    try:
+        _, fp = signing.generate_key(path, overwrite=force)
+    except signing.SigningError as e:
+        print(str(e), style="error"); raise typer.Exit(2)
+    print(f"wrote signing key: {path}", style="ok")
+    print(f"public-key fingerprint (sha256): {fp}")
+    print("PIN this fingerprint out of band. Without that, --self-signed detects edits but "
+          "is not tamper-evidence (docs/SIGNING.md).", style="warn")
