@@ -1078,6 +1078,61 @@ Territory: src/haru_pack/launcher/cryptbox.nim, tests/test_crypto_hardening.py
 
 ---
 
+## BIND — machine/user binding resolves the same value on both sides, or it bricks the right host
+
+### INV-BIND-01
+Status: active
+Statement: The machine value bound by `--machine` is the OS **hostname** and the user value
+bound by `--user` is the OS **login username** (NOT `$USER`/`$USERNAME`); the hostname is
+canonicalized IDENTICALLY on the Python writer and the Nim reader — ASCII-lowercase, then a
+single trailing dot stripped — before the `0x1f` KDF fold, so a binary bound to a host
+decrypts on that host regardless of case/trailing-dot and fails closed on any other.
+Actors: a packager binding a licence to a customer's machine; the customer running it; a
+maintainer who edits the canonicalization on one side and not the other.
+Assets: every machine/user-bound build. The KDF is EXACT-MATCH: one differing byte between
+what the packager bound and what the launcher resolves derives a wrong key, and the payload
+that was *meant* to decrypt on that host never does — a licence that bricks the right machine
+is as bad as one that opens on the wrong one.
+Red-path: (1) SOURCE — change `cryptbox.loginUser` back to `getEnv("USER")`, or
+`cryptbox.hostnameCanon` back to reading `/etc/machine-id`; the source-assertion claimants in
+`tests/test_binding.py` go red. (2) CANON DRIFT — remove the `toLowerAscii` (or the trailing-dot
+strip) from `crypto.canon_hostname` OR from `cryptbox.canonHostname` but not both; the
+cross-implementation vector test (`ws1.corp`, `WS1.CORP.`, `WS1.CORP` → `ws1.corp`) compiles the
+Nim canonicalizer and compares it byte-for-byte to the Python one, and goes red. (3) EXECUTION —
+the parity matrix builds workstation1.corp-bound and notforworkstation1.corp-bound containers,
+runs the compiled Nim decryptor with the runtime hostname pinned to `workstation1.corp`, and
+requires the matching binary to open (rc 0) and the mismatched one to fail closed (rc 5).
+Walked 2026-09-22: on Linux (gethostname pinned via an `LD_PRELOAD` shim, because this host
+forbids writing `uid_map` so a UTS namespace is unavailable) auth→rc0, deny→rc5, `WS1.CORP.`
+runtime against a `ws1.corp` binding→rc0 (canon collapse through the real reader), and a
+`ws1.corp` (FQDN) binding on a short `ws1` host→rc5 (the documented exact-match footgun); and
+on the cross-compiled Windows `.exe` under WINE (computer name driven through the same
+`gethostname` shim, one fresh `WINEPREFIX` per hostname because wineserver caches it) auth→rc0,
+deny→rc5.
+Source: Issue #59. Machine binding previously read `/etc/machine-id` (Linux) / `reg`+`ioreg`
+(Win/mac) and user binding read `$USER`/`$USERNAME`; #59 made both cross-platform host values
+(hostname + login username) folded into the same KDF, and the machine-binding row in
+`docs/ENCRYPTION_LICENSING.md` had said it "names a test rather than an invariant id" — this is
+that invariant.
+Note: **HONEST LIMIT.** This is not an identity check. The hostname is a value the target
+*reports* (a writable string on a machine the licensee controls), and the login username is a
+login on that same machine — a second passphrase component, not proof of *who* is running it.
+The KDF makes a wrong value a hard authentication failure rather than a skippable check, but
+what it binds *to* is not a hardware root of trust. See THREAT_MODEL.md and
+ENCRYPTION_LICENSING.md, which are kept deliberately un-upgraded on this point.
+Note: **FQDN footgun, tested.** The reader prefers the FQDN (Windows
+`GetComputerNameExW(DnsFullyQualified)`; POSIX `getHostname`) and falls back to the short name
+where no DNS suffix exists. Because the match is exact after canon, a binary bound to the FQDN
+fails closed on a host that reports only the short name. `test_binding.py` pins this as KNOWN
+behaviour rather than leaving it a surprise.
+Note: **NETWORK SERVICE.** On Windows, `GetUserNameW` under the NETWORK SERVICE account returns
+`<HOSTNAME>$` rather than a human login. Desktop-irrelevant, noted so a service-account binding
+is not a mystery.
+Territory: src/haru_pack/crypto.py, src/haru_pack/launcher/cryptbox.nim,
+src/haru_pack/cli/inspectcmd.py, tests/test_binding.py
+
+---
+
 ## PAYLOAD — only what the operator meant to ship gets shipped
 
 ### INV-PAYLOAD-01

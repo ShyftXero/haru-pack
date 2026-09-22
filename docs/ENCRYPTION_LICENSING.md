@@ -32,17 +32,23 @@ below before any of this reaches a contract. For hard enforcement add a server.
   (a header edit changed key derivation, so the open failed) but not tamper-evident. A v2
   launcher **rejects a v1 container by version**, before prompting for a secret, so binaries
   built before this change must be rebuilt.
-- Key = **PBKDF2-HMAC-SHA256(secret [+ machine-id][+ user], random-per-build salt, 200k)**.
-  The per-build salt makes the key **ephemeral**; machine/user binding is folded into the
-  KDF so an unauthorized machine simply can't derive the key.
+- Key = **PBKDF2-HMAC-SHA256(secret [+ hostname][+ login-user], random-per-build salt, 200k)**.
+  The per-build salt makes the key **ephemeral**; machine/user binding is folded into the KDF
+  so an unauthorized machine simply can't derive the key. The **machine** value is the OS
+  **hostname** (FQDN preferred, short name on off-domain boxes), canonicalized IDENTICALLY on
+  both the packer and the launcher — ASCII-lowercase, one trailing dot stripped — before the
+  fold, so `WS1.CORP.` and `ws1.corp` bind the same host (`INV-BIND-01`). The **user** value is
+  the OS **login username** (`getpwuid`/`GetUserNameW`), NOT `$USER`/`$USERNAME`. Because the
+  match is exact, one differing byte fails closed — a binary bound to an FQDN will not open on a
+  host that reports only the short name.
 
 ## Build
 ```sh
 # secret sources (pick one). Prefer one that never lands in shell history:
 haru-pack build ./app --encrypt --secret-prompt             --expires 2027-01-01
 haru-pack build ./app --encrypt --secret-env LIC_SECRET     --geo US,CA
-# bind cryptographically to a machine / user (get the id from the customer):
-haru-pack build ./app --encrypt --secret-prompt --machine <id> --user alice
+# bind cryptographically to a machine / user (get the hostname from the customer):
+haru-pack build ./app --encrypt --secret-prompt --machine ws1.corp --user alice
 # embed the secret in the exe (WEAKEST — no runtime secret needed):
 haru-pack build ./app --encrypt --secret-prompt --embed-secret
 ```
@@ -52,8 +58,8 @@ End to end, with the right secret and then the wrong one:
 
 The second run is the one worth watching. `wrong secret / not authorized for this machine /
 tampered payload` names three causes in one message because the launcher cannot tell them
-apart. The key is `PBKDF2-HMAC-SHA256(secret [+ machine id] [+ user], salt, iters)`, so a
-wrong secret and — when machine binding is on — the wrong machine both derive the wrong key,
+apart. The key is `PBKDF2-HMAC-SHA256(secret [+ hostname] [+ login-user], salt, iters)`, so a
+wrong secret and — when machine binding is on — the wrong hostname both derive the wrong key,
 and a wrong key and an edited payload both surface as the same GCM tag mismatch. There is one
 `quit` after a constant-time tag compare in `cryptbox.nim`, and the message is the full extent
 of what the code knows at that point, not a redaction of something it knows more precisely.
@@ -71,7 +77,8 @@ history and in `ps` output for the life of the build. The invariant about what a
 emits (`INV-SECRET-03`: no secret in a manifest, receipt or kit) says so itself — "a
 documented sharp edge, not a defended one". Use it for a throwaway test, not a release.
 
-Get a target machine's id: `haru-pack machine-id` (customer runs it, sends you the value).
+Get a target machine's hostname: `haru-pack hostname` (customer runs it, sends you the value).
+It prints the SAME canonical form the launcher binds to, so what they send is what gets bound.
 
 `--geo` / `--geo-restrict` build an **online** gate that calls a third party on every
 launch of the resulting binary. Read the next section before shipping one. `--expires`
@@ -158,18 +165,23 @@ haru-pack's; they belong to the transport, and closing the honor-system knob did
 ## Honest ceiling, part 2: what the gates actually are
 
 **Machine binding is cryptographic.** The key genuinely cannot be derived on a machine whose
-id differs. Note that `/etc/machine-id` is a writable file, not a hardware root of trust, so
-this binds to a *value the target reports*, not to hardware.
+hostname differs. `cryptbox.hostnameCanon` resolves the OS hostname (Windows
+`GetComputerNameExW(DnsFullyQualified)` with a short-name fallback; POSIX/macOS `getHostname`)
+and canonicalizes it exactly as the packer does before folding it into the KDF (`INV-BIND-01`).
+Note that the hostname is a *value the target reports* — a writable string, not a hardware root
+of trust — and the match is EXACT after canon, so a binary bound to an FQDN fails closed on a
+host that reports only the short name. Use `haru-pack hostname` on the target to read the exact
+value to bind.
 
 **User binding is cryptographic in exactly the same sense and weaker in practice.** Earlier
-revisions of this document hedged the machine case and left the user case bare, which made
-the weaker of the two read as the solid one. `cryptbox.nim:84` resolves the current user as
-`getEnv("USER")` (falling back to `USERNAME`). That string is folded into the KDF, so a
-different value derives a different key and nothing decrypts — but the value is an
-environment variable set by the person being restricted. `USER=alice ./app` is the whole
-attack. Treat `--user` as a second passphrase component that happens to default to the
-username, not as an identity check, and do not tell a customer it binds a licence to a
-person.
+revisions of this document hedged the machine case and left the user case bare, which made the
+weaker of the two read as the solid one. As of #59 `cryptbox.loginUser` resolves the OS **login**
+username (`getpwuid(getuid()).pw_name` on POSIX, `GetUserNameW` on Windows) — it is NO LONGER
+`getEnv("USER")`, so the old `USER=alice ./app` one-liner no longer changes it. But it is still a
+string tied to a login on a machine the licensee controls, so treat `--user` as a second
+passphrase component, not as an identity check, and do not tell a customer it binds a licence to
+a person. (On Windows, `GetUserNameW` under the NETWORK SERVICE account returns `<HOSTNAME>$`,
+which is desktop-irrelevant but worth knowing before binding a service account.)
 
 The other two are **not** controls in that sense:
 
@@ -212,7 +224,7 @@ What is covered by executable tests today (`pytest -m invariant`):
 |---|---|
 | Policy fields never appear in cleartext in a built container | `INV-CRYPTO-01` |
 | Policy is recoverable after authenticated decryption, from inside the GCM plaintext | `INV-CRYPTO-01` |
-| A wrong machine id cannot derive the key | `tests/test_container.py::test_wrong_machine_cannot_derive_the_key` — a test, no invariant (see below) |
+| Machine/user bind to the OS hostname + login username, canonicalized identically on both sides, and fail closed on a mismatch | `INV-BIND-01` (source + a compiled cross-implementation canon vector + an execution parity matrix on Linux and on a Windows `.exe` under WINE) |
 | Tampering with salt/nonce/tag/ciphertext/iters breaks the open | `INV-CRYPTO-03` |
 | The Nim reader's byte offsets match the Python writer's | `INV-CRYPTO-02` (parses `cryptbox.nim`) |
 | `--encrypt` actually encrypts | `INV-BUILD-02` |
@@ -221,21 +233,18 @@ What is covered by executable tests today (`pytest -m invariant`):
 | No haru-pack env knob *satisfies* the location gate: the `HARUPACK_GEO` bypass is gone and no launcher source reads a plain `HARU…` input | `INV-GEO-01`, `INV-CANARY-03` |
 | **Not covered, and not claimed:** env vars the licensee owns (`https_proxy`, `SSL_CERT_FILE` / `SSL_CERT_DIR`, DNS) still *defeat* the gate by impersonating the resolver | nothing — `INV-GEO-01`'s "HONEST LIMIT" Note says so in as many words |
 
-The machine-binding row names a test rather than an invariant id, and that is the honest
-answer rather than a gap in the lookup. No invariant's Statement covers deriving the key from
-the machine id. `INV-CRYPTO-03` — which this row used to cite — is solely about
-tamper-detection ("Tampering with any byte of an encrypted container causes authenticated
-decryption to fail"), and this row is the opposite case: an untouched container opened with
-the wrong machine id. The test does carry an `INV-CRYPTO-03` marker, which is a mislabel —
-it is the nearest neighbour in the same file, not the claim it proves. The closest thing to a
-claim anywhere else is a parenthetical inside `INV-GATE-01` ("`machine`/`user` are strictly
-stronger (cryptographically bound via the key)"), and a parenthetical is not coverage:
-INV-GATE-01's claimants are the geo-gate tests. Read the row for exactly what it is — a
-property with a test behind it, and no invariant that would go red if it regressed. Note the
-test's own scope too: it derives a key with a different machine string and requires the open
-to fail, so it constrains the Python KDF's binding. It does not run the Nim launcher's
-`machineId()`, so nothing here proves the launcher resolves the same string the packager
-typed.
+The machine-binding row now cites `INV-BIND-01`, which closes what earlier revisions of this
+section flagged as an honest gap: until #59 no invariant's Statement covered deriving the key
+from the machine value, the property was carried only by
+`tests/test_container.py::test_wrong_machine_cannot_derive_the_key` (a test with no invariant,
+mislabelled `INV-CRYPTO-03`), and nothing ran the Nim launcher's own reader — so nothing proved
+the launcher resolved the *same* string the packager typed. `INV-BIND-01` proves exactly that
+missing link: a compiled cross-implementation vector test pins the Python `canon_hostname` and
+the Nim `canonHostname` to the same output, and an execution parity matrix builds
+workstation1.corp-bound and notforworkstation1.corp-bound containers and runs the REAL compiled
+Nim decryptor with the runtime hostname pinned — the matching binary opens, the other fails
+closed — on Linux and on a cross-compiled Windows `.exe` under WINE. `test_wrong_machine_...`
+remains as the narrow Python-KDF unit check.
 
 `INV-CRYPTO-02` compares byte offsets parsed out of the Nim source against the Python writer,
 which catches layout drift but is not itself an interop test. The interop test exists

@@ -146,8 +146,8 @@ def render(disc: dict, deps: list[str], learned_from_venv: bool = False) -> str:
         "# enabled = true",
         '# expires = "2027-01-01"',
         '# geo = ["US", "CA"]',
-        '# machine = "<machine-id>"   # `haru-pack machine-id` on the target',
-        '# user = "alice"',
+        '# machine = "<hostname>"     # `haru-pack hostname` on the target (OS hostname)',
+        '# user = "alice"             # OS login username; a passphrase component, not an ID check',
         "# embed_secret = false",
         "",
     ]

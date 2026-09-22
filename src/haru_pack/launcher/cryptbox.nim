@@ -8,7 +8,10 @@
 ## fail-closed (INV-CRYPTO-04). The tag is elided because it cannot authenticate itself;
 ## editing it is what tag verification catches. Container version 1 (AAD = bare magic) is
 ## rejected by version, before a secret is ever asked for.
-## key = PBKDF2-HMAC-SHA256(secret [+0x1f+machine][+0x1f+user], salt, iters, 32)
+## key = PBKDF2-HMAC-SHA256(secret [+0x1f+hostname][+0x1f+loginUser], salt, iters, 32), where
+## the hostname is canonicalized IDENTICALLY to crypto.canon_hostname before the fold
+## (INV-BIND-01). The machine value is the OS hostname (cross-platform), the user value is the
+## OS login username — NOT $USER/$USERNAME.
 ##
 ## The policy is INSIDE the ciphertext, not the AAD, and not in the header — a
 ## reverse-engineer sees no expiry/geo/machine/user, and cannot edit them without the key.
@@ -16,9 +19,13 @@
 ## the header. Both were wrong; the code has always done what is written above. See
 ## INV-CRYPTO-01.)
 ## No PKI.
-import std/[os, osproc, strutils, times, json, terminal]
+import std/[os, strutils, times, json, terminal, nativesockets]
 import nimcrypto/[pbkdf2, bcmode, rijndael, sha2]
 import execgate
+when defined(windows):
+  import std/winlean            # GetComputerNameExW / GetUserNameW FFI (precedent: stage.nim)
+else:
+  import std/posix              # getpwuid / getuid for the OS login username
 
 const
   Magic = "HPAKENC1"
@@ -64,25 +71,72 @@ proc parseBox(raw: string): Box =
   result.aad = b[0 ..< TagOff]
   result.aad.add b[TagOff+16 ..< HdrFixed+eslen]
 
-proc machineId(): string =
-  when defined(linux):
-    for p in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
-      if fileExists(p): return readFile(p).strip
-  elif defined(windows):
-    let (o, rc) = execCmdEx("reg query \"HKLM\\SOFTWARE\\Microsoft\\Cryptography\" /v MachineGuid")
-    if rc == 0:
-      for line in o.splitLines:
-        if "MachineGuid" in line: return line.splitWhitespace[^1]
-  elif defined(macosx):
-    let (o, rc) = execCmdEx("ioreg -rd1 -c IOPlatformExpertDevice")
-    if rc == 0:
-      for line in o.splitLines:
-        if "IOPlatformUUID" in line: return line.split('"')[^2]
-  return ""
+proc canonHostname*(name: string): string =
+  ## Canonicalized IDENTICALLY to crypto.canon_hostname before the 0x1f KDF fold: ASCII
+  ## lowercase, then strip a SINGLE trailing dot. `WS1.CORP.` and `ws1.corp` both collapse to
+  ## `ws1.corp`. The KDF is EXACT-MATCH, so one differing byte bricks the licence on the RIGHT
+  ## host — this MUST byte-match the Python writer (INV-BIND-01, tests/test_binding.py).
+  result = name.toLowerAscii()
+  if result.len > 0 and result[^1] == '.':
+    result.setLen(result.len - 1)
 
-proc currentUser(): string =
-  result = getEnv("USER")
-  if result.len == 0: result = getEnv("USERNAME")
+when defined(windows):
+  # WinAPI hostname/username readers via winlean FFI. GetComputerNameExW lives in kernel32,
+  # GetUserNameW in advapi32 — both are linked by the FFI's `dynlib` pragma.
+  type ComputerNameFormat = int32
+  const
+    ComputerNameDnsHostname: ComputerNameFormat = 1
+    ComputerNameDnsFullyQualified: ComputerNameFormat = 3
+  proc getComputerNameExW(nameType: ComputerNameFormat, lpBuffer: WideCString,
+                          nSize: ptr int32): int32
+    {.stdcall, dynlib: "kernel32", importc: "GetComputerNameExW".}
+  proc getUserNameW(lpBuffer: WideCString, pcbBuffer: ptr int32): int32
+    {.stdcall, dynlib: "advapi32", importc: "GetUserNameW".}
+
+  proc winComputerName(fmt: ComputerNameFormat): string =
+    var size: int32 = 0
+    discard getComputerNameExW(fmt, cast[WideCString](nil), addr size)  # ask for the length
+    if size <= 0: return ""
+    var buf = newWideCString(int(size))
+    if getComputerNameExW(fmt, buf, addr size) != 0:
+      result = $buf
+
+  proc winUserName(): string =
+    ## GetUserNameW writes the length (incl. the NUL) into pcbBuffer. NOTE: under the
+    ## NETWORK SERVICE account this returns "<HOSTNAME>$" — desktop-irrelevant, but noted in
+    ## THREAT_MODEL.md so a service-account binding is not a surprise.
+    var size: int32 = 0
+    discard getUserNameW(cast[WideCString](nil), addr size)             # ask for the length
+    if size <= 0: return ""
+    var buf = newWideCString(int(size))
+    if getUserNameW(buf, addr size) != 0:
+      result = $buf
+
+proc hostnameCanon(): string =
+  ## The RUNTIME hostname, canonicalized for the KDF (INV-BIND-01).
+  ##   * Windows: GetComputerNameExW(DnsFullyQualified), falling back to DnsHostname.
+  ##   * POSIX/macOS: std/nativesockets getHostname (short OR FQDN depending on DNS).
+  ## FQDN is absent on off-domain/WORKGROUP boxes, so a binary BOUND to the FQDN fails closed
+  ## on a host that reports only the short name — the exact-match footgun THREAT_MODEL.md
+  ## documents and tests/test_binding.py pins as KNOWN behaviour.
+  var raw = ""
+  when defined(windows):
+    raw = winComputerName(ComputerNameDnsFullyQualified)
+    if raw.len == 0: raw = winComputerName(ComputerNameDnsHostname)
+  else:
+    try: raw = getHostname()
+    except CatchableError: raw = ""
+  result = canonHostname(raw)
+
+proc loginUser(): string =
+  ## The OS LOGIN username — NOT getEnv("USER")/getEnv("USERNAME"), which the person being
+  ## restricted sets (INV-BIND-01). Windows: GetUserNameW. POSIX/macOS:
+  ## getpwuid(getuid()).pw_name.
+  when defined(windows):
+    result = winUserName()
+  else:
+    let pw = getpwuid(getuid())
+    if pw != nil: result = $pw.pw_name
 
 proc xorBytes(b: seq[byte], pad: string): string =
   for i in 0 ..< b.len: result.add char(b[i] xor byte(pad[i mod pad.len]))
@@ -119,12 +173,12 @@ proc checkPolicy(policy: seq[byte]) =
   ## up shipping to someone they meant to exclude:
   ##   * expiry comes from the clock, and geo reads no env at all — the HARUPACK_GEO
   ##     honor-system bypass is retired and nothing replaced it (INV-GEO-01, INV-CANARY-03).
-  ##   * user binding IS an environment variable. `currentUser` above reads $USER (falling back
-  ##     to $USERNAME) and folds that string into the key derivation below. The check is
-  ##     cryptographic rather than honor-system — a wrong value derives a wrong key and nothing
-  ##     decrypts — but what it binds to is a string the licensee can type, so on a machine
-  ##     they control it means "know the licensed username", not "be that user". Machine
-  ##     binding does not have this property: machineId() reads the host, not the environment.
+  ##   * user binding reads the OS LOGIN username (`loginUser` above: getpwuid(getuid()).pw_name
+  ##     on POSIX, GetUserNameW on Windows) and folds it into the key derivation below. It is
+  ##     NO LONGER $USER/$USERNAME, so `USER=alice ./app` no longer changes it — but it is still
+  ##     a string tied to a login the licensee controls on their own machine, so treat it as a
+  ##     second passphrase component, NOT an identity check. Machine binding
+  ##     (`hostnameCanon` — the OS hostname, canonicalized) reads the host, not the environment.
   ##   * geo is ADVISORY against a determined local adversary, because the resolver call is made
   ##     on the end user's own machine: https_proxy, SSL_CERT_FILE/SSL_CERT_DIR, DNS or
   ##     /etc/hosts let them MITM it and forge an allowed country, and endpoint consensus does
@@ -175,9 +229,9 @@ proc openContainer*(raw: string, secretEnv: string): string =
   var pw = newSeq[byte](secret.len)
   for i in 0 ..< secret.len: pw[i] = byte(secret[i])
   if (box.flags and BindMachine) != 0'u16:
-    pw.add byte(0x1f); (for c in machineId(): pw.add byte(c))
+    pw.add byte(0x1f); (for c in hostnameCanon(): pw.add byte(c))
   if (box.flags and BindUser) != 0'u16:
-    pw.add byte(0x1f); (for c in currentUser(): pw.add byte(c))
+    pw.add byte(0x1f); (for c in loginUser(): pw.add byte(c))
   let key = pbkdf2(sha256, pw, box.salt, box.iters, 32)
   var gcm: GCM[aes256]
   gcm.init(key, box.nonce, box.aad)      # AAD covers the header (INV-CRYPTO-04)

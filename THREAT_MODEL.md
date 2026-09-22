@@ -80,20 +80,25 @@ Stated plainly because the sales-shaped version of this is easy to write and wro
 - **Machine and user binding are both cryptographic, and they are not equally strong.**
   Each value is folded into the KDF, so a wrong value yields a wrong key and decryption fails
   outright rather than being checked and waved through. **[V]** `crypto.derive_key` appends
-  each to the PBKDF2 password, and `INV-CRYPTO-03` is what makes a wrong key a hard
-  authentication failure rather than a check something could skip. No invariant pins the KDF
-  parameters themselves. What the two bind *to* is where they diverge, and until 2026-09-15
-  this section hedged `/etc/machine-id` carefully and gave the weaker of the two no hedge at
-  all, which is how a reader concluded the unhedged one was solid:
-  - *Machine.* `/etc/machine-id` on Linux is a root-writable file; on Windows and macOS
-    `cryptbox.machineId` shells out to `reg` and `ioreg` by bare name, so the answer is
-    only as trustworthy as the target's PATH. **[V]** `launcher/cryptbox.nim`. It binds to
-    a value the target *reports*, not to hardware — but reporting a different one takes
-    deliberate work.
-  - *User.* `cryptbox.currentUser()` is `getEnv("USER")` with a `USERNAME` fallback. **[V]**
-    `launcher/cryptbox.nim:83`. That is a string the licensee types: `USER=alice ./app` is
-    the whole attack, with no patching, no root and no debugger. `--user` is a label on the
-    key, not a binding to a person.
+  each to the PBKDF2 password; `INV-CRYPTO-03` makes a wrong key a hard authentication failure
+  rather than a skippable check, and `INV-BIND-01` pins the *sources* and the byte-identical
+  canonicalization on both sides. No invariant pins the KDF parameters themselves. What the two
+  bind *to* is where they diverge:
+  - *Machine.* Since #59 this is the OS **hostname** (Windows
+    `GetComputerNameExW(DnsFullyQualified)` with a short-name fallback; POSIX/macOS
+    `getHostname`), canonicalized identically on the packer and the launcher before the fold.
+    **[V]** `launcher/cryptbox.nim`, `crypto.py`, `INV-BIND-01`. It binds to a value the target
+    *reports* — a writable string, not hardware — and the match is EXACT after canon, so an
+    FQDN binding fails closed on a host that reports only the short name. The retired
+    `/etc/machine-id` / `reg` / `ioreg` readers, whose answer was only as trustworthy as the
+    target's PATH, are gone.
+  - *User.* Since #59 this is the OS **login** username: `cryptbox.loginUser` is
+    `getpwuid(getuid()).pw_name` on POSIX and `GetUserNameW` on Windows — NOT `getEnv("USER")`.
+    **[V]** `launcher/cryptbox.nim`, `INV-BIND-01`. The old `USER=alice ./app` one-liner no
+    longer changes it, but it is still a login string on a machine the licensee controls, so
+    `--user` is a second passphrase component, not a binding to a person. (Under the Windows
+    NETWORK SERVICE account `GetUserNameW` returns `<HOSTNAME>$` — desktop-irrelevant, noted so
+    a service-account binding is not a surprise.)
 - **Expiry is not enforcement. Geo is enforcement only against someone who is not trying.**
   Expiry reads the local clock, which belongs to the person being restricted, and runs after
   decryption inside a binary they control. **[V]** Geo no longer reads an environment

@@ -7,7 +7,7 @@
     builddriver    the build itself; the bare `haru-pack <path>` form calls it too
     doctorcmd      `doctor`
     bootstrapcmd   `bootstrap`
-    inspectcmd     `version`, `verify`, `init`, `machine-id`
+    inspectcmd     `version`, `verify`, `init`, `hostname`
 
 Importing a command module is what REGISTERS it: the `@app.command()` decorators run at
 import time. So the imports below are not tidiness — drop one and its subcommand silently
@@ -22,7 +22,7 @@ from .buildcmd import build
 from .builddriver import _run_build
 from .doctorcmd import doctor
 from .bootstrapcmd import bootstrap
-from .inspectcmd import init, machine_id_cmd, verify, version
+from .inspectcmd import hostname_cmd, init, verify, version
 from .naming import prog
 from .report import _report_ambiguity, _report_capabilities
 from .root import app
@@ -34,7 +34,7 @@ def main():
 
 __all__ = [
     "app", "main", "prog",
-    "bootstrap", "build", "doctor", "init", "machine_id_cmd", "verify", "version",
+    "bootstrap", "build", "doctor", "init", "hostname_cmd", "verify", "version",
     "_report_ambiguity", "_report_capabilities", "_run_build",
 ]
 

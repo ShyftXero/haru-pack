@@ -1,4 +1,4 @@
-"""The small commands: version, verify, init, machine-id.
+"""The small commands: version, verify, init, hostname.
 
 Grouped by size rather than by subject, deliberately. Each is a handful of lines with no
 shared state, and four one-screen modules would be four files nobody can tell apart.
@@ -60,8 +60,10 @@ def init(path: Path = typer.Argument(Path("."), help="project dir or script"),
     out.write_text(scaffold.render(disc, sorted(deps), learned_from_venv=learned))
     print(f"wrote {out}  (kind={disc['kind']}, entrypoint={disc['entrypoint']}, python={disc.get('python') or 'auto'})", style="ok")
 
-@app.command("machine-id")
-def machine_id_cmd():
-    """Print this machine's id (give it to a vendor to bind an --encrypt license)."""
-    from ..crypto import machine_id
-    print(machine_id())
+@app.command("hostname")
+def hostname_cmd():
+    """Print this machine's canonical hostname (give it to a vendor to bind an --encrypt
+    license with --machine). It is ASCII-lowercased with any trailing dot stripped — the same
+    canonicalization the launcher applies — so what you send is exactly what gets bound."""
+    from ..crypto import hostname
+    print(hostname())
