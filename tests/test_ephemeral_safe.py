@@ -327,8 +327,12 @@ def test_baked_size_covers_real_uv_expansion(nim_launcher, tmp_path):
         uv_body='echo "PAYLOAD_UV_RAN"\necho "STAGE=$HARUPACK_STAGE"\nexit 0')
     baked = _staged_tree_bytes(src)
     exe = tmp_path / "app.exe"
+    # NO reap here, on purpose: this test MEASURES the staged tree (the rglob+stat below), and a
+    # detached reaper would delete it mid-walk -> FileNotFoundError, flaky (it blocked merges on
+    # PR #66 and #73). The size-fit gate this asserts runs BEFORE any reap, so reaping is
+    # orthogonal to what this proves; the --reap path is covered by the tests above + test_shred.
     pack(nim_launcher, build_payload_zip(src), exe,
-         stub_config=stub_toml2(ram_only=True, unpacked_bytes=baked, reap=True))
+         stub_config=stub_toml2(ram_only=True, unpacked_bytes=baked))
     stage = _run_ok(exe, tmp_path)
     try:
         assert stage.startswith(str(DEV_SHM)), f"fitting real payload did not stage in RAM: {stage}"
