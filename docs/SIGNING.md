@@ -87,6 +87,111 @@ signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a build\a
   message digest*. Then `python3 builder/verify.py build/app.exe` to confirm the payload
   footer + sha256 survived.
 
+## `--self-signed` (Ed25519, any platform) — edit-detection, NOT tamper-evidence
+
+`--cert-file` above is the real thing on Windows: the OS validates the Authenticode signature
+against a trusted chain, so an editor cannot re-sign without the vendor's (non-exportable) key.
+ELF and Mach-O have no such OS-enforced equivalent baked into the loader. `--self-signed` is a
+deliberately weaker, cross-platform mechanism that fills part of that gap — and its limit has to
+be stated every time it is, or it becomes an over-claim (INV-DOC-02).
+
+What it does. `--self-signed` generates (or reuses) an Ed25519 key and signs the build's footer
+— specifically the structural + digest fields (format version, flags, payload offset/length,
+payload sha256, stub-config offset/length, stub-config sha256). The signature and the public key
+ride in a new v3 footer tail. At launch the binary verifies the payload and stub-config digests
+against the actual bytes first (INV-LAUNCH-01 / INV-STUB-01), THEN checks the signature over
+those digests, so a valid signature transitively covers the payload and stub. A payload edit
+that recomputes the footer digest but does not re-sign is refused (exit 13). This is
+INV-SIGN-01.
+
+The honest limit. **`--self-signed` detects post-build payload edits by anyone who does not ALSO
+rewrite the embedded public key; it is NOT tamper-evidence unless the fingerprint is pinned OUT
+OF BAND.** The public key lives in the same file as the signature (a signature cannot
+authenticate itself), so an attacker who edits the payload can re-sign it with their own key and
+overwrite the embedded key — and it verifies. haru-pack's own test suite asserts exactly this
+case passes, so the limit cannot be quietly forgotten. It becomes real assurance only when the
+recipient obtains the key's fingerprint through a channel the attacker does not control (your
+website over HTTPS, a signed release note, a keyserver) and compares it. The build prints the
+fingerprint and records it on the receipt precisely so a vendor can publish it:
+
+```
+haru-pack keygen                 # once, deliberately; prints and stores the key + fingerprint
+haru-pack build app/ --self-signed
+# receipt: self_signed.public_key_sha256 = <64 hex> — PUBLISH this out of band
+```
+
+It does **not** claim INV-LAUNCH-03 (a signature anchored out of band), which stays `proposed`.
+
+### Publishing your fingerprint — the out-of-band anchor
+
+The fingerprint only means something if a recipient gets it through a channel the attacker
+does not control, then pins it. The cheapest trustworthy channel is one you already have: sign
+a short statement binding the project to the fingerprint **with a key people already associate
+with you**, and host it where your identity already lives. (This is the ELF/macOS story — on
+Windows, `--cert-file`/Authenticode is the real anchor and needs none of this; the OS validates
+the chain.)
+
+Write the statement once:
+
+```
+printf 'haru-pack %s ed25519 %s\n' myproject <fingerprint> > haru-fingerprint.txt
+```
+
+**Reuse a GPG key you already publish:**
+```
+gpg --clearsign haru-fingerprint.txt          # -> haru-fingerprint.txt.asc
+```
+Recipients verify with your GPG public key, which is likely already discoverable at
+`https://github.com/<you>.gpg`, `keys.openpgp.org`, or your domain's WKD
+(`.well-known/openpgpkey/...`). They check the signature, then trust the `ed25519 <fingerprint>`
+line.
+
+**Reuse your GitHub SSH key** (Ed25519 — the same mechanism GitHub uses for SSH-signed commits):
+```
+ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n haru-pack haru-fingerprint.txt   # -> .sig
+# recipient, using your public keys straight from GitHub as the allow-list:
+curl -s https://github.com/<you>.keys | sed 's/^/'"<you>"' namespaces="haru-pack" /' > allowed
+ssh-keygen -Y verify -f allowed -I "<you>" -n haru-pack \
+  -s haru-fingerprint.txt.sig < haru-fingerprint.txt
+```
+`https://github.com/<you>.keys` (and `.gpg`) is a ready-made out-of-band channel: it is served
+over GitHub's TLS and tied to your account, so an attacker who tampers a binary cannot also
+change what your `.keys` URL returns.
+
+**Where to host the signed statement:** your HTTPS site (a stable URL, or `/.well-known/`), a
+**signed git tag** or GitHub Release (GitHub shows "Verified" for GPG/SSH-signed tags), a
+keyserver/WKD, or Keybase. Any one the attacker can't rewrite works; publishing via more than
+one raises the bar.
+
+> Not yet automated: haru-pack could fetch a signer's pinned key from `github.com/<you>.keys`
+> and verify against it, or let you sign the build directly with an existing Ed25519 SSH/GPG key.
+> Today the flow above is manual and the launcher pins nothing itself — tracked in #71.
+
+Key handling, on purpose:
+- **Storage.** `~/.config/haru-pack/<hash-of-project>/key`, directory `0700`, file `0600`. A
+  group- or world-readable key is refused, not used.
+- **No silent rotation.** A build with `--self-signed` and no key FAILS — it never mints one
+  mid-build. On an ephemeral CI home (a fresh `$HOME` per job) auto-generation would rotate the
+  key every run, and every recipient who pinned yesterday's fingerprint would "verify" under a
+  key they never saw. Mint the key once with `haru-pack keygen` (or point at one with
+  `--sign-key <path>`), record the fingerprint, and reuse it. Key loss is loud, not papered over.
+- **Reproducible.** Ed25519 is deterministic (RFC 8032), so `--self-signed` adds no per-build
+  randomness — the same commit + key rebuilds byte-for-byte. No salt.
+
+Implementation note: nimcrypto ships no public-key primitive, so the launcher's verifier is a
+vendored TweetNaCl port (`src/haru_pack/launcher/ed25519.nim`, public domain), checked against
+the RFC 8032 §7.1 vectors. Signing uses the `cryptography` library on the build side. See
+INV-SUPPLY-02's note on what this means for the pinning story.
+
+## macOS code signing / notarization — OUT OF SCOPE (this issue)
+
+A third real path exists and this issue does **not** implement it: Apple `codesign` + Developer
+ID + notarization (stapling). It is a distinct trust root with its own tooling and its own
+Apple-account requirement, and pretending `--self-signed` substitutes for it would be an
+over-claim. For a Mach-O build today: `--self-signed` gives you the same edit-detection (with the
+same out-of-band-pin limit) it gives an ELF, and nothing more. A macOS `codesign`/notarization
+seam is future work, tracked separately from #61.
+
 ## Enterprise-AV escape hatch
 If a single self-extracting stub still trips strict Defender policies, ship
 **external-payload mode**: `app.exe` (signed, tiny) + `app.uvcap` sidecar. Launcher finds

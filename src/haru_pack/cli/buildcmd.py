@@ -129,6 +129,24 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
               help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
                    "Lives in the payload — use --encrypt to hide a secret value"),
+          self_signed: bool = typer.Option(False, "--self-signed",
+              help="sign the build with an Ed25519 key so the launcher detects a post-build "
+                   "payload edit (v3 footer). DEFAULT OFF. HONEST LIMIT: the public key is "
+                   "embedded in the binary, so this detects edits by anyone who does not ALSO "
+                   "rewrite that key — it is NOT tamper-evidence unless you PIN the fingerprint "
+                   "OUT OF BAND (the build prints it; it is on the receipt). The real Windows "
+                   "tamper-evidence is --cert-file. See docs/SIGNING.md. Uses the per-project "
+                   "keystore key (~/.config/haru-pack/<hash>/key); create it with `haru-pack "
+                   "keygen`. Fails hard if the key is missing (never auto-rotates)"),
+          sign_key: str = typer.Option("", "--sign-key", metavar="PATH",
+              help="use this Ed25519 key file for --self-signed instead of the per-project "
+                   "keystore key. Must be a raw 32-byte seed, mode 0600. Fails hard if missing"),
+          cert_file: str = typer.Option("", "--cert-file", metavar="PATH",
+              help="Windows only: request Authenticode signing (the REAL tamper-evidence on "
+                   "Windows). Modern code-signing keys are non-exportable (HSM/token/cloud), so "
+                   "haru-pack does not hold the key — it emits the exact osslsigncode/jsign "
+                   "command to run against the produced PE and records the deferred intent on "
+                   "the receipt. See docs/SIGNING.md. Refused on non-Windows targets"),
           emit_c: str = typer.Option("", "--emit-c", metavar="DIR",
               help="also write a self-contained C reproduction kit to DIR: the launcher stub "
                    "as C (recompiles with zig alone, no Nim), this build's payload + "
@@ -161,4 +179,5 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_ephemeral_canary=stub_env_ephemeral_canary,
                reap=reap, ephemeral=ephemeral, ram_only=ram_only, no_reap=no_reap,
                overwrite=overwrite, base_path=base_path, source_url=source_url,
-               env_append=env_append, emit_c=emit_c, emit_nim=emit_nim)
+               env_append=env_append, emit_c=emit_c, emit_nim=emit_nim,
+               self_signed=self_signed, sign_key=sign_key, cert_file=cert_file)

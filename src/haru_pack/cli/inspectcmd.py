@@ -67,3 +67,32 @@ def hostname_cmd():
     canonicalization the launcher applies — so what you send is exactly what gets bound."""
     from ..crypto import hostname
     print(hostname())
+
+
+@app.command()
+def keygen(project: Path = typer.Argument(Path("."),
+               help="project the key is for (its default keystore path is derived from this)"),
+           key: str = typer.Option("", "--key", metavar="PATH",
+               help="write the key here instead of the per-project keystore"),
+           force: bool = typer.Option(False, "--force",
+               help="overwrite an existing key (rotates it — recipients who pinned the old "
+                    "fingerprint will no longer verify)")):
+    """Generate an Ed25519 signing key for `--self-signed`, then print its fingerprint.
+
+    A build never mints a key itself (that would rotate it on every ephemeral CI home); this
+    is the deliberate one-time act. Record and PUBLISH the printed fingerprint out of band —
+    without that pin, `--self-signed` is only edit-detection, not tamper-evidence.
+    """
+    from ..build import signing
+    path = Path(key) if key else signing.default_key_path(project)
+    try:
+        _, fp = signing.generate_key(path, overwrite=force)
+    except signing.SigningError as e:
+        print(str(e), style="error"); raise typer.Exit(2)
+    print(f"wrote signing key: {path}", style="ok")
+    print(f"public-key fingerprint (sha256): {fp}")
+    print("PUBLISH this fingerprint out of band so recipients can pin it — otherwise "
+          "--self-signed is edit-detection only, not tamper-evidence. Easiest: GPG- or "
+          "SSH-sign it with a key people already associate with you (e.g. served at "
+          "github.com/<you>.gpg or github.com/<you>.keys). See docs/SIGNING.md "
+          "'Publishing your fingerprint'.", style="warn")

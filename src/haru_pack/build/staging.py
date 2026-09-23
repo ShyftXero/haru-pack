@@ -85,15 +85,22 @@ def resolve_source_url(source_url: str) -> str:
 
 
 def _attach_payload(*, launcher: Path, payload: bytes, out: Path, flags: int,
-                    sc_bytes: bytes, source_url: str, say) -> dict:
-    """Write the finished binary — either with the payload appended, or with a sidecar."""
+                    sc_bytes: bytes, source_url: str, say, sign_key=None) -> dict:
+    """Write the finished binary — either with the payload appended, or with a sidecar.
+
+    `sign_key` (a cryptography Ed25519 private key, or None) makes this a v3 --self-signed
+    build: the footer's structural + digest fields are signed and the pubkey + signature are
+    embedded in the footer tail (INV-SIGN-01). The signed region is the same whether the
+    payload is appended or remote, so both delivery modes can be self-signed."""
     if not source_url:
-        return attach(launcher, payload, out, flags=flags, stub_config=sc_bytes)
+        return attach(launcher, payload, out, flags=flags, stub_config=sc_bytes,
+                      sign_key=sign_key)
     # Phase 3 remote-fetch (INV-REMOTE-01): the payload is NOT embedded. attach records
     # its digest as the trust anchor and sets the remote flag; we write the exact
     # container bytes to a sidecar the packager hosts at source_url. The binary carries
     # only [launcher][stub-config][footer].
-    info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes, remote=True)
+    info = attach(launcher, payload, out, flags=flags, stub_config=sc_bytes, remote=True,
+                  sign_key=sign_key)
     sidecar = out.with_name(out.name + ".haru-payload")
     sidecar.write_bytes(payload)
     info["source_url"] = source_url

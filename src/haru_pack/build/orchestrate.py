@@ -35,6 +35,7 @@ from .inject import resolve_injects
 from .staging import _attach_payload, resolve_base_path, resolve_source_url
 from .tree import _staged_tree_bytes
 from .validate import prepare_output_dir
+from . import signing
 from .. import shake as shake_mod
 
 
@@ -96,13 +97,21 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           stub_env_ephemeral_canary: str = "",
           reap: bool = False, overwrite: bool = False, ram_only: bool = False,
           no_reap: bool = False, base_path: str = "", source_url: str = "", env_append=None,
-          cc: str = "", emit_c: str = "", emit_nim: str = "", log=None) -> dict:
+          cc: str = "", emit_c: str = "", emit_nim: str = "",
+          self_signed: bool = False, sign_key: str = "", cert_file: str = "",
+          log=None) -> dict:
     project = Path(project); out = Path(out)
     prepare_output_dir(out)
     say = log or (lambda _m: None)
     emit_c_dir = emitkit.validate_c_dir(emit_c)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim, provider, tc = _preflight(tgt, cc, log)
+
+    # --self-signed / --cert-file: resolve BEFORE any binary exists (docs/PRINCIPLES.md). The
+    # signing key is fail-hard (haru-pack never mints one during a build) and --cert-file on a
+    # non-Windows target is refused here. See signing.resolve_signing.
+    sign_priv, signing_info, cert_info = signing.resolve_signing(
+        project, self_signed=self_signed, sign_key=sign_key, cert_file=cert_file, tgt=tgt, out=out, say=say)
 
     # Phase 4: fold --geo / --geo-restrict / --geo-restrict-api-url / --geo-restrict-consensus
     # into the uniform gate object BEFORE resolve, so enc["geo"] carries the online-gate policy
@@ -180,7 +189,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
         info = _attach_payload(launcher=launcher, payload=payload, out=out, flags=flags,
-                               sc_bytes=sc_bytes, source_url=source_url, say=say)
+                               sc_bytes=sc_bytes, source_url=source_url, say=say, sign_key=sign_priv)
         if emit_c_dir is not None:
             emitkit.write_c_kit(emit_c_dir, info=info, nimcache=tdp / "nimcache", tgt=tgt,
                                 payload=payload, stub_config=sc_bytes, flags=flags,
@@ -193,7 +202,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                    compiler=tc["compiler"], out=out, enc=enc, manifest=manifest, pyver=pyver,
                    canary=canary, reap=reap, overwrite=overwrite, ram_only=ram_only,
                    base_path=base_path, source_url=source_url, unpacked_bytes=unpacked_bytes,
-                   shake_report=shake_report, slim_report=slim_report)
+                   shake_report=shake_report, slim_report=slim_report,
+                   signing_info=signing_info, cert_info=cert_info)
     emitkit.write_nim_kit(emit_nim, info=info, tgt=tgt, provider=provider, payload=payload,
                           stub_config=sc_bytes, flags=flags, source_url=source_url, out=out,
                           say=say)

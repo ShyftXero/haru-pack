@@ -141,7 +141,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                stub_env_ephemeral_canary="",
                reap=False, ephemeral=False, ram_only=False, no_reap=False, overwrite=False,
                base_path="", source_url="", env_append=None, cc="", emit_c="",
-               emit_nim="") -> None:
+               emit_nim="", self_signed=False, sign_key="", cert_file="") -> None:
     """The build, as a plain function with real Python defaults.
 
     Both entry points call this: the `build` subcommand and the bare `haru-pack <path>`
@@ -179,6 +179,7 @@ def _run_build(*, project, out=None, target="host", tier="default", thin=False, 
                          base_path=base_path, source_url=source_url,
                          env_append=list(env_append or []),
                          emit_nim=emit_nim,
+                         self_signed=self_signed, sign_key=sign_key, cert_file=cert_file,
                          log=lambda m: print(
                              f"{prog()}: {m}",
                              style="warn" if "WARNING" in m else "info"))

@@ -14,6 +14,8 @@ const
   FooterTail*  = "KCAPURAH"   # 8B end sentinel
   FooterV1Size* = 8 + 2 + 2 + 8 + 8 + 32 + 8            # = 68  (payload only)
   FooterV2Size* = 8 + 2 + 2 + 8 + 8 + 32 + 8 + 8 + 32 + 8  # = 116 (payload + stub locator)
+  FooterV3Size* = FooterV2Size + 32 + 64                # = 212 (v2 + Ed25519 pubkey + sig)
+  SignedRegionLen* = 100      # footer[8:108]: formatVer..stubSha, the --self-signed bytes
   ScanWindow*  = 256 * 1024   # bytes from EOF to search
   FooterFlagEncrypted* = 1'u16 ## bit0: payload is an encrypted container (matches crypto.py)
   FooterFlagRemote*    = 2'u16 ## bit1: payload is FETCHED at runtime, not appended (Phase 3,
@@ -27,10 +29,14 @@ type Footer* = object
   payloadOff*: uint64
   payloadLen*: uint64
   payloadSha*: array[32, byte]
-  hasStub*: bool              # true only for a v2 footer
+  hasStub*: bool              # true for a v2 or v3 footer
   stubOff*: uint64
   stubLen*: uint64
   stubSha*: array[32, byte]
+  hasSig*: bool               # true only for a v3 (--self-signed) footer
+  signed*: array[100, byte]   # footer[8:108], the bytes the signature covers (v2/v3)
+  pubKey*: array[32, byte]    # v3: embedded Ed25519 public key (OUTSIDE the signed region)
+  sig*: array[64, byte]       # v3: Ed25519 signature over `signed`
 
 proc rdU16(b: openArray[byte], o: int): uint16 =
   uint16(b[o]) or (uint16(b[o+1]) shl 8)
@@ -45,6 +51,7 @@ proc footerSizeFor(ver: uint16): int =
   case ver
   of 1'u16: FooterV1Size
   of 2'u16: FooterV2Size
+  of 3'u16: FooterV3Size
   else: 0
 
 proc findFooter*(exePath: string): (bool, Footer, int) =
@@ -75,11 +82,21 @@ proc findFooter*(exePath: string): (bool, Footer, int) =
         ft.payloadOff = rdU64(raw, 12)
         ft.payloadLen = rdU64(raw, 20)
         for k in 0..31: ft.payloadSha[k] = raw[28+k]
-        if ver == 2'u16:
+        if ver == 2'u16 or ver == 3'u16:
           ft.hasStub = true
           ft.stubOff = rdU64(raw, 60)
           ft.stubLen = rdU64(raw, 68)
           for k in 0..31: ft.stubSha[k] = raw[76+k]
+          # Capture the signed region (footer[8:108]) for v2 and v3 alike; only v3 carries a
+          # signature over it, but the bytes are identical, so it is cheap to always keep.
+          for k in 0 ..< SignedRegionLen: ft.signed[k] = raw[8+k]
+        if ver == 3'u16:
+          # v3 --self-signed: the Ed25519 public key and signature ride AFTER the signed
+          # region and before TAIL (raw[108:140] pubkey, raw[140:204] sig). They are outside
+          # `signed` on purpose — a signature cannot authenticate itself.
+          ft.hasSig = true
+          for k in 0..31: ft.pubKey[k] = raw[108+k]
+          for k in 0..63: ft.sig[k] = raw[140+k]
         return (true, ft, winStart + i)
     dec i
   var empty: Footer

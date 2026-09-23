@@ -33,7 +33,8 @@ def finish(info: dict, *, sources, provider: str, tier: str, tgt, nim: str, comp
            out: Path, enc: dict, manifest: dict, pyver: str, canary: dict, reap: bool,
            overwrite: bool, ram_only: bool, base_path: str, source_url: str,
            unpacked_bytes: int, shake_report: dict,
-           slim_report: dict | None = None) -> dict:
+           slim_report: dict | None = None,
+           signing_info: dict | None = None, cert_info: dict | None = None) -> dict:
     """Fold every recorded fact about this build into the receipt and return it."""
     # The receipt records WHERE this build's third-party bytes came from. An operator
     # auditing a signed artifact should not have to guess whether a mirror was in play.
@@ -50,6 +51,20 @@ def finish(info: dict, *, sources, provider: str, tier: str, tgt, nim: str, comp
     if shake_report:
         info["shake"] = {k: shake_report[k] for k in _SHAKE_KEYS}
         info["shake"]["report"] = str(shake_mod.write_report(shake_report, out))
+    # Signing provenance. The public-key FINGERPRINT is the thing a vendor publishes out of
+    # band so a recipient can pin it — without that pin --self-signed is only edit-detection,
+    # not tamper-evidence (INV-SIGN-01). The receipt records it precisely, and records the
+    # deferred Authenticode intent for --cert-file, so the receipt never over-claims either.
+    if signing_info:
+        info["self_signed"] = {
+            "public_key_sha256": signing_info.get("pubkey_sha256", ""),
+            "key_path": signing_info.get("key_path", ""),
+            "honest_limit": ("detects post-build payload edits by anyone who does not ALSO "
+                             "rewrite the embedded public key; NOT tamper-evidence unless this "
+                             "fingerprint is pinned out of band (docs/SIGNING.md)"),
+        }
+    if cert_info:
+        info["authenticode"] = dict(cert_info)
     if slim_report:
         # Provenance, not a saving: the receipt names EVERY path `--slim-python` removed from
         # the verified PBS interpreter, so the chain reads "verified artifact, then these N

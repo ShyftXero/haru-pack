@@ -14,7 +14,7 @@ and `docs/ENCRYPTION_LICENSING.md`.
 
 ## Worst case
 
-A vendor signs a haru-pack binary with an EV certificate and ships it to their customers.
+A vendor signs a haru-pack binary with a code-signing certificate and ships it to their customers.
 That binary is a **self-extracting stager that runs code from an appended blob**, resolves
 tools from the environment, and — at the `thin` tier — downloads and executes an
 interpreter and a package manager at runtime on the customer's machine.
@@ -29,7 +29,7 @@ becomes a distribution channel."
 | Asset | Where it lives | Why it matters |
 |---|---|---|
 | The payload | appended to the launcher | contains the application AND `pre_install`/`post_install` argv the launcher executes |
-| The vendor's code-signing identity | the signed PE | the whole reason to buy an EV cert |
+| The vendor's code-signing identity | the signed PE | the whole reason to buy a code-signing cert |
 | The build host's toolchain | Nim, uv, mingw, python-build-standalone | compromise here contaminates every artifact built afterwards |
 | The operator's own secrets | `.env`, keys, sitting in the project directory being packed | packaged and distributed by accident — the highest-likelihood incident in this list |
 | The license secret | `--secret`, `HARU_SECRET` (default canary), or embedded | the only trust anchor; there is no PKI |
