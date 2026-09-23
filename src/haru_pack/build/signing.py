@@ -153,7 +153,11 @@ def resolve_signing(project: Path, *, self_signed: bool, sign_key: str, cert_fil
             f"  public-key fingerprint (sha256): {sign_fp}\n"
             f"  HONEST LIMIT: --self-signed detects post-build payload edits by anyone who "
             f"does not ALSO rewrite the embedded public key; it is NOT tamper-evidence unless "
-            f"this fingerprint is PINNED OUT OF BAND (docs/SIGNING.md).")
+            f"this fingerprint is PINNED OUT OF BAND.\n"
+            f"  PUBLISH it so recipients can pin it: GPG- or SSH-sign the fingerprint with a key "
+            f"people already associate with you (e.g. served at github.com/<you>.gpg or "
+            f"github.com/<you>.keys). See docs/SIGNING.md 'Publishing your fingerprint'. "
+            f"(On Windows, use --cert-file/Authenticode instead — no manual pin needed.)")
     elif sign_key:
         raise BuildError("--sign-key was given without --self-signed; add --self-signed to "
                          "sign the build, or drop --sign-key.")

@@ -89,5 +89,10 @@ def keygen(project: Path = typer.Argument(Path("."),
         print(str(e), style="error"); raise typer.Exit(2)
     print(f"wrote signing key: {path}", style="ok")
     print(f"public-key fingerprint (sha256): {fp}")
+    print("PUBLISH this fingerprint out of band so recipients can pin it — otherwise "
+          "--self-signed is edit-detection only, not tamper-evidence. Easiest: GPG- or "
+          "SSH-sign it with a key people already associate with you (e.g. served at "
+          "github.com/<you>.gpg or github.com/<you>.keys). See docs/SIGNING.md "
+          "'Publishing your fingerprint'.")
     print("PIN this fingerprint out of band. Without that, --self-signed detects edits but "
           "is not tamper-evidence (docs/SIGNING.md).", style="warn")

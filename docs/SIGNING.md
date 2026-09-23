@@ -122,6 +122,51 @@ haru-pack build app/ --self-signed
 
 It does **not** claim INV-LAUNCH-03 (a signature anchored out of band), which stays `proposed`.
 
+### Publishing your fingerprint — the out-of-band anchor
+
+The fingerprint only means something if a recipient gets it through a channel the attacker
+does not control, then pins it. The cheapest trustworthy channel is one you already have: sign
+a short statement binding the project to the fingerprint **with a key people already associate
+with you**, and host it where your identity already lives. (This is the ELF/macOS story — on
+Windows, `--cert-file`/Authenticode is the real anchor and needs none of this; the OS validates
+the chain.)
+
+Write the statement once:
+
+```
+printf 'haru-pack %s ed25519 %s\n' myproject <fingerprint> > haru-fingerprint.txt
+```
+
+**Reuse a GPG key you already publish:**
+```
+gpg --clearsign haru-fingerprint.txt          # -> haru-fingerprint.txt.asc
+```
+Recipients verify with your GPG public key, which is likely already discoverable at
+`https://github.com/<you>.gpg`, `keys.openpgp.org`, or your domain's WKD
+(`.well-known/openpgpkey/...`). They check the signature, then trust the `ed25519 <fingerprint>`
+line.
+
+**Reuse your GitHub SSH key** (Ed25519 — the same mechanism GitHub uses for SSH-signed commits):
+```
+ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n haru-pack haru-fingerprint.txt   # -> .sig
+# recipient, using your public keys straight from GitHub as the allow-list:
+curl -s https://github.com/<you>.keys | sed 's/^/'"<you>"' namespaces="haru-pack" /' > allowed
+ssh-keygen -Y verify -f allowed -I "<you>" -n haru-pack \
+  -s haru-fingerprint.txt.sig < haru-fingerprint.txt
+```
+`https://github.com/<you>.keys` (and `.gpg`) is a ready-made out-of-band channel: it is served
+over GitHub's TLS and tied to your account, so an attacker who tampers a binary cannot also
+change what your `.keys` URL returns.
+
+**Where to host the signed statement:** your HTTPS site (a stable URL, or `/.well-known/`), a
+**signed git tag** or GitHub Release (GitHub shows "Verified" for GPG/SSH-signed tags), a
+keyserver/WKD, or Keybase. Any one the attacker can't rewrite works; publishing via more than
+one raises the bar.
+
+> Not yet automated: haru-pack could fetch a signer's pinned key from `github.com/<you>.keys`
+> and verify against it, or let you sign the build directly with an existing Ed25519 SSH/GPG key.
+> Today the flow above is manual and the launcher pins nothing itself — tracked in #71.
+
 Key handling, on purpose:
 - **Storage.** `~/.config/haru-pack/<hash-of-project>/key`, directory `0700`, file `0600`. A
   group- or world-readable key is refused, not used.
