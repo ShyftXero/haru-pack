@@ -78,10 +78,19 @@ also refuses a consensus larger than the endpoint count (unreachable forever).
   the body is buffered — puppy has no streaming API — so a hostile resolver/mirror can make the
   launcher buffer more than the cap before it is rejected. The outcome is a fail-closed crash on
   launch, never code execution.
-- **Windows TLS.** puppy's HTTPS on Windows needs a `cacert.pem` beside the binary (same as
-  thin-tier uv fetch). Without it the request fails to resolve — and the gate **fails closed**,
-  never open.
-- **Network required.** A geo-gated build needs network at every run; offline = fail closed.
+- **TLS trust is the OS-native store, no shipped cert.** puppy uses the platform HTTP stack:
+  **WinHTTP** on Windows (the system ROOT store, auto-updated by Windows Update), **AppKit /
+  NSURLSession** on macOS (Keychain), **libcurl** on Linux (the system CA under `/etc/ssl`). There
+  is **no `cacert.pem` beside the binary** and **no OpenSSL** on Windows/macOS — this matches the
+  thin-tier uv fetch (docs/adr/0005-remote-fetch.md §4) and the tier note in docs/TIERS.md, both of
+  which already say WinHTTP/Schannel + no openssl. (An earlier draft of this ADR claimed Windows
+  needs a bundled cert; that was wrong. cacert.pem only applies under Nim's `-d:puppyLibcurl`, which
+  haru-pack never sets — see `src/haru_pack/emit/nimflags.py`.) One consequence for the MITM caveat
+  above: only Linux/libcurl honors `SSL_CERT_FILE` / `SSL_CERT_DIR` (and `http(s)_proxy`); WinHTTP
+  and AppKit read the OS configuration and ignore those env vars.
+- **Network required.** A geo-gated build needs network at every run; a partitioned or offline
+  network makes the resolver unreachable, so the gate **fails closed** — like any transport
+  failure, never open.
 
 ## Consequences
 
