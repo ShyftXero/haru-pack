@@ -61,8 +61,11 @@ def couple_staging_flags(*, reap: bool, overwrite: bool, ram_only: bool, no_reap
 
 
 def announce_staging(*, enc: dict, reap: bool, overwrite: bool, ram_only: bool,
-                     base_path: str, say) -> None:
-    """Say out loud what each staging knob will, and will not, actually do."""
+                     base_path: str, say, source=None) -> None:
+    """Say out loud what each staging knob will, and will not, actually do — and warn if the
+    project bundles writable-looking data that would hard-fail the second run (section E)."""
+    if source is not None:
+        warn_bundled_writable_data(source, say)
     if enc["geo"].get("allow"):
         gp = enc["geo"]
         say(f"--geo-restrict: online location gate — {len(gp['allow'])} allow-rule(s), "

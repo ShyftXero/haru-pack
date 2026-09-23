@@ -88,8 +88,10 @@ Rust ext, `flask db upgrade`, `prisma generate`, downloading a model, compiling 
   mutate it, copy it out to a writable location on first run.
 - `haru-pack build` warns when it spots a writable-looking file (`*.db`, `*.sqlite*`, sqlite
   `-wal`/`-journal`) bundled with the code, so this is caught at build, not by a customer.
-- Ship a tiny `haru-pack` runtime helper: `stage()`, `exe_dir()`, `data_dir()` so authors
-  stop guessing.
+- Or skip the boilerplate: `from haru_pack.runtime import stage, exe_dir, data_dir, data_file`
+  — a stdlib-only wrapper for exactly this (read-only `stage()`; writable `data_dir(app)` /
+  `data_file(app, "files.db")` on XDG / `%LOCALAPPDATA%` / `~/Library`). It pulls in no heavy
+  deps, so depending on haru-pack for it is cheap — or copy the two lines you need.
 
 Resolving the right folder (pathlib):
 
