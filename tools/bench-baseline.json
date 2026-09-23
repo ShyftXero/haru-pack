@@ -1,0 +1,30 @@
+{
+  "host": "Linux x86_64, Python 3.13 staged",
+  "when": "2026-09-23",
+  "rows": [
+    {
+      "tier": "thin",
+      "size_mb": 1.0,
+      "cold_s": 0.93,
+      "warm_s": 0.173
+    },
+    {
+      "tier": "default",
+      "size_mb": 15.1,
+      "cold_s": 6.51,
+      "warm_s": 0.456
+    },
+    {
+      "tier": "thick",
+      "size_mb": 50.5,
+      "cold_s": 9.11,
+      "warm_s": 1.184
+    },
+    {
+      "tier": "python <script> (baseline)",
+      "size_mb": null,
+      "cold_s": 0.121,
+      "warm_s": 0.143
+    }
+  ]
+}
