@@ -111,6 +111,14 @@ for tape in "$here"/${1:-}*.tape; do
     [ -e "$tape" ] || { echo "no tape matched '${1:-}'"; exit 1; }
     echo "==> $(basename "$tape")"
     vhs "$tape" || status=1
+    # VHS records the tape's final `Sleep` as identical trailing frames, and gifski dedupes
+    # them — so the end state flashes by at one frame before the loop and the reader never sees
+    # the last of the output. Re-assert a ~4s hold on the last frame (byte-level, lossless — no
+    # re-encode, no bloat; see tools/gif_hold_last.py) so there is a pause before it loops.
+    out="$(sed -nE 's/^Output "([^"]+)".*/\1/p' "$tape" | head -1)"
+    if [ -n "$out" ] && [ -f "$repo/$out" ]; then
+        python3 "$repo/tools/gif_hold_last.py" 400 "$repo/$out" || status=1
+    fi
 done
 
 echo

@@ -301,8 +301,9 @@ security claims here that were never implemented.
 | `haru-pack build <dir>` | build a single-file launcher from a project or script |
 | `haru-pack bootstrap` | install Nim + launcher deps; verify the C toolchain |
 | `haru-pack doctor [dir]` | check Nim / C toolchain; scan a project for needed bundle/install steps |
-| `haru-pack verify <exe>` | inspect the footer + confirm payload integrity |
-| `haru-pack machine-id` | print this machine's id (for `--machine` license binding) |
+| `haru-pack verify <exe> [--pin github:<user>]` | inspect the footer + confirm payload integrity; `--pin` also anchors a `--self-signed` build to a published identity ([`docs/SIGNING.md`](docs/SIGNING.md)) |
+| `haru-pack hostname` | print this machine's OS hostname (for `--machine` license binding) |
+| `haru-pack keygen` | mint + store the Ed25519 key for `--self-signed`, and print its fingerprint |
 | `haru-pack version` | version |
 
 ## `build` flags
@@ -326,9 +327,13 @@ security claims here that were never implemented.
 | `--obfuscate ENGINE` | `none` | obfuscate the source before packing: `none` \| `pyarmor`. Independent of `--encrypt`; wants `--thick` |
 | `--obfuscate-args "…"` | | extra args passed through to the obfuscation engine |
 | `--expires YYYY-MM-DD` | | license expiry |
-| `--machine ID` | | bind cryptographically to a machine id (`haru-pack machine-id`) |
-| `--user NAME` | | bind to an OS username. Cryptographic (folded into the KDF) but it reads `$USER`, which the licensee sets — see Status |
+| `--machine HOST` | | bind to the target's OS hostname (`haru-pack hostname` on the target; FQDN with short-name fallback). Cryptographic — folded into the KDF |
+| `--user NAME` | | bind to the OS login username (`getpwuid` / `GetUserNameW`, not `$USER`). Cryptographic, but SOME protection, not an identity check — see Status |
 | `--geo CC,CC` | | allowed country codes |
+| `--self-signed` | off | sign the build with an Ed25519 key so the launcher detects post-build edits (v3 footer). NOT tamper-evidence unless you publish/pin the fingerprint out of band ([`docs/SIGNING.md`](docs/SIGNING.md)) |
+| `--sign-key PATH` | per-project keystore | Ed25519 key for `--self-signed`: a raw 32-byte seed or an OpenSSH `id_ed25519` (the embedded key can be your GitHub SSH key). Mint one with `haru-pack keygen` |
+| `--sign-key-passphrase-env VAR` | | read an encrypted `--sign-key`'s passphrase from env var `VAR` (never prompts) |
+| `--cert-file PATH` | | Windows only: request Authenticode signing (the real Windows tamper-evidence); haru-pack prints the exact `osslsigncode`/`jsign` command to run ([`docs/SIGNING.md`](docs/SIGNING.md)) |
 
 `bootstrap` takes repeatable `--target`, plus `--yes` and `--force`. `doctor` takes `--target`.
 
@@ -402,7 +407,7 @@ Read these two before relying on anything:
   licensing feature does and does not enforce.
 
 Then, as you need them: [CONFIG.md](docs/CONFIG.md) (haru_pack.toml) ·
-[TIERS.md](docs/TIERS.md) · [SIGNING.md](docs/SIGNING.md) (Windows Authenticode) ·
+[TIERS.md](docs/TIERS.md) · [SIGNING.md](docs/SIGNING.md) (code signing + provenance: Ed25519 any-OS, Authenticode on Windows) ·
 [ENCRYPTION_LICENSING.md](docs/ENCRYPTION_LICENSING.md) · [SHAKE.md](docs/SHAKE.md) ·
 [SHARP_CORNERS.md](docs/SHARP_CORNERS.md) ·
 [COMMON_CRITIQUES.md](docs/COMMON_CRITIQUES.md) (why Nim *and* zig, where's the Rust, why not
@@ -422,8 +427,11 @@ commercial.** The short version of what licensing does and does not enforce:
 
 - **Machine and user binding are cryptographic, but they are not attestation.** The identity
   is folded into the KDF, so a wrong value never decrypts. It binds to what the target
-  *reports*: `/etc/machine-id` is a writable file, and `--user` reads `$USER`, so
-  `USER=alice ./app` presents a different seat with no patching and no privilege.
+  *reports*: `--machine` binds the OS hostname and `--user` the OS login username (via
+  `getpwuid`/`GetUserNameW`, not `$USER`). That removes the trivial `USER=alice ./app` bypass,
+  but it is still SOME protection, not an identity check — someone who controls the box can set
+  a matching hostname or create a matching account. Tamper-evidence of the binary itself is a
+  separate axis (`--self-signed` / `--cert-file`, see SIGNING.md).
 - **`--expires` is not enforcement.** It reads the target's clock, after decryption, inside a
   binary they control.
 - **`--geo` is a network call to a third party on every launch.** It resolves the caller's IP
