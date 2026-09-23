@@ -157,7 +157,7 @@ def _nim_offsets() -> dict[str, int]:
     """Read the offsets cryptbox.nim parses at, straight out of the Nim source."""
     src = NIM_CRYPTBOX.read_text()
     body = src[src.index("proc parseBox"):]
-    body = body[:body.index("proc machineId")]
+    body = body[:body.index("proc canonHostname")]
     out = {}
     for name, pat in [
         ("flags", r"result\.flags\s*=\s*rdU16\(b,\s*(\d+)\)"),

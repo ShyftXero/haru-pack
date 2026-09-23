@@ -34,8 +34,15 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           secret_prompt: bool = typer.Option(False, "--secret-prompt", help="prompt for the secret"),
           embed_secret: bool = typer.Option(False, "--embed-secret", help="embed the secret in the exe (weakest)"),
           expires: str = typer.Option("", "--expires", help="license expiry YYYY-MM-DD"),
-          machine: str = typer.Option("", "--machine", help="bind to this machine-id (cryptographic)"),
-          user: str = typer.Option("", "--user", help="bind to this OS username (cryptographic)"),
+          machine: str = typer.Option("", "--machine",
+              help="bind to this OS hostname (cryptographic; canonicalized to ASCII-lowercase "
+                   "with a trailing dot stripped). The customer runs `haru-pack hostname` on "
+                   "the target and sends you the value. FQDN preferred, short name on off-domain "
+                   "boxes — exact-match, so short != FQDN"),
+          user: str = typer.Option("", "--user",
+              help="bind to this OS login username (cryptographic). A second passphrase "
+                   "component, NOT an identity check — it binds to a login string on a machine "
+                   "the licensee controls, not to a person"),
           geo: str = typer.Option("", "--geo",
               help="allowed country codes, comma-separated (sugar for --geo-restrict "
                    "country_code=XX). Resolved online at runtime; fail-closed; needs --encrypt"),
