@@ -343,15 +343,22 @@ def test_the_pinned_versions_are_the_ones_with_pins():
 
 @pytest.mark.invariant("INV-SUPPLY-01")
 def test_no_unverified_download_in_the_source():
-    """Every fetch must go through archives.fetch_verified.
+    """Every fetch of an artifact we STAGE OR EXECUTE must go through archives.fetch_verified.
 
     Grep-shaped, like the INV-SUPPLY-03 guard next door, and appropriate for the same
     reason: the danger is the call shape. `urlretrieve(url, dest)` anywhere else in
     src/ is a download with no digest behind it.
+
+    `anchor.py` is exempt on purpose, not by oversight. Its `urlopen` fetches a TRUST ANCHOR
+    (a signer's published `ssh-ed25519` keys), never a byte we run or embed. A pinned digest is
+    the wrong control there: the key set legitimately changes over time, and the whole security
+    model (INV-SIGN-02) is TLS + account trust, stated as its honest limit — not a fixed hash.
+    Digest-verifying it would be theatre. If a future edit makes anchor.py fetch something it
+    then executes or stages, remove this exemption.
     """
     offenders = []
     for p in sorted(SRC.rglob("*.py")):
-        if p.name == "archives.py":
+        if p.name in {"archives.py", "anchor.py"}:
             continue
         for i, line in enumerate(p.read_text().splitlines(), 1):
             if re.search(r"\b(urlretrieve|urlopen|requests\.(get|post))\s*\(", line):

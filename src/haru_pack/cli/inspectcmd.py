@@ -24,8 +24,19 @@ def version():
 
 
 @app.command()
-def verify(exe: Path):
-    """Inspect a built launcher's footer + confirm payload integrity."""
+def verify(exe: Path,
+           pin: str = typer.Option("", "--pin", metavar="SPEC",
+               help="anchor the build's EMBEDDED --self-signed key to a published key set and "
+                    "fail (nonzero) unless it matches. SPEC is github:<user> (fetches "
+                    "https://github.com/<user>.keys over TLS) or keys-url:<https-url>. A match "
+                    "upgrades edit-detection to identity-anchored provenance (INV-SIGN-02) — but "
+                    "trust then reduces to GitHub-account + TLS trust; account takeover or a "
+                    "mis-issued cert forges it. Fails closed on any network/parse error.")):
+    """Inspect a built launcher's footer + confirm payload integrity.
+
+    With --pin, also anchor the embedded signing key to a published identity (see docs/SIGNING.md
+    'Publishing your fingerprint'). A pin mismatch fails the command alongside a digest failure.
+    """
     info = verify_exe(exe)
     # Aligned on a terminal, `key: value` lines when piped — `ui.table` decides, because
     # this is the command a CI job runs and its output has to stay greppable.
@@ -33,7 +44,33 @@ def verify(exe: Path):
     ok = info["sha_ok"]
     print("payload integrity: OK" if ok else "payload integrity: FAILED",
           style="ok" if ok else "error")
-    raise typer.Exit(0 if ok else 1)
+    pin_ok = _check_pin(info, pin) if pin else True
+    raise typer.Exit(0 if (ok and pin_ok) else 1)
+
+
+def _check_pin(info: dict, spec: str) -> bool:
+    """Anchor the build's embedded signing key against a published key set. Returns True only on
+    a clean match; prints why and returns False on anything else (fail-closed)."""
+    from ..anchor import AnchorError, check_embedded_pubkey
+    pubkey = info.get("pubkey")
+    if not info.get("self_signed") or not pubkey:
+        print("--pin: this build carries no embedded --self-signed key (not a v3 footer); there "
+              "is nothing to anchor. Refusing (fail-closed).", style="error")
+        return False
+    try:
+        res = check_embedded_pubkey(pubkey, spec)
+    except AnchorError as e:
+        print(f"anchor: FAILED — {e}", style="error")
+        return False
+    if res.matched:
+        print(f"anchor: OK — embedded key is published at {res.url} "
+              f"({res.n_keys} ed25519 key(s) checked). Trust = GitHub-account + TLS trust only "
+              f"(INV-SIGN-02).", style="ok")
+        return True
+    print(f"anchor: FAILED — embedded key is NOT among the {res.n_keys} ed25519 key(s) at "
+          f"{res.url}. This binary was signed by a key the pinned identity does not publish.",
+          style="error")
+    return False
 
 @app.command()
 def init(path: Path = typer.Argument(Path("."), help="project dir or script"),

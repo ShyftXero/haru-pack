@@ -91,3 +91,121 @@ def test_default_key_path_is_per_project_and_under_xdg(tmp_path, monkeypatch):
     assert str(pa).startswith(str(tmp_path / "cfg" / "haru-pack"))
     assert pa != pb                                      # different projects, different keys
     assert signing.default_key_path(a) == pa             # stable for the same project
+
+
+# ----------------------------------------------------- --sign-key: OpenSSH Ed25519 keys (#71)
+
+from cryptography.hazmat.primitives import serialization  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa  # noqa: E402
+
+
+def _write_0600(path, data: bytes):
+    path.write_bytes(data)
+    os.chmod(path, 0o600)
+    return path
+
+
+def _openssh_ed25519(path, key, passphrase: bytes | None = None):
+    enc = (serialization.BestAvailableEncryption(passphrase) if passphrase
+           else serialization.NoEncryption())
+    pem = key.private_bytes(serialization.Encoding.PEM,
+                            serialization.PrivateFormat.OpenSSH, enc)
+    return _write_0600(path, pem)
+
+
+def _raw_pub(key) -> bytes:
+    return key.public_key().public_bytes_raw()
+
+
+def test_sign_key_accepts_openssh_ed25519_and_embeds_that_pubkey(tmp_path):
+    """An OpenSSH Ed25519 --sign-key yields the SAME embedded pubkey/fingerprint as the raw
+    seed of that key — i.e. the key a dev publishes at github.com/<user>.keys."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    path = _openssh_ed25519(tmp_path / "id_ed25519", key)
+    loaded, fp = signing.load_key(path)
+    assert _raw_pub(loaded) == _raw_pub(key)                 # embedded pubkey == the SSH pubkey
+    assert fp == signing.fingerprint(_raw_pub(key))
+
+
+def test_sign_key_openssh_signs_byte_identically_to_the_raw_seed(tmp_path):
+    """The OpenSSH path re-derives the raw seed and signs EXACTLY as the keystore path — so a
+    --self-signed build stays byte-reproducible regardless of which file shape carried the key."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    seed = key.private_bytes_raw()
+    ssh = signing.load_key(_openssh_ed25519(tmp_path / "id_ed25519", key))[0]
+    raw = signing.load_key(_write_0600(tmp_path / "seed", seed))[0]
+    msg = b"\x03\x00" + b"haru-pack footer signed region" * 3
+    assert ssh.sign(msg) == raw.sign(msg)                    # deterministic + same seed
+
+
+def test_raw_32_byte_seed_still_works(tmp_path):
+    """Regression: the pre-#71 raw-seed file shape keeps loading unchanged."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    path = _write_0600(tmp_path / "seed", key.private_bytes_raw())
+    loaded, fp = signing.load_key(path)
+    assert _raw_pub(loaded) == _raw_pub(key)
+
+
+def test_passphrase_protected_openssh_via_env(tmp_path, monkeypatch):
+    key = ed25519.Ed25519PrivateKey.generate()
+    path = _openssh_ed25519(tmp_path / "id_ed25519", key, passphrase=b"correct horse")
+    monkeypatch.setenv("HP_PASS", "correct horse")
+    project = tmp_path / "proj"; project.mkdir()
+    loaded, fp, used = signing.load_signing_key(project, str(path), passphrase_env="HP_PASS")
+    assert _raw_pub(loaded) == _raw_pub(key)
+    assert used == path
+
+
+def test_passphrase_wrong_gives_clear_error(tmp_path, monkeypatch):
+    key = ed25519.Ed25519PrivateKey.generate()
+    path = _openssh_ed25519(tmp_path / "id_ed25519", key, passphrase=b"correct horse")
+    monkeypatch.setenv("HP_PASS", "WRONG")
+    project = tmp_path / "proj"; project.mkdir()
+    with pytest.raises(SigningError, match="passphrase.*wrong|wrong"):
+        signing.load_signing_key(project, str(path), passphrase_env="HP_PASS")
+
+
+def test_passphrase_missing_on_encrypted_key_is_refused_not_prompted(tmp_path):
+    key = ed25519.Ed25519PrivateKey.generate()
+    path = _openssh_ed25519(tmp_path / "id_ed25519", key, passphrase=b"correct horse")
+    with pytest.raises(SigningError, match="passphrase-protected"):
+        signing.load_key(path)                               # no passphrase supplied
+
+
+def test_passphrase_env_unset_is_refused(tmp_path):
+    key = ed25519.Ed25519PrivateKey.generate()
+    path = _openssh_ed25519(tmp_path / "id_ed25519", key, passphrase=b"pw")
+    project = tmp_path / "proj"; project.mkdir()
+    with pytest.raises(SigningError, match="is not set"):
+        signing.load_signing_key(project, str(path), passphrase_env="DEFINITELY_UNSET_VAR")
+
+
+def test_rsa_openssh_key_is_refused_not_minted(tmp_path):
+    rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = rsa_key.private_bytes(serialization.Encoding.PEM,
+                               serialization.PrivateFormat.OpenSSH,
+                               serialization.NoEncryption())
+    path = _write_0600(tmp_path / "id_rsa", pem)
+    with pytest.raises(SigningError, match="not Ed25519"):
+        signing.load_key(path)
+
+
+def test_ecdsa_openssh_key_is_refused_not_minted(tmp_path):
+    ec_key = ec.generate_private_key(ec.SECP256R1())
+    pem = ec_key.private_bytes(serialization.Encoding.PEM,
+                              serialization.PrivateFormat.OpenSSH,
+                              serialization.NoEncryption())
+    path = _write_0600(tmp_path / "id_ecdsa", pem)
+    with pytest.raises(SigningError, match="not Ed25519"):
+        signing.load_key(path)
+
+
+def test_public_key_file_is_refused(tmp_path):
+    """A `.pub` (or any non-private-key) file must be refused, not silently accepted — this is
+    the shape an agent-only key leaves on disk."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    pub = key.public_key().public_bytes(serialization.Encoding.OpenSSH,
+                                        serialization.PublicFormat.OpenSSH)
+    path = _write_0600(tmp_path / "id_ed25519.pub", pub)
+    with pytest.raises(SigningError):
+        signing.load_key(path)
