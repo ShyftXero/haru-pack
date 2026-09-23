@@ -273,3 +273,50 @@ def test_a_thin_build_records_the_pinned_uv_digest():
     assert "uv_asset()" in src, (
         "uvfetch hashes the release asset, so the pin must be looked up by asset name"
     )
+
+
+# ------------------------------------------- the launcher stays on puppy's OS-native TLS backend
+
+@pytest.mark.invariant("INV-SUPPLY-13")
+def test_launcher_never_uses_puppy_libcurl():
+    """The launcher's HTTPS (thin-tier uv fetch, remote payload fetch, online geo/ip gate) uses
+    puppy's DEFAULT backend — WinHTTP on Windows, AppKit/NSURLSession on macOS, libcurl on Linux —
+    so a Windows/macOS binary needs NO cacert.pem and NO OpenSSL. A `cacert.pem` beside the binary
+    only matters under Nim's `-d:puppyLibcurl`, which forces libcurl on every platform; haru-pack
+    must never set it, or a Windows launch would fail closed on a cert the build does not ship.
+
+    Asserted against `emit.nim_target_flags` — the single source of truth used by BOTH the real
+    build (`build.compiler.compile_launcher`) and the emitted kit's `compile.sh` (INV-EMIT-01) —
+    so a define added there is caught for every target and both compiler providers at once.
+
+    Red-path: add `"-d:puppyLibcurl"` to the `args` list in `emit/nimflags.nim_target_flags`.
+    """
+    from haru_pack.emit import nim_target_flags
+    from haru_pack.targets import KNOWN_TARGETS, Target
+
+    offenders = []
+    for name in KNOWN_TARGETS:
+        tgt = Target.parse(name)
+        for provider in ("zig", "system"):
+            flags = nim_target_flags(tgt, provider, shim_ref="/tmp/zig-cc")
+            if any("puppyLibcurl" in f for f in flags):
+                offenders.append(f"{name}/{provider}: {flags}")
+    assert not offenders, (
+        "the launcher build flags force puppy onto libcurl — a Windows/macOS binary would then "
+        "need a cacert.pem it does not ship (INV-SUPPLY-13):\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.invariant("INV-SUPPLY-13")
+def test_nimflags_source_declares_no_libcurl_define():
+    """A second angle on the same fact: the flag-set module must not name the libcurl define at
+    all (a comment forbidding it is fine — the assertion strips comments). This catches a define
+    hidden behind a branch the parametrized call above might not exercise.
+
+    Red-path: put `-d:puppyLibcurl` into src/haru_pack/emit/nimflags.py.
+    """
+    src = source_without_comments(REPO / "src" / "haru_pack" / "emit" / "nimflags.py")
+    assert "puppyLibcurl" not in src, (
+        "emit/nimflags.py names the libcurl define; the launcher must stay on puppy's OS-native "
+        "TLS backend so no cacert.pem is required (INV-SUPPLY-13)"
+    )

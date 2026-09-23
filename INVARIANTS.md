@@ -1726,6 +1726,36 @@ the default.
 Territory: not yet — nothing is implemented. Planned:
 src/haru_pack/archives.py, src/haru_pack/bundle.py
 
+### INV-SUPPLY-13
+Status: active
+Statement: The launcher's HTTP(S) (thin-tier uv fetch, remote payload fetch, and the online geo/ip
+gate) uses puppy's DEFAULT OS-native TLS backend on every target — WinHTTP on Windows, AppKit/
+NSURLSession on macOS, libcurl on Linux. haru-pack NEVER compiles the launcher with
+`-d:puppyLibcurl`, so a Windows/macOS binary needs no bundled `cacert.pem` and no OpenSSL: TLS
+trust is the system store (WinHTTP ROOT / Keychain / `/etc/ssl`), and only the Linux/libcurl path
+honors `SSL_CERT_FILE` / `SSL_CERT_DIR` / `http(s)_proxy`.
+Actors: a future implementer who "adds a cert bundle" or flips puppy to libcurl for uniformity, and
+in doing so reintroduces a real cacert dependency the packed binary does not ship — turning every
+Windows launch into a fail-closed TLS error, or (worse) prompting a shipped cert that breaks the
+no-OpenSSL contract (docs/TIERS.md, docs/adr/0005-remote-fetch.md).
+Assets: the "no curl/wget/OpenSSL on the target, no cert file beside the binary" contract the thin
+tier and the geo gate both rest on. If puppy silently switched to libcurl on Windows, HTTPS would
+need a cacert.pem that nothing produces.
+Red-path: Add `"-d:puppyLibcurl"` to the args list in `emit/nimflags.nim_target_flags` (the single
+source of truth used by both the real build and the emitted kit). `test_launcher_never_uses_puppy_libcurl`
+in tests/test_packaging.py goes red: the flag set for a Windows/macOS target now carries a define
+that forces libcurl, which on Windows needs the cacert this build never ships. Walked 2026-09-23 on
+this Linux host (the guard flags the injected define across all KNOWN_TARGETS and both cc providers).
+Source: Issue #67. The issue was filed on the FALSE premise that Windows puppy needs a bundled
+cacert.pem; the grill established puppy's defaults (WinHTTP/AppKit/libcurl) and that cacert only
+matters under `-d:puppyLibcurl`, which haru-pack never sets. This guard freezes that fact so the
+assumption cannot silently flip. Sources: treeform/puppy README/source, forum.nim-lang.org/t/7581.
+Note: This is a flag-set guard, not a live-TLS test. It asserts the launcher is built for the
+OS-native backend; it does not prove a live public-CA HTTPS handshake succeeds on real Windows/macOS
+(that needs those OSes — the geo parity leg exercises WinHTTP transport under wine against a LOCAL
+plain-HTTP resolver, see tests/test_geo_gate_wine.py).
+Territory: src/haru_pack/emit/nimflags.py, src/haru_pack/build/compiler.py, tests/test_packaging.py
+
 ---
 
 ## STAGE — the tree on the target that we actually execute
@@ -2959,9 +2989,13 @@ gate, rebuild, and run an encrypted binary whose resolver denies (FR) with `HARU
 the environment: the app RUNS and `test_env_cannot_bypass_the_geo_gate` goes red. Walked
 2026-09-12 on this Linux host (observed the app run under the reintroduced bypass).
 Note: HONEST LIMIT (load-bearing — do not read the Statement wider than this). The gate is an
-HTTP(S) call made ON THE END USER'S OWN MACHINE. A user with local privilege controls their own
-proxy (`https_proxy`), CA trust (`SSL_CERT_FILE`/`SSL_CERT_DIR`), and DNS/`/etc/hosts`, so they can
-MITM the resolver and forge `country_code=US` — and N-endpoint consensus does NOT help, because one
+HTTP(S) call made ON THE END USER'S OWN MACHINE, and a user with local privilege controls the trust
+that call depends on: DNS/`/etc/hosts`, the proxy, and the CA store — so they can MITM the resolver
+and forge `country_code=US`. The exact knob is platform-specific (do not overclaim the env-var
+route cross-platform): on Linux, puppy uses libcurl, which honors `SSL_CERT_FILE`/`SSL_CERT_DIR` and
+`http(s)_proxy`; on Windows (WinHTTP) and macOS (AppKit/Keychain) those env vars are IGNORED, but a
+local admin owns the OS trust store and proxy config just the same, so the MITM caveat holds on all
+three — only the mechanism differs. N-endpoint consensus does NOT help, because one
 on-path position intercepts every endpoint identically (and the shipped default K=1 trusts a single
 response). So this gate is REAL against a casual user and honest network faults (fail-closed
 offline), but it is ADVISORY against a determined local adversary; consensus defends only against a

@@ -14,8 +14,15 @@
 ## HONEST LIMITS. (1) IP-consensus defeats a single down/lying endpoint; it does NOT defeat a user
 ## behind a VPN/proxy whose exit IP is in an allowed location — that is an IP check, not a presence
 ## check. (2) puppy has no streaming API, so a body is buffered before the size cap applies.
-## (3) On Windows, puppy's HTTPS needs a `cacert.pem` beside the binary (same as thin-tier uv
-## fetch); without it the request fails to resolve and the gate FAILS CLOSED, never open.
+## (3) TLS uses the OS-native stack — WinHTTP on Windows (the system ROOT store, kept current by
+## Windows Update), AppKit/NSURLSession on macOS (Keychain), libcurl on Linux (the system CA under
+## /etc/ssl). There is NO `cacert.pem` beside the binary and NO OpenSSL on Windows/macOS; the old
+## note claiming Windows needs a bundled cert was wrong (cacert only matters under
+## `-d:puppyLibcurl`, which haru-pack never sets — see emit/nimflags.py). Linux/libcurl ONLY honors
+## the `SSL_CERT_FILE` / `SSL_CERT_DIR` and `http(s)_proxy` env vars; WinHTTP and AppKit read the OS
+## configuration and ignore them. The real transport limit is the ordinary one: a partitioned or
+## offline network makes the resolver unreachable, so the gate FAILS CLOSED — like any other
+## transport failure, never open.
 import std/[json, tables]
 import puppy
 
