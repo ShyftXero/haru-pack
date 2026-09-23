@@ -121,6 +121,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                                                      machine, user, embed_secret, encrypt,
                                                      entry_point, log=log)
     _record_obfuscation(manifest, obfuscate, obfuscate_args, tier, python, say)
+    advisories.warn_bundled_writable_data(source, say)
     if enc["enabled"] and secret is None:
         raise BuildError("encryption is configured but no secret — pass "
                          "--secret / --secret-env / --secret-prompt")
