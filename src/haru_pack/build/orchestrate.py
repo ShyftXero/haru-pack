@@ -99,11 +99,10 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           no_reap: bool = False, base_path: str = "", source_url: str = "", env_append=None,
           cc: str = "", emit_c: str = "", emit_nim: str = "",
           self_signed: bool = False, sign_key: str = "", cert_file: str = "",
-          log=None) -> dict:
+          sign_key_passphrase_env: str = "", log=None) -> dict:
     project = Path(project); out = Path(out)
     prepare_output_dir(out)
-    say = log or (lambda _m: None)
-    emit_c_dir = emitkit.validate_c_dir(emit_c)
+    say = log or (lambda _m: None); emit_c_dir = emitkit.validate_c_dir(emit_c)
     tgt = target if isinstance(target, Target) else Target.parse(target)
     nim, provider, tc = _preflight(tgt, cc, log)
 
@@ -111,7 +110,8 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     # signing key is fail-hard (haru-pack never mints one during a build) and --cert-file on a
     # non-Windows target is refused here. See signing.resolve_signing.
     sign_priv, signing_info, cert_info = signing.resolve_signing(
-        project, self_signed=self_signed, sign_key=sign_key, cert_file=cert_file, tgt=tgt, out=out, say=say)
+        project, self_signed=self_signed, sign_key=sign_key, cert_file=cert_file,
+        sign_key_passphrase_env=sign_key_passphrase_env, tgt=tgt, out=out, say=say)
 
     # Phase 4: fold --geo / --geo-restrict / --geo-restrict-api-url / --geo-restrict-consensus
     # into the uniform gate object BEFORE resolve, so enc["geo"] carries the online-gate policy

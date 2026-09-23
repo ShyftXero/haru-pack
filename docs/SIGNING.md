@@ -163,9 +163,50 @@ change what your `.keys` URL returns.
 keyserver/WKD, or Keybase. Any one the attacker can't rewrite works; publishing via more than
 one raises the bar.
 
-> Not yet automated: haru-pack could fetch a signer's pinned key from `github.com/<you>.keys`
-> and verify against it, or let you sign the build directly with an existing Ed25519 SSH/GPG key.
-> Today the flow above is manual and the launcher pins nothing itself — tracked in #71.
+#### Automated flow: sign with your GitHub SSH key, pin with `--pin` (INV-SIGN-02)
+
+The manual `ssh-keygen -Y sign` / `.gpg` dance above still works and is the fallback. But as of
+#71 you can skip the separate signed statement entirely: sign the build **directly with the
+Ed25519 SSH key you already publish on GitHub**, and let a recipient anchor to your `.keys`.
+
+```
+# vendor: sign the build with your existing SSH key (the embedded pubkey becomes your GitHub key)
+haru-pack build app/ --self-signed --sign-key ~/.ssh/id_ed25519
+
+# recipient (with haru-pack installed): anchor the embedded key to your published identity
+haru-pack verify app.exe --pin github:<you>
+#   -> exit 0 + "anchor: OK"      the embedded key is one github.com/<you>.keys publishes
+#   -> nonzero + "anchor: FAILED" it is not (or the fetch failed) — fail-closed
+```
+
+`--pin` fetches `https://github.com/<you>.keys` over TLS (system trust store), parses the
+`ssh-ed25519` lines, and requires the build's embedded public key to be one of them, on top of
+the existing payload-digest check. For a GitHub-less org, `--pin keys-url:https://…` reads the
+same authorized_keys format from any HTTPS URL you control.
+
+An **encrypted** SSH key is fine in a build if you pass its passphrase through an env var (never
+prompted for interactively): `--sign-key-passphrase-env HP_SSH_PASS`. RSA/ECDSA keys, FIDO
+`sk-ssh-ed25519` hardware keys, and agent-only keys are **refused** — haru-pack signs the raw
+footer with a software Ed25519 seed it can hold, and will never mint a substitute key that would
+silently break your anchor.
+
+Keep these limits in view — `--pin` **narrows** trust, it does not remove it:
+
+- **`.keys` trust = GitHub-account trust + TLS trust, nothing more.** Whoever controls the
+  account (takeover, or a mis-issued certificate for `github.com`) controls what `--pin` fetches
+  and can forge the anchor. It defeats a mirror/fileserver/malware editor, not the account owner.
+- **A bare-exe recipient WITHOUT haru-pack still auto-verifies NOTHING.** The launcher pins
+  nothing (INV-SIGN-01 is unchanged); `--pin` is a guarantee the `verify` *tool* gives someone
+  who runs it, not something the shipped binary does on its own.
+- **Raw-signing an SSH auth key is cross-protocol reuse.** We sign the raw footer bytes, not an
+  SSHSIG envelope (the launcher's raw verifier cannot check SSHSIG). Reusing an authentication
+  key to sign other data is a smell; it is mitigated — **not eliminated** — by the footer's
+  `03 00` formatVer prefix not being a valid SSH auth-request blob, so a signature minted here is
+  not replayable as an SSH authentication. Use a dedicated key if that residual reuse bothers you.
+
+> Deferred (tracked as future, not built in #71): a vendor-published signed-statement variant
+> that `--pin` could consume, and GPG/OpenPGP (`.gpg`) anchors. Today `--pin` speaks
+> `ssh-ed25519` over `github:` and `keys-url:` only.
 
 Key handling, on purpose:
 - **Storage.** `~/.config/haru-pack/<hash-of-project>/key`, directory `0700`, file `0600`. A

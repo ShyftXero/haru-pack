@@ -1439,6 +1439,48 @@ src/haru_pack/build/signing.py, tests/test_self_signed.py
 
 ---
 
+### INV-SIGN-02
+Status: active
+Statement: `haru-pack verify --pin <spec>` fetches a published set of Ed25519 public keys over
+TLS — `github:<user>` from `https://github.com/<user>.keys`, or `keys-url:<https-url>` — and
+succeeds (exit 0) ONLY if the build's EMBEDDED signing public key (`overlay.verify(exe)['pubkey']`,
+the same key INV-SIGN-01 verifies the signature under) is byte-for-byte one of those keys, in
+addition to the existing `sha_ok` gate. A match upgrades the build from edit-detection to
+identity-anchored provenance: the embedded key is now tied to an out-of-band identity the editor
+does not control. Every other outcome — a network error, an empty body, a body with no
+ssh-ed25519 key, a malformed embedded key, or no match — fails closed (nonzero exit); a malformed
+line in an otherwise-valid `.keys` is ignored rather than allowed to match. `--sign-key` accepting
+an OpenSSH Ed25519 key is what makes the embedded key equal a dev's published GitHub SSH key, so
+this anchor is reachable without a separate publish step.
+Actors: a recipient who runs haru-pack and wants provenance, not just edit-detection; against a
+mirror/fileserver/malware editor who re-signs and swaps the embedded key (the case INV-SIGN-01
+PASSES on purpose). NOT defended: an attacker who takes over the pinned GitHub account or presents
+a mis-issued TLS certificate for the anchor host — that forges the anchor and is the documented
+limit, not a covered case.
+Assets: identity-anchored provenance of a `--self-signed` binary, and an HONEST boundary on it —
+the anchor's trust reduces exactly to GitHub-account + TLS trust (INV-DOC-02). This is a real
+reduction of trust, not an elimination; over-claiming it as unforgeable is the failure this entry
+guards against.
+Red-path: Neutralize the anchor check in `src/haru_pack/anchor.py` — make `check_embedded_pubkey`
+return `AnchorResult(matched=True, ...)` unconditionally, or make `parse_authorized_keys` return
+the embedded key regardless of input — and run `tests/test_anchor.py`. The mandatory case
+`test_rekeyed_binary_not_in_keys_is_refused` (a build signed by key A, then re-keyed to key B and
+re-signed so INV-SIGN-01 accepts it, pinned to a `.keys` that lists A but not B) must go from
+refused (nonzero exit) to accepted when the check is neutralized. Restore and it refuses again.
+Source: Issue #71. Builds on INV-SIGN-01: that binds a signature to the embedded key inside the
+file; this binds the embedded key to an identity OUTSIDE the file. INV-SIGN-01 is unchanged — the
+launcher still pins nothing, so a bare exe on a recipient WITHOUT haru-pack auto-verifies nothing;
+the new guarantee lives only in the `verify` tool.
+Note: The published-key channel is trusted for account + TLS only. `github.com/<user>.keys` is
+served over GitHub's TLS and tied to the account, so an editor who tampers a binary cannot also
+change what that URL returns — but an account takeover or mis-issued cert can. `keys-url:` exists
+for GitHub-less orgs and carries the same TLS-trust caveat. Deferred (not built): a vendor-published
+signed-statement variant, and GPG/OpenPGP anchors.
+Territory: src/haru_pack/anchor.py, src/haru_pack/cli/inspectcmd.py, src/haru_pack/build/signing.py,
+tests/test_anchor.py
+
+---
+
 ## SUPPLY — what we execute that we did not write
 
 ### INV-SUPPLY-01

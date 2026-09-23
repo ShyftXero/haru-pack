@@ -20,6 +20,11 @@ dependencies = [
   "platformdirs>=4",
   "tomli-w>=1",
   "cryptography>=42",
+  # OpenSSH's key-derivation function for passphrase-protected private keys. cryptography's
+  # `load_ssh_private_key` delegates the bcrypt-pbkdf KDF to this package, so signing a build
+  # with an encrypted `~/.ssh/id_ed25519` via `--sign-key` (+ `--sign-key-passphrase-env`)
+  # only works when it is present (#71). Unencrypted keys and raw seeds do not need it.
+  "bcrypt>=4",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

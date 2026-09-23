@@ -18,9 +18,20 @@ Two decisions are load-bearing and are NOT conveniences to relax:
   is refused rather than used, because using it would quietly weaken the guarantee the
   fingerprint is supposed to make.
 
-The key is a raw 32-byte Ed25519 seed (RFC 8032). Ed25519 is deterministic, so the same key
-over the same footer yields the same signature — haru-pack's byte-identical rebuild survives
-signing, with no salt or per-build randomness (that would defeat reproducible builds).
+The default keystore key is a raw 32-byte Ed25519 seed (RFC 8032). `--sign-key <path>` may
+instead point at an existing OpenSSH-format Ed25519 private key (e.g. `~/.ssh/id_ed25519`) —
+haru-pack extracts its raw seed and signs EXACTLY as with a keystore seed, so the embedded
+public key then equals the dev's published GitHub SSH key and a recipient can anchor to it
+(`haru-pack verify --pin github:<user>`, INV-SIGN-02). This is deliberate cross-protocol reuse
+of an SSH auth key; it is signing raw haru-pack footer bytes (never an SSHSIG envelope, which
+the launcher's raw verifier cannot check), mitigated — not eliminated — by the footer's
+`03 00` formatVer prefix not being a valid SSH auth-request blob. Non-Ed25519 keys (RSA/ECDSA),
+FIDO/hardware `sk-ssh-ed25519` keys, and agent-only keys are REFUSED, never worked around: a
+key whose seed we cannot hold is not a key we can sign a reproducible build with.
+
+Ed25519 is deterministic, so the same key over the same footer yields the same signature —
+haru-pack's byte-identical rebuild survives signing, with no salt or per-build randomness (that
+would defeat reproducible builds).
 """
 from __future__ import annotations
 
@@ -75,8 +86,80 @@ def _priv_from_seed(seed: bytes):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     if len(seed) != 32:
         raise SigningError(f"signing key must be a raw 32-byte Ed25519 seed, got {len(seed)} "
-                           f"bytes — this file is not a haru-pack signing key")
+                           f"bytes — this file is not a haru-pack signing key (if it is an "
+                           f"OpenSSH key, its `-----BEGIN OPENSSH PRIVATE KEY-----` header was "
+                           f"not found)")
     return Ed25519PrivateKey.from_private_bytes(seed)
+
+
+_OPENSSH_HEADER = b"-----BEGIN OPENSSH PRIVATE KEY-----"
+
+
+def _looks_like_openssh(data: bytes) -> bool:
+    """True for an OpenSSH-format private key file (what `ssh-keygen -t ed25519` writes).
+
+    The raw keystore seed is 32 opaque bytes with no header, so the PEM armor is an
+    unambiguous discriminator between the two accepted --sign-key file shapes."""
+    return data.lstrip().startswith(_OPENSSH_HEADER)
+
+
+def _priv_from_openssh(data: bytes, passphrase: bytes | None, path: Path):
+    """Load an OpenSSH Ed25519 private key and return an Ed25519PrivateKey re-derived from its
+    raw seed, so signing is byte-identical to the keystore-seed path.
+
+    FAIL-HARD (never mint, never work around) on anything that is not a software Ed25519 seed we
+    can hold: RSA/ECDSA, FIDO/hardware `sk-ssh-ed25519`, a public key or agent-only reference,
+    and a wrong/missing passphrase. Cross-protocol reuse of an SSH auth key is the point (the
+    embedded pubkey becomes the dev's GitHub key); minting a *different* key because theirs did
+    not fit would silently break that anchor, which is exactly what this module refuses to do."""
+    from cryptography.exceptions import UnsupportedAlgorithm
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import load_ssh_private_key
+    try:
+        key = load_ssh_private_key(data, password=passphrase)
+    except UnsupportedAlgorithm as e:
+        if "bcrypt" in str(e).lower():
+            raise SigningError(
+                f"cannot decrypt the passphrase-protected OpenSSH key {path}: the `bcrypt` "
+                f"package (OpenSSH's key-derivation function) is not installed. Install it "
+                f"(`pip install bcrypt`) or use an unencrypted key.")
+        raise SigningError(
+            f"refusing to sign with {path}: it is an OpenSSH key type haru-pack cannot use "
+            f"({e}). A FIDO/hardware `sk-ssh-ed25519` key never exposes its private seed, so a "
+            f"reproducible raw-footer signature is impossible; use a software Ed25519 key "
+            f"(`ssh-keygen -t ed25519`) or `haru-pack keygen`.")
+    except (ValueError, TypeError) as e:
+        # cryptography raises TypeError("...password was not provided") for a missing passphrase
+        # and ValueError("Corrupt data: broken checksum") for a wrong one.
+        msg = str(e).lower()
+        if ("password" in msg or "corrupt" in msg or "checksum" in msg or "decrypt" in msg
+                or "protected" in msg):
+            hint = ("no passphrase was supplied — pass one with `--sign-key-passphrase-env "
+                    "<ENVVAR>`" if passphrase is None else
+                    "the supplied passphrase is wrong")
+            raise SigningError(
+                f"refusing to sign with {path}: the OpenSSH key is passphrase-protected and "
+                f"{hint}. haru-pack never prompts interactively during a build.")
+        raise SigningError(
+            f"refusing to sign with {path}: it is not a usable OpenSSH private key ({e}). "
+            f"Point --sign-key at an unencrypted or passphrase-env'd Ed25519 private key file "
+            f"(not a `.pub`, not an agent-only key).")
+    if not isinstance(key, Ed25519PrivateKey):
+        kind = type(key).__name__.replace("PrivateKey", "")
+        raise SigningError(
+            f"refusing to sign with {path}: it is an {kind} key, not Ed25519. haru-pack signs "
+            f"the footer with Ed25519 only (the launcher's vendored verifier does Ed25519 and "
+            f"nothing else); it will NOT mint a substitute key. Use an Ed25519 key.")
+    # Re-derive from the raw seed so the private_key object, and every signature it makes, is
+    # byte-identical to the keystore-seed path.
+    return Ed25519PrivateKey.from_private_bytes(key.private_bytes_raw())
+
+
+def _priv_from_key_file(data: bytes, *, passphrase: bytes | None, path: Path):
+    """Dispatch a --sign-key file to the OpenSSH loader or the raw-seed loader."""
+    if _looks_like_openssh(data):
+        return _priv_from_openssh(data, passphrase, path)
+    return _priv_from_seed(data)
 
 
 def _refuse_loose_perms(path: Path) -> None:
@@ -120,20 +203,23 @@ def generate_key(path: Path, *, overwrite: bool = False):
     return key, fingerprint(pub)
 
 
-def load_key(path: Path):
+def load_key(path: Path, *, passphrase: bytes | None = None):
     """Load a signing key from `path`, refusing a missing or loosely-permissioned file.
-    Returns (private_key, fingerprint)."""
+
+    Accepts either a raw 32-byte keystore seed or an OpenSSH-format Ed25519 private key; the
+    `passphrase` (bytes) applies only to an encrypted OpenSSH key. Returns (private_key,
+    fingerprint)."""
     path = Path(path)
     if not path.exists():
         raise SigningError(f"no signing key at {path}")
     _refuse_loose_perms(path)
-    key = _priv_from_seed(path.read_bytes())
+    key = _priv_from_key_file(path.read_bytes(), passphrase=passphrase, path=path)
     pub = key.public_key().public_bytes_raw()
     return key, fingerprint(pub)
 
 
 def resolve_signing(project: Path, *, self_signed: bool, sign_key: str, cert_file: str,
-                    tgt, out: Path, say):
+                    tgt, out: Path, say, sign_key_passphrase_env: str = ""):
     """Resolve --self-signed / --cert-file BEFORE any binary exists (docs/PRINCIPLES.md), and
     return (sign_priv, signing_info, cert_info).
 
@@ -146,7 +232,8 @@ def resolve_signing(project: Path, *, self_signed: bool, sign_key: str, cert_fil
     sign_priv = None
     signing_info: dict = {}
     if self_signed:
-        sign_priv, sign_fp, sign_path = load_signing_key(project, sign_key)
+        sign_priv, sign_fp, sign_path = load_signing_key(
+            project, sign_key, passphrase_env=sign_key_passphrase_env)
         signing_info = {"self_signed": True, "pubkey_sha256": sign_fp,
                         "key_path": str(sign_path)}
         say(f"--self-signed: signing with Ed25519 key {sign_path}\n"
@@ -161,16 +248,21 @@ def resolve_signing(project: Path, *, self_signed: bool, sign_key: str, cert_fil
     elif sign_key:
         raise BuildError("--sign-key was given without --self-signed; add --self-signed to "
                          "sign the build, or drop --sign-key.")
+    elif sign_key_passphrase_env:
+        raise BuildError("--sign-key-passphrase-env was given without --self-signed; it only "
+                         "applies when signing a build with an encrypted OpenSSH --sign-key.")
     cert_info = authenticode.plan_authenticode(cert_file=cert_file, tgt=tgt, out=out, say=say)
     return sign_priv, signing_info, cert_info
 
 
-def load_signing_key(project: Path, sign_key_path: str = ""):
+def load_signing_key(project: Path, sign_key_path: str = "", *, passphrase_env: str = ""):
     """Resolve the key a --self-signed build should use, FAIL-HARD if it is absent.
 
-    `--sign-key <path>` wins; otherwise the per-project default keystore key is used. In
-    neither case is a key generated here — see the module docstring. Returns (private_key,
-    fingerprint, path)."""
+    `--sign-key <path>` wins (a raw keystore seed OR an OpenSSH Ed25519 key); otherwise the
+    per-project default keystore key is used. In neither case is a key generated here — see the
+    module docstring. `passphrase_env`, if set, names an environment variable whose value is the
+    passphrase for an encrypted OpenSSH key (never prompted for interactively during a build).
+    Returns (private_key, fingerprint, path)."""
     path = Path(sign_key_path) if sign_key_path else default_key_path(project)
     if not path.exists():
         where = "--sign-key path" if sign_key_path else "default keystore"
@@ -181,5 +273,14 @@ def load_signing_key(project: Path, sign_key_path: str = ""):
             f"Create one deliberately:\n"
             f"  haru-pack keygen" + (f" --key {path}" if sign_key_path else "")
             + "\nrecord the printed fingerprint, publish it out of band, and re-run the build.")
-    key, fp = load_key(path)
+    passphrase: bytes | None = None
+    if passphrase_env:
+        val = os.environ.get(passphrase_env)
+        if val is None:
+            raise SigningError(
+                f"--sign-key-passphrase-env named ${passphrase_env}, but that environment "
+                f"variable is not set. Export it with the key's passphrase, or drop the flag "
+                f"for an unencrypted key.")
+        passphrase = val.encode("utf-8")
+    key, fp = load_key(path, passphrase=passphrase)
     return key, fp, path

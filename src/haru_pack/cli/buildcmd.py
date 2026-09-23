@@ -140,7 +140,14 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                    "keygen`. Fails hard if the key is missing (never auto-rotates)"),
           sign_key: str = typer.Option("", "--sign-key", metavar="PATH",
               help="use this Ed25519 key file for --self-signed instead of the per-project "
-                   "keystore key. Must be a raw 32-byte seed, mode 0600. Fails hard if missing"),
+                   "keystore key. Accepts a raw 32-byte seed OR an OpenSSH Ed25519 private key "
+                   "(e.g. ~/.ssh/id_ed25519) — the embedded pubkey then equals your published "
+                   "GitHub SSH key, so a recipient can `verify --pin github:<you>`. Mode 0600. "
+                   "RSA/ECDSA and FIDO/hardware sk- keys are refused; fails hard if missing"),
+          sign_key_passphrase_env: str = typer.Option("", "--sign-key-passphrase-env",
+              metavar="ENVVAR",
+              help="read the passphrase for an encrypted OpenSSH --sign-key from this env var "
+                   "(never prompts interactively in a build). Omit for an unencrypted key"),
           cert_file: str = typer.Option("", "--cert-file", metavar="PATH",
               help="Windows only: request Authenticode signing (the REAL tamper-evidence on "
                    "Windows). Modern code-signing keys are non-exportable (HSM/token/cloud), so "
@@ -180,4 +187,5 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                reap=reap, ephemeral=ephemeral, ram_only=ram_only, no_reap=no_reap,
                overwrite=overwrite, base_path=base_path, source_url=source_url,
                env_append=env_append, emit_c=emit_c, emit_nim=emit_nim,
-               self_signed=self_signed, sign_key=sign_key, cert_file=cert_file)
+               self_signed=self_signed, sign_key=sign_key,
+               sign_key_passphrase_env=sign_key_passphrase_env, cert_file=cert_file)
