@@ -100,8 +100,8 @@ shake_interpreter = true         # also apply the CPython rulepack (test/, idlel
 enabled = true
 expires = "2027-01-01"
 geo = ["US", "CA"]
-machine = "<machine-id>"         # cryptographic bind (haru-pack machine-id on the target)
-user = "alice"                   # cryptographic bind
+machine = "<hostname>"           # cryptographic bind to the OS hostname (haru-pack hostname on the target)
+user = "alice"                   # cryptographic bind to the OS login username (a passphrase component, not an ID check)
 embed_secret = false
 ```
 
