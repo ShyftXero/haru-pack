@@ -75,25 +75,58 @@ Rust ext, `flask db upgrade`, `prisma generate`, downloading a model, compiling 
 
 ## E. Data files, templates, assets adjacent-vs-bundled
 - Bundled assets (templates, static/) live under the stage dir → resolve via
-  `HARUPACK_STAGE` or `importlib.resources`, never `os.getcwd()`.
-- User data (save files, user config) belongs next to the exe (`HARUPACK_EXE_DIR`) or a
-  user dir — never the stage dir (it's wiped on version change).
-- Ship a tiny `haru-pack` runtime helper: `stage()`, `exe_dir()`, `data_dir()` so authors
-  stop guessing.
-- **The stage is re-verified by hash every run (INV-STAGE-01), so an app that writes back into a
-  bundled file makes the *next* run fail** ("the bundled file `…` inside the stage changed since it
-  was unpacked"). The right fix is above — write to a data dir, and copy a bundled seed out on
-  first run. If you genuinely must ship a mutable seed (e.g. a starter SQLite DB), declare it at
-  build with `--writable app/data/app.db` (repeatable; also `writable = [...]` in `haru_pack.toml`).
-  The launcher then checks that file is present but does not pin its bytes. The build REFUSES to
-  declare writable anything importable or executable (`.py`/`.pyc`/`.so`/`.pth`/…, the interpreter,
-  `uv`, the entrypoint, any `+x` file) — a writable code path is a same-uid RCE hole.
-- **`--<canary>-reinstall` discards stage state.** If a stage ever wedges (a genuine corruption, or
-  you *want* to reset a `--writable` seed), running the binary once with `--<canary>-reinstall`
-  (default `--haru-reinstall`) WIPES and re-extracts its own staged subtree. It re-extracts from the
-  payload, so it throws away everything in the stage — declared-writable files included. This is why
-  writable state belongs in a data dir OUTSIDE the stage: a reinstall must never be able to lose the
-  user's data. A verify mismatch is never auto-healed; reinstall is a deliberate operator action.
+  `HARUPACK_STAGE` or `importlib.resources`, never `os.getcwd()`. Treat them as **read-only**.
+- **Writable runtime data (a sqlite `.db`, logs, mutable config) must NOT live in the stage
+  dir / adjacent to the script.** The stage is a content-addressed, hash-verified mirror of the
+  payload: every bundled file is re-hashed on every run (INV-STAGE-01). So a bundled file the
+  app opens **read-write in place** changes its hash, and the **next run refuses to launch** —
+  `StageError: the bundled file '<rel>' inside the stage changed since it was unpacked` — not
+  merely "reset on upgrade". (A file the app *creates new* in the stage is unrecorded and
+  ignored; it is *mutating a bundled file* that breaks reuse.)
+- Put writable data next to the exe (`HARUPACK_EXE_DIR`), in a user data dir, or relative to
+  the launch dir (cwd) — never the stage. A bundled db is a **read-only seed**: if the app must
+  mutate it, copy it out to a writable location on first run.
+- `haru-pack build` warns when it spots a writable-looking file (`*.db`, `*.sqlite*`, sqlite
+  `-wal`/`-journal`) bundled with the code, so this is caught at build, not by a customer.
+- Or skip the boilerplate: `from haru_pack.runtime import stage, exe_dir, data_dir, data_file`
+  — a stdlib-only wrapper for exactly this (read-only `stage()`; writable `data_dir(app)` /
+  `data_file(app, "files.db")` on XDG / `%LOCALAPPDATA%` / `~/Library`). It pulls in no heavy
+  deps, so depending on haru-pack for it is cheap — or copy the two lines you need.
+- **If you genuinely must ship a MUTABLE seed** (a starter SQLite DB the app writes in place),
+  declare it at build: `--writable app/data/app.db` (repeatable; also `writable = [...]` in
+  `haru_pack.toml`). The launcher then checks the file is present but does **not** pin its bytes,
+  so it may change across runs. The build REFUSES to declare writable anything importable or
+  executable (`.py`/`.pyc`/`.so`/`.pth`/…, the interpreter, `uv`, the entrypoint, any `+x` or
+  magic-byte executable) — a writable code path would be a same-uid RCE hole.
+- **`--<canary>-reinstall` discards stage state.** If a stage wedges (genuine corruption, or you
+  *want* to reset a `--writable` seed), running the binary once with `--<canary>-reinstall`
+  (default `--haru-reinstall`) WIPES and re-extracts its own staged subtree from the payload —
+  throwing away everything in the stage, declared-writable files included. That is exactly why
+  writable state belongs in a data dir OUTSIDE the stage. A verify mismatch is never auto-healed;
+  reinstall is a deliberate operator action.
+
+Resolving the right folder (pathlib):
+
+```python
+import os
+from pathlib import Path
+
+# READ-ONLY seed shipped in the payload — never write here:
+seed = Path(os.environ["HARUPACK_STAGE"]) / "app" / "seed.db"
+
+# WRITABLE runtime data — pick one, then mkdir(parents=True, exist_ok=True):
+home_dir   = Path.home() / ".yourapp"                                             # ~/.yourapp
+data_dir   = Path(os.environ.get("XDG_DATA_HOME",   Path.home() / ".local/share")) / "yourapp"
+config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))      / "yourapp"
+beside_exe = Path(os.environ["HARUPACK_EXE_DIR"])                                  # next to the binary
+launch_dir = Path.cwd()                                                            # where it was run
+
+db = home_dir / "files.db"
+db.parent.mkdir(parents=True, exist_ok=True)          # ~/.yourapp/files.db, created if absent
+```
+
+Cross-platform (Windows `%LOCALAPPDATA%`/`%APPDATA%`, macOS `~/Library`), let `platformdirs`
+pick: `from platformdirs import user_data_dir; Path(user_data_dir("yourapp")) / "files.db"`.
 
 ## F. Games — asset compression + source protection
 ### Asset compression

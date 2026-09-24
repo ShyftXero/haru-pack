@@ -23,6 +23,23 @@ cross-compilation from Linux. Built on `uv`; launcher in Nim.
 > a thin signable native stub, and you choose how much is bundled vs fetched on the target.
 > 
 
+## Size and startup
+
+Pick your trade-off. Measured packing a trivial script, so these are *launcher* overhead, not app work:
+
+| tier | binary | cold start¹ | warm start² |
+|---|--:|--:|--:|
+| `--thin` | 1.0 MB | 0.93 s | **0.17 s** |
+| default | 15.1 MB | 6.51 s | 0.46 s |
+| `--thick` | 50.5 MB | 9.11 s | 1.18 s |
+| `python script.py` (baseline) | — | 0.12 s | 0.14 s |
+
+¹ First run from an empty cache — thin/default fetch `uv` + a standalone Python over the network; thick expands and stages what it already carries. ² Median of the staged reuse path — no re-extraction; the tree is verified by hash, then handed to `uv`.
+
+Thin lands within ~30 ms of a bare interpreter once warm. Warm cost grows with the staged tree because the reuse-time integrity check (INV-STAGE-01) re-hashes it every launch — that is the price of thick's fully-offline guarantee.
+
+_Linux x86_64, Python 3.13, 2026-09-23. Regenerate — and check for regressions — with `uv run python tools/bench.py`._
+
 ## Why is this even here.
 
 I love python.
