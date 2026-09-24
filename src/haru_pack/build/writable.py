@@ -91,9 +91,10 @@ def _entry_targets(manifest: dict) -> set[str]:
 def _has_code_magic(path: Path) -> bool:
     """True if the file's first bytes are an executable/script magic (CONTENT, not name)."""
     try:
-        head = path.read_bytes()[:4]
+        with open(path, "rb") as f:
+            head = f.read(4)      # only the magic — a --writable data file can be multi-GB
     except OSError:
-        return False
+        return True               # unreadable at build time: can't clear it as data, so refuse
     return any(head.startswith(m) for m in _CODE_MAGICS)
 
 
