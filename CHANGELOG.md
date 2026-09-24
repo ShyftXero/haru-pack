@@ -18,11 +18,14 @@ fully accounted for: a `mutable:` member still counts in the file count and the 
 digest the `.ready` token binds, and it may never be a symlink or a `.haru-links` alias target.
 
 The load-bearing safety is a BUILD-TIME backstop that fails the build (never the customer): it
-REFUSES to declare writable any importable/executable file — `.py`/`.pyc`/`.so`/`.pth`/… ,
-`sitecustomize`/`usercustomize`, the interpreter tree, `uv`, the entrypoint, pre/post-install
-targets, or ANY file carrying the POSIX executable bit. A writable code path would be a same-uid
-RCE primitive that re-cuts the holes `stage.nim`'s "NOT exempt, deliberately" block documents;
-`.pth` is a hard refuse because `site` executes its `import` lines at interpreter startup.
+REFUSES to declare writable any importable/executable file — Python/native (`.py`/`.pyc`/`.so`/
+`.pth`/…) AND shell/Windows executables (`.sh`/`.bat`/`.ps1`/`.exe`/…), `sitecustomize`/
+`usercustomize`, the interpreter tree, `uv`, the entrypoint, EVERY pre/post-install `run` token
+(whatever its extension, including extensionless), ANY file whose CONTENT is executable magic
+(shebang/ELF/PE/Mach-O — content beats name, so a renamed executable can't slip through), or ANY
+file carrying the POSIX executable bit. A writable code path would be a same-uid RCE primitive that
+re-cuts the holes `stage.nim`'s "NOT exempt, deliberately" block documents; `.pth` is a hard refuse
+because `site` executes its `import` lines at interpreter startup.
 
 ### `--<canary>-reinstall`: a deliberate wipe-and-re-extract (reserved arg, not an env knob)
 

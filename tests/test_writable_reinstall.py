@@ -58,6 +58,11 @@ def _tree(root: Path) -> Path:
     sh = root / "data" / "run.sh"
     sh.write_text("#!/bin/sh\n")
     sh.chmod(sh.stat().st_mode | stat.S_IXUSR)
+    # A +x file with a BENIGN extension and no magic bytes, so ONLY the exec-bit rule catches it
+    # (data/run.sh is now also caught by the .sh code-suffix rule).
+    tool = root / "data" / "tool.bin"
+    tool.write_bytes(b"\x00\x01 binary data, not a known magic\n")
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
     return root
 
 
@@ -78,9 +83,10 @@ def test_writable_refuses_a_pth_file(tmp_path):
 
 @pytest.mark.invariant("INV-STAGE-01")
 def test_writable_refuses_an_executable_bit_file(tmp_path):
+    """A +x file with a benign extension and no magic — ONLY the POSIX exec-bit rule refuses it."""
     d = _tree(tmp_path / "p")
     with pytest.raises(BuildError, match="executable bit"):
-        resolve_writable(d, ["data/run.sh"], MANIFEST)
+        resolve_writable(d, ["data/tool.bin"], MANIFEST)
 
 
 @pytest.mark.invariant("INV-STAGE-01")
@@ -97,6 +103,57 @@ def test_writable_refuses_a_glob_that_catches_any_code_file(tmp_path):
     d = _tree(tmp_path / "p")
     with pytest.raises(BuildError):
         resolve_writable(d, ["**/*"], MANIFEST)
+
+
+@pytest.mark.invariant("INV-STAGE-01")
+@pytest.mark.parametrize("glob", ["app/setup.sh", "app/*.sh"])
+def test_writable_refuses_a_non_executable_post_install_target(tmp_path, glob):
+    """Adversarial review #1/#8: a NON-+x `setup.sh` named as a `post_install` run target is a file
+    the launcher EXECUTES out of the stage, so it must be refused — declared directly OR via a glob.
+    Red-path: restore the `.endswith('.py')` filter in _entry_targets → this stops being refused."""
+    d = tmp_path / "p"
+    (d / "app").mkdir(parents=True)
+    (d / "app" / "hello.py").write_text("print('hi')\n")
+    setup = d / "app" / "setup.sh"
+    setup.write_text("echo building\n")            # no shebang, no +x — content/mode look benign
+    assert not setup.stat().st_mode & 0o111
+    manifest = {"app_subdir": "app", "entrypoint": ["hello.py"],
+                "post_install": [{"run": ["sh", "setup.sh"]}]}
+    with pytest.raises(BuildError, match="setup.sh"):
+        resolve_writable(d, [glob], manifest)
+
+
+@pytest.mark.invariant("INV-STAGE-01")
+def test_writable_refuses_an_extensionless_install_target(tmp_path):
+    """The blocker in isolation: an EXTENSIONLESS, non-+x, non-magic install `run` target has no
+    code suffix, no magic, no exec bit — ONLY _entry_targets can refuse it. Proves dropping the
+    `.py` filter is what closes the hole (adversarial review #1)."""
+    d = tmp_path / "p"
+    (d / "app").mkdir(parents=True)
+    (d / "app" / "hello.py").write_text("print('hi')\n")
+    tool = d / "app" / "helper"
+    tool.write_bytes(b"plain config bytes, not code\n")   # no magic, no extension, no +x
+    assert not tool.stat().st_mode & 0o111
+    manifest = {"app_subdir": "app", "entrypoint": ["hello.py"],
+                "post_install": [{"run": ["helper"]}]}
+    with pytest.raises(BuildError, match="entrypoint or a pre/post-install target"):
+        resolve_writable(d, ["app/helper"], manifest)
+
+
+@pytest.mark.invariant("INV-STAGE-01")
+@pytest.mark.parametrize("magic", [b"#!/bin/sh\nrm -rf /\n", b"\x7fELF\x02\x01\x01\x00", b"MZ\x90\x00"])
+def test_writable_refuses_a_magic_byte_executable(tmp_path, magic):
+    """Adversarial review #2/#8: CONTENT beats name. An EXTENSIONLESS file whose first bytes are a
+    shebang / ELF / PE(MZ) magic is refused even though it is not an install target, has no code
+    suffix, and (deliberately) no exec bit. Red-path: drop the _has_code_magic check → accepted."""
+    d = tmp_path / "p"
+    (d / "app").mkdir(parents=True)
+    (d / "app" / "hello.py").write_text("print('hi')\n")
+    ex = d / "app" / "payload_blob"                 # extensionless, benign name
+    ex.write_bytes(magic)
+    assert not ex.stat().st_mode & 0o111            # not caught by the +x rule
+    with pytest.raises(BuildError, match="executable/script"):
+        resolve_writable(d, ["app/payload_blob"], MANIFEST)
 
 
 # ── BUILD end-to-end: --writable rides the (signature-covered) stub-config + the receipt ──────

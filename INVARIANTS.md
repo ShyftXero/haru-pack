@@ -1871,8 +1871,11 @@ with a symlink. Walked 2026-09-09: 6 red, 49 passed. The #4/#3 additions to the 
 it between runs -> 2nd run rc 0 — neutralised by dropping the `mutable:` branch in
 recordTree/verifyTree, which turns the app's own write into a fatal tamper; (b) rewrite a
 NON-declared bundled file (`bin/python`) -> still rc != 0 (verifyTree "modified"); (c) try to
-declare `plugins/hook.pth`, a `+x` file, a `.py`/`.so`, the interpreter tree, or `uv` writable ->
-the BUILD refuses (build.resolve_writable backstop, pure-Python, runs on any host); (d) replace
+declare `plugins/hook.pth`, a `+x` file, a `.py`/`.so`, a shell/Windows executable
+(`.sh`/`.bat`/`.ps1`/`.exe`), a NON-`.py` pre/post-install `run` target of ANY extension
+(including extensionless), or a file whose CONTENT is executable magic (shebang/ELF/PE/Mach-O) even
+with no exec bit or code suffix, plus the interpreter tree or `uv` -> the BUILD refuses
+(build.resolve_writable backstop, pure-Python, runs on any host); (d) replace
 the declared `data/app.db` with a symlink -> verifyTree refuses ("now a symlink"). Also walked:
 the error-message fix names the changed file + `--<canary>-reinstall`, and reinstall wipes only
 its own subtree (a sentinel beside it survives, INV-REAP-01).

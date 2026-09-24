@@ -11,9 +11,15 @@ REFUSES to declare writable anything importable or executable, because a writabl
 a same-uid code-execution primitive that would re-cut the exact holes stage.nim's "NOT exempt,
 deliberately" comment block documents (a writable `.pyc`/`.so`/`.pth` is code the manifest no
 longer pins; site executes a `.pth`'s `import` lines at interpreter startup, so `.pth` is a hard
-refuse). The refusal covers the importable/executable EXTENSIONS, the interpreter tree
-(`vendor/python/**`), the bundled `uv`, the entrypoint and pre/post-install targets, and ANY
-file that carries the POSIX executable bit.
+refuse). The refusal covers, on any target OS:
+  * importable/executable EXTENSIONS — Python/native (`.py .pyc .pyo .so .pyd .dll .dylib .zip
+    .whl .egg .pth .pyw .pyz`) AND shell/Windows executables (`.sh .bash .bat .cmd .ps1 .com
+    .scr .vbs .exe .msi .jar`), since a pre/post-install step or the app can invoke a bundled one;
+  * CONTENT magic — a file whose first bytes are a shebang, ELF, PE/`MZ`, or Mach-O, so a renamed
+    or extensionless executable cannot slip the name checks (content beats name);
+  * the interpreter tree (`vendor/python/**`), the bundled `uv`;
+  * the entrypoint and EVERY pre/post-install `run` token (whatever the extension);
+  * ANY file that carries the POSIX executable bit.
 
 Globs are resolved against the ASSEMBLED payload tree to the EXACT stage-relative members they
 match (the same `rel` the launcher's `recordTree` walks), so the launcher does exact set
@@ -29,19 +35,37 @@ from .errors import BuildError
 
 # Importable/executable by EXTENSION — code, or a container of code, that the manifest must keep
 # pinned. `.pth` is pure code: `site` executes any line beginning `import` at interpreter startup.
+# Beyond the Python/native set, shell + Windows-executable suffixes are here too: a pre/post-install
+# step or the app can invoke a bundled `setup.sh`/`.bat`/`.ps1`/`.exe`, so a writable one is the same
+# same-uid RCE primitive as a writable `.py` (adversarial review #1/#2).
 _CODE_SUFFIXES = frozenset({
     ".py", ".pyc", ".pyo", ".so", ".pyd", ".dll", ".dylib",
-    ".zip", ".whl", ".egg", ".pth",
+    ".zip", ".whl", ".egg", ".pth", ".pyw", ".pyz",
+    ".sh", ".bash", ".bat", ".cmd", ".ps1", ".com", ".scr", ".vbs", ".exe", ".msi", ".jar",
 })
 # Importable/executable by BASENAME regardless of extension.
 _CODE_NAMES = frozenset({"sitecustomize.py", "usercustomize.py", "uv", "uv.exe"})
+# Magic-byte prefixes of executable/script formats — CONTENT beats name, so a renamed or
+# extensionless executable (`app/helper` that is really an ELF, or a `#!`-script) cannot slip the
+# suffix/name checks (adversarial review #2). Mach-O thin (both endian/width) + fat/Java-class.
+_CODE_MAGICS = (
+    b"#!",                                   # any shebang script
+    b"\x7fELF",                              # ELF
+    b"MZ",                                   # PE / DOS (.exe/.dll/.scr/…)
+    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",  # Mach-O 32/64 big-endian
+    b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",  # Mach-O 32/64 little-endian
+    b"\xca\xfe\xba\xbe",                     # Mach-O universal / Java .class
+)
 
 
 def _entry_targets(manifest: dict) -> set[str]:
     """Stage-relative paths that are the entrypoint or a pre/post-install target.
 
-    Best-effort and belt-and-braces: a script entrypoint is a `.py`, which the extension rule
-    already refuses, so this only adds coverage for the unusual non-`.py` file target."""
+    EVERY string token of `entrypoint` and of every `pre_install`/`post_install` `run` list is
+    added — NOT only `.py` ones. A non-`.py` install target (`run = ["sh", "setup.sh"]`, a
+    `.bat`/`.ps1`/`.exe`) is a file the launcher EXECUTES out of the stage, so it must never be
+    declarable writable whatever its extension (adversarial review #1). Non-file tokens (`python`,
+    `-m`, a `module:callable`) simply match no bundled member and cost nothing."""
     rels: set[str] = set()
     app_subdir = (manifest.get("app_subdir") or "app").strip("/")
 
@@ -52,16 +76,25 @@ def _entry_targets(manifest: dict) -> set[str]:
             rels.add(f"{app_subdir}/{t}")
 
     for tok in manifest.get("entrypoint") or []:
-        if isinstance(tok, str) and tok.endswith(".py"):
+        if isinstance(tok, str):
             _add(tok)
     for key in ("pre_install", "post_install"):
         for step in manifest.get(key) or []:
             run = step.get("run") if isinstance(step, dict) else step
             toks = run if isinstance(run, list) else [run]
             for t in toks:
-                if isinstance(t, str) and t.endswith(".py"):
+                if isinstance(t, str):
                     _add(t)
     return rels
+
+
+def _has_code_magic(path: Path) -> bool:
+    """True if the file's first bytes are an executable/script magic (CONTENT, not name)."""
+    try:
+        head = path.read_bytes()[:4]
+    except OSError:
+        return False
+    return any(head.startswith(m) for m in _CODE_MAGICS)
 
 
 def _backstop_reason(rel: str, path: Path, entry_rels: set[str]) -> str:
@@ -82,13 +115,16 @@ def _backstop_reason(rel: str, path: Path, entry_rels: set[str]) -> str:
         return "it lives under the bundled interpreter tree (vendor/python/**)"
     if rel == "vendor/uv" or rel.startswith("vendor/uv"):
         return "it is the bundled uv (main.findUv executes it)"
+    if rel in entry_rels:
+        return "it is the build entrypoint or a pre/post-install target"
+    if _has_code_magic(path):
+        return ("its content is an executable/script (shebang, ELF, PE/MZ, or Mach-O) — a renamed "
+                "or extensionless executable is still a same-uid RCE primitive")
     try:
         if path.stat().st_mode & 0o111:
             return "it carries the POSIX executable bit"
     except OSError:
         pass
-    if rel in entry_rels:
-        return "it is the build entrypoint or a pre/post-install target"
     return ""
 
 

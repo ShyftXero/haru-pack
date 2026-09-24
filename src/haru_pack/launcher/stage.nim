@@ -960,14 +960,15 @@ proc verifyTree(root, manifest: string) =
     if tok == "mutable:":
       # A BUILD-DECLARED writable app data file (#4, INV-STAGE-01 relaxation). Its BYTES are
       # deliberately NOT pinned — the app may rewrite it between runs — but the tree stays
-      # accounted for: the path must still be PRESENT, a REGULAR FILE, and NOT a symlink, using the
-      # same kind/symlink checks a regular member gets, minus the sha256. Refusing a symlink here is
-      # what stops a swap (`fileExists`/`sha256File` follow links; a mutable line must not).
+      # accounted for: the path must still be PRESENT, a REGULAR FILE, and NOT a symlink. Refusing a
+      # symlink here is what stops a swap (`fileExists` follows links; a mutable line must not).
+      # The symlink refusal is CROSS-PLATFORM (adversarial review #3): `symlinkExists` tests
+      # FILE_ATTRIBUTE_REPARSE_POINT on Windows, so it refuses a symlink OR a junction there too —
+      # the "never a symlink" symmetry holds on every OS, not just POSIX.
       if not fileExists(full):
         raise newException(StageError, "declared-writable staged file is missing: " & rel)
-      when defined(posix):
-        if symlinkExists(full):
-          raise newException(StageError, "declared-writable staged file is now a symlink: " & rel)
+      if symlinkExists(full):
+        raise newException(StageError, "declared-writable staged file is now a symlink: " & rel)
       continue
     if not fileExists(full):
       raise newException(StageError, "staged file is missing: " & rel)
