@@ -86,11 +86,17 @@ Rust ext, `flask db upgrade`, `prisma generate`, downloading a model, compiling 
 - Put writable data next to the exe (`HARUPACK_EXE_DIR`), in a user data dir, or relative to
   the launch dir (cwd) — never the stage. A bundled db is a **read-only seed**: if the app must
   mutate it, copy it out to a writable location on first run.
-- `haru-pack build` warns when it spots a writable-looking file (`*.db`, `*.sqlite*`, sqlite
-  `-wal`/`-journal`) bundled with the code, so this is caught at build, not by a customer.
-- Or skip the boilerplate: `from haru_pack.runtime import stage, exe_dir, data_dir, data_file`
-  — a stdlib-only wrapper for exactly this (read-only `stage()`; writable `data_dir(app)` /
-  `data_file(app, "files.db")` on XDG / `%LOCALAPPDATA%` / `~/Library`). It pulls in no heavy
+- `haru-pack build` warns when it spots a writable-looking file bundled with the code, so this is
+  caught at build, not by a customer. It nudges on the *pattern* of a runtime data store, not a
+  fixed extension list: a database is recognised by its **header bytes** under any name (so a
+  SQLite db called `store` with no suffix is caught), and text stores are recognised by the **role
+  their name advertises** as a whole token — `error.log`, `log.txt`, `data.csv`, `app-cache.bin`,
+  a `foo-wal` sidecar — while `metadata.json`/`database.py` (no token boundary) are left alone.
+  It is a best-effort nudge, never a gate.
+- Or skip the boilerplate: `from haru_pack.helpers import haru_cwd, haru_extraction_dir,
+  haru_user_home, haru_exe_dir, haru_data_dir, haru_config_dir, haru_data_file` — a stdlib-only
+  wrapper for exactly this (read-only `haru_extraction_dir()`; writable `haru_data_dir(app)` /
+  `haru_data_file(app, "files.db")` on XDG / `%LOCALAPPDATA%` / `~/Library`). It pulls in no heavy
   deps, so depending on haru-pack for it is cheap — or copy the two lines you need.
 - **If you genuinely must ship a MUTABLE seed** (a starter SQLite DB the app writes in place),
   declare it at build: `--writable app/data/app.db` (repeatable; also `writable = [...]` in
