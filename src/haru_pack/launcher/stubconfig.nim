@@ -40,6 +40,16 @@ type
                          ## (the trust anchor), so repointing the URL can change WHERE bytes
                          ## come from but never WHICH bytes are accepted. "" = appended
                          ## delivery (today's behaviour).
+    writable*: seq[string] ## build-DECLARED app data files that may change on reuse (#4, INV-STAGE-01
+                           ## relaxation). Each entry is an EXACT stage-relative path the build
+                           ## resolved from a `--writable <glob>` against the assembled tree AND
+                           ## passed the build-time backstop (never an importable/executable file).
+                           ## recordTree emits `mutable: <rel>` for these instead of a sha256, and
+                           ## verifyTree checks presence/kind/non-symlink but NOT the bytes. It rides
+                           ## the SIGNATURE-COVERED stub-config (INV-STUB-01 / INV-SIGN-01), not a
+                           ## side channel, so the relaxed set is integrity-anchored. Emitted only
+                           ## when non-empty, so a build that declares nothing stays byte-identical
+                           ## to the v1 corpus. `@[]` = today's behaviour (every file byte-verified).
     unpackedBytes*: int64  ## build-time size of the staged tree (docs/adr/0007): lets the stub
                            ## size its RAM-fit check BEFORE staging, whether the payload came
                            ## from the appended overlay OR a remote fetch (source_url) — the
@@ -85,8 +95,9 @@ proc defaultStubConfig*(): StubConfig =
   result.basePath = ""
   result.sourceUrl = ""
   result.unpackedBytes = 0
+  result.writable = @[]
 
-proc isValidCanary(tok: string): bool =
+proc isValidCanary*(tok: string): bool =
   ## ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced at build time
   ## (§3) and re-validated here so a hand-edited stub cannot smuggle in an odd env name.
   if tok.len == 0: return false
@@ -154,6 +165,7 @@ proc parseStubConfig*(raw: string): StubConfig =
   result.basePath = ""
   result.sourceUrl = ""
   result.unpackedBytes = 0
+  result.writable = @[]
   if t.contains("reap"):
     let n = t["reap"]
     if n.kind != TomlValueKind.Bool:
@@ -194,8 +206,32 @@ proc parseStubConfig*(raw: string): StubConfig =
     # TOML integer literal wider than 64 bits (caught above as ValueError), so intVal is always
     # a valid int64 here — no further range check is needed.
     result.unpackedBytes = n.getBiggestInt()
+  if t.contains("writable"):
+    # Build-declared writable app data files (#4, INV-STAGE-01 relaxation). A top-level array of
+    # EXACT stage-relative paths, NOT a canary entry; absent -> today's behaviour (every file
+    # byte-verified). The build already applied the load-bearing backstop (no importable/executable
+    # file, no +x file) and resolved globs to concrete members, so the launcher only has to carry
+    # the set through to recordTree/verifyTree. It rides the sha-checked, signature-covered stub
+    # (INV-STUB-01 / INV-SIGN-01), so a tampered entry fails the stub digest, not verification.
+    let n = t["writable"]
+    if n.kind != TomlValueKind.Array:
+      raise newException(ValueError, "stub-config: writable must be an array of strings")
+    for item in n.getElems():
+      if item.kind != TomlValueKind.String:
+        raise newException(ValueError, "stub-config: writable entries must be strings")
+      result.writable.add item.getStr()
 
 proc envForKnob*(sc: StubConfig, k: Knob): string =
   ## The single runtime resolution rule (INV-CANARY-01): knob K is read from
   ## `<canary[K]>_<KNOB>` and nothing else.
   sc.canary[k] & "_" & knobToken(k)
+
+proc argCanary*(sc: StubConfig): string =
+  ## The prefix for the launcher's reserved ARGS (`--<canary>-reinstall`, `--<canary>-shred`):
+  ## the SECRET knob's canary, lowercased. These are ARGS, not env INPUTS, so INV-CANARY-03 does
+  ## not govern them — the prefix is canary-derived only for white-label CONSISTENCY, so a build
+  ## whitelabelled with `--env-canary ACME` accepts `--acme-reinstall`, and the default `HARU`
+  ## build accepts `--haru-reinstall` / `--haru-shred`. SECRET is chosen as the representative
+  ## because `--env-canary` sets every knob (they share a value unless per-knob-overridden), and
+  ## SECRET is the knob a white-label build customises first.
+  sc.canary[kSecret].toLowerAscii

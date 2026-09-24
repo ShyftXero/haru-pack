@@ -559,6 +559,7 @@ def test_disk_fallback_overwrite_flag_is_unconditional_on_staging_root():
             f"conditioned on which staging root resolveStagingRoot picked, which would let the "
             f"auto-disk-fallback silently drop --overwrite")
     # And the reap call itself must be gated only on reapWanted/reapTarget, never on root choice.
+    # (reapShredArg is the canary-derived --<canary>-shred flag threaded through for #3.)
     reap_call = re.search(r"^[ \t]*if reapWanted and reapTarget\.len > 0:\s*\n[ \t]*reapDetached\("
-                          r"reapTarget, reapOverwrite\)", src, re.M)
-    assert reap_call, "reapDetached(reapTarget, reapOverwrite) is no longer gated only on reapWanted/reapTarget.len"
+                          r"reapTarget, reapOverwrite, reapShredArg\)", src, re.M)
+    assert reap_call, "reapDetached(reapTarget, reapOverwrite, ...) is no longer gated only on reapWanted/reapTarget.len"

@@ -80,6 +80,20 @@ Rust ext, `flask db upgrade`, `prisma generate`, downloading a model, compiling 
   user dir — never the stage dir (it's wiped on version change).
 - Ship a tiny `haru-pack` runtime helper: `stage()`, `exe_dir()`, `data_dir()` so authors
   stop guessing.
+- **The stage is re-verified by hash every run (INV-STAGE-01), so an app that writes back into a
+  bundled file makes the *next* run fail** ("the bundled file `…` inside the stage changed since it
+  was unpacked"). The right fix is above — write to a data dir, and copy a bundled seed out on
+  first run. If you genuinely must ship a mutable seed (e.g. a starter SQLite DB), declare it at
+  build with `--writable app/data/app.db` (repeatable; also `writable = [...]` in `haru_pack.toml`).
+  The launcher then checks that file is present but does not pin its bytes. The build REFUSES to
+  declare writable anything importable or executable (`.py`/`.pyc`/`.so`/`.pth`/…, the interpreter,
+  `uv`, the entrypoint, any `+x` file) — a writable code path is a same-uid RCE hole.
+- **`--<canary>-reinstall` discards stage state.** If a stage ever wedges (a genuine corruption, or
+  you *want* to reset a `--writable` seed), running the binary once with `--<canary>-reinstall`
+  (default `--haru-reinstall`) WIPES and re-extracts its own staged subtree. It re-extracts from the
+  payload, so it throws away everything in the stage — declared-writable files included. This is why
+  writable state belongs in a data dir OUTSIDE the stage: a reinstall must never be able to lose the
+  user's data. A verify mismatch is never auto-healed; reinstall is a deliberate operator action.
 
 ## F. Games — asset compression + source protection
 ### Asset compression

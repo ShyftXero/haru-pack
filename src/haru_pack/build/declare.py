@@ -130,6 +130,11 @@ def _resolve(project: Path, tier: str, python_cli: str,
         # here (and popped before the manifest is written) for the same reason
         # script_dependencies is: it is build-time input, not something the launcher reads.
         "shake_declared": dict(decl.get("shake") or {}),
+        # `writable = [...]` — build-DECLARED app data files that may change on reuse (#4). A
+        # haru_pack.toml / [tool.haru-pack] list, merged with the repeatable `--writable` CLI flag
+        # in orchestrate.build. Build-time input only (resolved to the stub-config's writable set,
+        # never written into the payload manifest the launcher reads); popped in assemble_payload.
+        "writable_declared": list(decl.get("writable") or []),
     }
     for k in ("bundle", "pre_install", "post_install", "uv_run_args"):
         if k in decl:

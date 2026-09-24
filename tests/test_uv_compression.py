@@ -119,7 +119,7 @@ def test_the_launcher_expands_before_it_records_the_tree():
     """
     src = code_of(LAUNCHER / "stage.nim")
     expand = src.index("expandCompressedMembers(root)")
-    record = src.index("let (mf, count) = recordTree(root)")
+    record = src.index("let (mf, count) = recordTree(root, writable)")
     assert expand < record, (
         "uv is expanded after the stage manifest is built, so the binary the launcher "
         "executes first is not covered by stage verification"

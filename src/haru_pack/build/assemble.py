@@ -162,6 +162,7 @@ def assemble_payload(source: Path, manifest: dict, tier: str, target,
 
     manifest.pop("script_dependencies", None)   # build-time only; not for the launcher
     manifest.pop("shake_declared", None)        # ditto — the launcher never re-shakes
+    manifest.pop("writable_declared", None)     # ditto — writable rides the stub-config, not here
     # INV-PAYLOAD-07: stamp the payload-format version so a launcher can REFUSE a payload
     # newer than it understands rather than silently mis-staging a member it does not know
     # about (the .haru-links-as-plain-file skew #44 filed). A payload with no key is legacy/0

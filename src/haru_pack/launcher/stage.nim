@@ -28,7 +28,7 @@
 ## What it does stop is a *different* user pre-creating or tampering with the cache, a
 ## stale/corrupt tree, and reuse across payloads. Closing the same-uid case needs an OS
 ## boundary (separate service account, or a root-owned read-only stage), not a checksum.
-import std/[os, strutils, algorithm, times]
+import std/[os, strutils, algorithm, times, sets]
 import zippy/ziparchives
 import nimcrypto/sha2
 import xzdec
@@ -407,8 +407,9 @@ proc shredAndRemoveTree*(root: string) =
 
 proc shredGuard*(target: string): string =
   ## "" if `target` is safe to shred-and-remove; else a one-line diagnostic. Defensive guard for
-  ## the `--haru-shred` re-exec surface (Windows worker) so a hand-typed `--haru-shred <path>`
-  ## can never become arbitrary-delete: the target must be an existing, non-symlink directory
+  ## the `--<canary>-shred` re-exec surface (Windows worker; `--haru-shred` on a default build) so a
+  ## hand-typed `--<canary>-shred <path>` can never become arbitrary-delete: the target must be an
+  ## existing, non-symlink directory
   ## named like a stageZip subtree (`<hexkey>-<32-hex-digest>`), sitting UNDER a root that is not
   ## '/', a drive/UNC root, or $HOME, and never a HARUPACK_DEV_STAGE tree (INV-SHRED-01 shares
   ## INV-REAP-01 / INV-BASE-01's own-subtree-only story). The POSIX reaper gets the same property
@@ -436,14 +437,20 @@ proc shredGuard*(target: string): string =
     return "shred target key is not hex: " & name
   if dig.len != 32 or not dig.allCharsInSet(KeyChars):
     return "shred target digest is not 32 hex: " & name
-  let dev = getEnv("HARUPACK_DEV_STAGE")
-  if dev.len > 0 and stripTrailingSep(dev) == p:
-    return "refusing to shred a HARUPACK_DEV_STAGE tree"
+  when defined(haruDev):
+    # HARUPACK_DEV_STAGE is READ only in a -d:haruDev build (INV-LAUNCH-02: a release launcher never
+    # reads it), so a dev-stage tree only EXISTS there — that is the only build where this guard has
+    # anything to protect. Gating it on haruDev also keeps the literal OUT of a release binary, which
+    # INV-LAUNCH-02 requires ("compiled out, not branched around"): shredGuard is now on the live
+    # reinstall path (#3), so an ungated read here would drag the dev-var string into every release.
+    let dev = getEnv("HARUPACK_DEV_STAGE")
+    if dev.len > 0 and stripTrailingSep(dev) == p:
+      return "refusing to shred a HARUPACK_DEV_STAGE tree"
   return ""
 
 # ------------------------------------------------------------- detached reap (fire-and-forget)
 
-proc reapDetached*(target: string; overwrite = false) =
+proc reapDetached*(target: string; overwrite = false; shredArg = "--haru-shred") =
   ## Spawn a DETACHED, fire-and-forget process that deletes `target`, then return WITHOUT
   ## waiting - deletion of many GB continues after the stub has died (docs/adr/0004 4/5b,
   ## INV-REAP-01 / INV-SHRED-01). `target` is ALWAYS the exact staged subtree the launcher
@@ -520,14 +527,16 @@ proc reapDetached*(target: string; overwrite = false) =
       except CatchableError:
         discard
     else:
-      # Shred-on-reap: re-exec THIS launcher as a hidden `--haru-shred <target>` worker so the
+      # Shred-on-reap: re-exec THIS launcher as a hidden `--<canary>-shred <target>` worker so the
       # overwrite loop is native Nim (no PowerShell - frequently locked on hardened targets via
       # Constrained Language Mode / AppLocker / ExecutionPolicy; no shipped SDelete). poDaemon
-      # detaches it; we do not wait. main.nim guards the subcommand with shredGuard so it can
-      # only ever shred a stage-shaped own-subtree (INV-SHRED-01).
+      # detaches it; we do not wait. `shredArg` is `--<canary>-shred` (default `--haru-shred`),
+      # canary-derived for white-label consistency with the rest of the reserved-arg surface (#3).
+      # main.nim guards the subcommand with shredGuard so it can only ever shred a stage-shaped
+      # own-subtree (INV-SHRED-01) — the prefix is cosmetic, shredGuard is the boundary.
       try:
         let self = getAppFilename()
-        let p = startProcess(self, args = ["--haru-shred", target], options = {poDaemon})
+        let p = startProcess(self, args = [shredArg, target], options = {poDaemon})
         p.close()
       except CatchableError:
         discard
@@ -823,7 +832,15 @@ proc materialiseLinks(root: string) =
       copyFileWithPermissions(targetPath, linkPath)
   removeFile(table)
 
-proc recordTree(root: string): tuple[manifest: string, count: int] =
+proc recordTree(root: string; writable: seq[string] = @[]): tuple[manifest: string, count: int] =
+  # Build-declared writable data files (#4, INV-STAGE-01 relaxation). `writable` is the EXACT
+  # stage-relative set the build resolved from `--writable` globs and passed its backstop. A
+  # member in this set is recorded as `mutable: <rel>` (presence/kind checked on reuse, bytes
+  # deliberately not pinned) rather than `<sha256> <rel>`. It stays in `rels`, so it is still in
+  # the count and in the manifest hash the `.ready` token binds — the tree stays fully accounted
+  # for, only this file's BYTES are allowed to change. `@[]` = today's behaviour.
+  var writableSet = initHashSet[string]()
+  for w in writable: writableSet.incl w
   var rels: seq[string]
   # `pcLinkToFile` too, now that materialiseLinks stages aliases as symlinks on POSIX: a
   # symlink absent from `.stage-files` would go unverified, which is exactly the hole the copy
@@ -841,8 +858,15 @@ proc recordTree(root: string): tuple[manifest: string, count: int] =
     if '\n' in rel or '\r' in rel:
       raise newException(StageError, "refusing to record a path containing a newline: " & rel)
     let full = root / rel
+    let declaredWritable = rel in writableSet
     when defined(posix):
       if symlinkExists(full):
+        # A declared-writable path must be a regular data file the app rewrites in place, NEVER a
+        # symlink — a mutable symlink is a redirect the app never needs and a swap primitive we
+        # will not carry (INV-STAGE-01 keeps mutable to presence/kind, not to "follow me anywhere").
+        if declaredWritable:
+          raise newException(StageError,
+            "refusing to record a declared-writable path that is a symlink: " & rel)
         # A deduplicated alias (INV-STAGE-04). Record it AS a symlink and its in-stage target,
         # not the followed bytes: the target is itself a recorded, hash-verified regular file,
         # so "still a symlink, still pointing here" is what keeps the alias accountable without
@@ -854,25 +878,43 @@ proc recordTree(root: string): tuple[manifest: string, count: int] =
         if '\n' in tgtRel or '\r' in tgtRel or ' ' in tgtRel:
           raise newException(StageError,
             "refusing to record a symlink target with a space or newline: " & rel)
-        # The target MUST be a recorded, hash-verified member. recordTree records exactly the
-        # non-`isRuntimeMutable` files, so an alias pointing at a runtime-mutable path (a `.venv`
-        # file, `uv.lock`, a `vendor/uv-dl-*` scratch file) would name a target no `.stage-files`
-        # line hashes — the interpreter's bytes would go unverified. Refuse, so INV-STAGE-04's
-        # "the target is itself hash-verified" holds by construction, not by payload convention.
-        if isRuntimeMutable(tgtRel):
+        # The target MUST be a recorded, hash-verified member. recordTree records a sha256 for
+        # exactly the non-`isRuntimeMutable`, non-declared-writable files, so an alias pointing at a
+        # runtime-mutable path (a `.venv` file, `uv.lock`, a `vendor/uv-dl-*` scratch file) OR at a
+        # declared-writable path (whose bytes are deliberately unpinned) would name a target no
+        # `.stage-files` line hashes — the interpreter's bytes would go unverified. Refuse both, so
+        # INV-STAGE-04's "the target is itself hash-verified" holds by construction. This is the
+        # SAME predicate the mutable set must satisfy: a mutable path is never an alias target.
+        if isRuntimeMutable(tgtRel) or tgtRel in writableSet:
           raise newException(StageError,
-            "refusing an alias whose target is runtime-mutable and so unrecorded: " &
-            rel & " -> " & tgtRel)
+            "refusing an alias whose target is runtime-mutable or declared-writable and so " &
+            "unrecorded/unpinned: " & rel & " -> " & tgtRel)
         sb.add "symlink:" & tgtRel & " " & rel & "\n"
         continue
       try:
         let perms = getFilePermissions(full)
         setFilePermissions(full, perms - {fpGroupWrite, fpOthersWrite})
       except OSError: discard
+    if declaredWritable:
+      # Record presence + path, NOT a sha256: the app is allowed to rewrite this bundled data file
+      # between runs. verifyTree still asserts it is present, a regular file, and not a symlink.
+      sb.add "mutable: " & rel & "\n"
+      continue
     sb.add sha256File(full) & " " & rel & "\n"
   result = (sb, rels.len)
 
 proc verifyTree(root, manifest: string) =
+  # First pass: the set of `mutable:` (declared-writable) rels. An alias must never resolve to one —
+  # its bytes are unpinned, so following the link would reach unverified content. recordTree already
+  # refuses to RECORD such an alias; collecting the set here lets verifyTree INDEPENDENTLY refuse it
+  # on reuse too, so a hand-crafted `.stage-files` cannot smuggle one past — the same property the
+  # symlink branch already enforces for `isRuntimeMutable` targets (INV-STAGE-04 / INV-STAGE-01).
+  var mutableRels = initHashSet[string]()
+  for line in manifest.splitLines:
+    if line.len == 0: continue
+    let sp = line.find(' ')
+    if sp <= 0: continue
+    if line[0 ..< sp] == "mutable:": mutableRels.incl line[sp + 1 .. ^1]
   for line in manifest.splitLines:
     if line.len == 0: continue
     let sp = line.find(' ')
@@ -905,14 +947,27 @@ proc verifyTree(root, manifest: string) =
         #     bytes. recordTree already refuses to record such an alias; verifyTree refuses it too,
         #     so a hand-crafted `.stage-files` cannot smuggle one past on reuse.
         let tgtFull = root / tgtRel
-        if symlinkExists(tgtFull) or not fileExists(tgtFull) or isRuntimeMutable(tgtRel):
+        if symlinkExists(tgtFull) or not fileExists(tgtFull) or
+           isRuntimeMutable(tgtRel) or tgtRel in mutableRels:
           raise newException(StageError,
-            "staged alias target is missing, unrecorded, or not a regular file: " &
-            rel & " -> " & tgtRel)
+            "staged alias target is missing, unrecorded, unpinned (declared-writable), or not a " &
+            "regular file: " & rel & " -> " & tgtRel)
       else:
         # materialiseLinks never stages a symlink on Windows (it copies), so a symlink line here
         # is a manifest from another platform — refuse rather than guess at its meaning.
         raise newException(StageError, "unexpected symlink record on this platform: " & rel)
+      continue
+    if tok == "mutable:":
+      # A BUILD-DECLARED writable app data file (#4, INV-STAGE-01 relaxation). Its BYTES are
+      # deliberately NOT pinned — the app may rewrite it between runs — but the tree stays
+      # accounted for: the path must still be PRESENT, a REGULAR FILE, and NOT a symlink, using the
+      # same kind/symlink checks a regular member gets, minus the sha256. Refusing a symlink here is
+      # what stops a swap (`fileExists`/`sha256File` follow links; a mutable line must not).
+      if not fileExists(full):
+        raise newException(StageError, "declared-writable staged file is missing: " & rel)
+      when defined(posix):
+        if symlinkExists(full):
+          raise newException(StageError, "declared-writable staged file is now a symlink: " & rel)
       continue
     if not fileExists(full):
       raise newException(StageError, "staged file is missing: " & rel)
@@ -936,7 +991,7 @@ proc readyToken(key, payloadDigest, treeDigest: string, count: int): string =
   "files=" & $count & "\n" &
   "tree=" & treeDigest & "\n"
 
-proc verifyStagedDir(final, key, payloadDigest: string) =
+proc verifyStagedDir(final, key, payloadDigest: string; canary = "haru") =
   ## Everything between "the directory exists" and "we are willing to execute it".
   assertSafePath(final, wantDir = true)
   let ready = final / ReadyName
@@ -955,12 +1010,32 @@ proc verifyStagedDir(final, key, payloadDigest: string) =
     if line.len > 0: count.inc
   let want = readyToken(key, payloadDigest, sha256hex(mf), count)
   if readFile(ready) != want:
+    # The GENUINE token-mismatch case — a foreign/corrupt `.ready`, a different payload digest, a
+    # different uid, a rewritten manifest — keeps the original wording. It is NOT the "a bundled
+    # file's bytes changed" case (that leaves `.stage-files` and its digest untouched, so the token
+    # still matches and verifyTree below is what catches it).
     raise newException(StageError,
       "stage directory does not match this payload (bad or foreign " & ReadyName &
       "); refusing to run it. Remove it and retry: " & final)
-  verifyTree(final, mf)
+  # verifyTree raises a StageError that NAMES the changed/missing/swapped file and the cause. Surface
+  # THAT — not the generic `.ready` wording — with the diagnosis and the deliberate remedy, so an
+  # app that writes into the stage (the common cause) is told what to do instead of hunting a
+  # "corrupt cache". Auto-healing here would defeat tamper-evidence, so we refuse and point at the
+  # explicit operator action (INV-STAGE-01: a mismatch stays fatal; #3's reinstall is deliberate).
+  try:
+    verifyTree(final, mf)
+  except StageError as e:
+    let named = if ": " in e.msg: e.msg.rsplit(": ", 1)[^1] else: e.msg
+    raise newException(StageError,
+      "the bundled file `" & named & "` inside the stage changed since it was unpacked (" &
+      e.msg & "). If your app writes to this file it must not live in the stage — use a data " &
+      "dir and copy the seed out on first run; docs/SHARP_CORNERS.md section E. To deliberately " &
+      "rebuild the stage from the payload, re-run with --" & canary & "-reinstall (this WIPES " &
+      "and re-extracts, discarding stage state).")
 
-proc stageZip*(payload: string, key: string, root = baseDir()): string =
+proc stageZip*(payload: string, key: string, root = baseDir();
+               reinstall = false; overwrite = false; writable: seq[string] = @[];
+               canary = "haru"): string =
   ## Extract a zip payload to <root>/<key>-<payload-digest>/ atomically, and on every
   ## subsequent run verify the tree before handing it back. Raises `StageError` rather
   ## than reusing anything it cannot account for.
@@ -969,6 +1044,16 @@ proc stageZip*(payload: string, key: string, root = baseDir()): string =
   ## RAM-backed-or-cache). It defaults to the persistent per-user cache, so a caller that
   ## passes nothing keeps today's behaviour byte-for-byte. The subtree name is derived only
   ## from `key` and the payload digest, so the reaped path is one the launcher OWNS.
+  ##
+  ## `writable` is the build-declared set of app data files that may change on reuse (#4). It is
+  ## threaded to recordTree, which records those as `mutable:` lines. `canary` reaches the error
+  ## path so a mismatch names `--<canary>-reinstall` in its remedy.
+  ##
+  ## `reinstall` is a DELIBERATE operator action (#3, `--<canary>-reinstall`): WIPE the existing
+  ## own-subtree, then re-extract. The wipe target is ONLY `final` — the identical own-subtree the
+  ## reaper deletes, never a path from env/arg — run through the SAME shredGuard the shred worker
+  ## uses (INV-REAP-01 / INV-BASE-01 own-subtree-only). `overwrite` shreds the wipe on an
+  ## `--overwrite` build. A verify MISMATCH never triggers this; only the explicit arg does.
   if key.len == 0 or key.len > 64 or not key.allCharsInSet(KeyChars):
     raise newException(StageError, "invalid stage key (expected hex): " & key)
   let payloadDigest = sha256hex(payload)
@@ -978,8 +1063,20 @@ proc stageZip*(payload: string, key: string, root = baseDir()): string =
   # is a real constraint, so this is the deliberate trade.
   let final = root / (key.toLowerAscii & "-" & payloadDigest[0 ..< 32])
 
+  if reinstall and dirExists(final):
+    # Wipe THIS payload's own subtree only. shredGuard proves `final` is a stage-shaped
+    # (`<hexkey>-<32-hex-digest>`) non-symlink directory under a refuseUnsafeRoot-checked parent and
+    # not a HARUPACK_DEV_STAGE tree — the identical guard the shred worker/reaper share, so a
+    # reinstall can never delete anything but the subtree stageZip itself computes.
+    let why = shredGuard(final)
+    if why.len > 0:
+      raise newException(StageError, "refusing to wipe the stage for reinstall: " & why)
+    if overwrite: shredAndRemoveTree(final)   # --overwrite build: shred the wipe (INV-SHRED-01)
+    else: removeDir(final)
+    # fall through to the fresh-extract path below (dirExists(final) is now false)
+
   if dirExists(final):
-    verifyStagedDir(final, key.toLowerAscii, payloadDigest)
+    verifyStagedDir(final, key.toLowerAscii, payloadDigest, canary)
     return final
 
   createDir(root)
@@ -1000,7 +1097,7 @@ proc stageZip*(payload: string, key: string, root = baseDir()): string =
   expandCompressedMembers(root)       # BEFORE recordTree — see that proc's comment
   materialiseLinks(root)              # likewise: copies must be inside the sealed manifest
   hardenDir(root)
-  let (mf, count) = recordTree(root)
+  let (mf, count) = recordTree(root, writable)
   writeHardened(root / FilesName, mf)
   writeHardened(root / ReadyName, readyToken(key.toLowerAscii, payloadDigest, sha256hex(mf), count))
 
@@ -1012,7 +1109,7 @@ proc stageZip*(payload: string, key: string, root = baseDir()): string =
   # We may have lost the race (or something else made `final` while we worked). Either
   # way the directory we are about to return is verified like any other reuse — the old
   # code returned it unexamined.
-  verifyStagedDir(final, key.toLowerAscii, payloadDigest)
+  verifyStagedDir(final, key.toLowerAscii, payloadDigest, canary)
   return final
 
 proc touchStage*(dir: string) =

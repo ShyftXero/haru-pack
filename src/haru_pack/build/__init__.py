@@ -44,6 +44,7 @@ from .staging import _is_root_like, resolve_base_path, resolve_source_url
 from .tree import _staged_tree_bytes, copy_app_tree, target_is_host
 from .validate import (CWD_POLICIES, prepare_output_dir, validate_encryption,
                        validate_manifest)
+from .writable import resolve_writable
 
 __all__ = [
     "BuildError", "build",
@@ -51,7 +52,7 @@ __all__ = [
     "DEFAULT_GEO_ENDPOINT", "DEFAULT_PYTHON", "ObfuscationError",
     "announce_staging", "assemble_payload", "build_geo_policy", "compile_launcher",
     "couple_staging_flags", "crypto", "emit_mod", "resolve_base_path", "resolve_canary",
-    "resolve_cc", "resolve_injects", "resolve_source_url", "stub_config_bytes",
+    "resolve_cc", "resolve_injects", "resolve_source_url", "resolve_writable", "stub_config_bytes",
     "copy_app_tree", "target_is_host", "toolchain", "prepare_output_dir",
     "validate_encryption", "validate_manifest",
     # Underscored, but imported by tests that check a refusal directly rather than through
