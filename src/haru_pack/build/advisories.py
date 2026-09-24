@@ -15,19 +15,54 @@ Split out of build.py 2026-09-13 (INV-MODULARITY-01). Text unchanged.
 """
 from __future__ import annotations
 
-from fnmatch import fnmatch
+import re
 from pathlib import Path
 
 from .errors import BuildError
 from .geo import DEFAULT_GEO_ENDPOINT
 
-# Writable-data signatures: files a program typically opens READ-WRITE. Bundled next to the code
-# they stage read-only and are re-hashed on every run (INV-STAGE-01), so an app that writes to
-# one IN PLACE fails to launch on the second run — see docs/SHARP_CORNERS.md section E.
-_WRITABLE_DATA_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db3", ".ddb")
-_WRITABLE_DATA_GLOBS = ("*-wal", "*-shm", "*-journal")   # sqlite sidecars
+# The second-run hazard (docs/SHARP_CORNERS.md section E) is a bundled file the app opens
+# READ-WRITE: it stages read-only and is re-hashed on every run (INV-STAGE-01), so mutating it in
+# place makes the NEXT launch refuse. We can't know at build time which files get written, so we
+# nudge on the *pattern* of a runtime data store, not on a curated extension list. An extension
+# list both over-fits (crying wolf on a read-only `.csv` shipped as seed data) and under-fits
+# (missing a SQLite db named `store` with no suffix). Two orthogonal, generic signals below;
+# best-effort nudge, never a gate.
+
+# 1) CONTENT identity: the header magic of an embedded database, matched by what the file IS — so a
+#    live db is caught under ANY name. Grow THIS tuple (not an extension whitelist) for more stores.
+_DB_MAGICS = (
+    b"SQLite format 3\x00",   # sqlite — and everything built on it (most `.db` files)
+)
+_MAGIC_READ = max(len(m) for m in _DB_MAGICS)
+
+# 2) NAME shape: text stores (logs, dumps, exports) have no magic, so fall back to the *role* the
+#    name advertises — mutable/generated-state words as whole tokens delimited by `.`, `_` or `-`.
+#    Catches error.log / log.txt / app-cache.bin / data.csv / a `foo-wal` sidecar, while NOT firing
+#    on metadata.json or database.py (no token boundary before "data"/"base").
+_WRITABLE_NAME_RE = re.compile(
+    r"(?:^|[._-])"
+    r"(?:log|logs|cache|history|session|sessions|journal|wal|shm|dump|dumps|"
+    r"backup|bak|state|data|export|output|tmp|temp)"
+    r"(?:$|[._-])",
+    re.IGNORECASE,
+)
 _SCAN_SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build",
                    ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+
+
+def _looks_like_writable_data(path: Path) -> bool:
+    """True if `path` looks like a runtime data store — by the role its NAME advertises, or by
+    database magic bytes (name-independent). Best-effort: on any read error fall back to name only.
+    A nudge heuristic, not a proof the app writes to it (see docs/SHARP_CORNERS.md section E)."""
+    if _WRITABLE_NAME_RE.search(path.name):
+        return True
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_MAGIC_READ)
+    except OSError:
+        return False
+    return head.startswith(_DB_MAGICS)
 
 
 def couple_staging_flags(*, reap: bool, overwrite: bool, ram_only: bool, no_reap: bool,
@@ -152,8 +187,7 @@ def warn_bundled_writable_data(source, say) -> list:
         rel = p.relative_to(src)
         if any(part in _SCAN_SKIP_DIRS for part in rel.parts):
             continue
-        name = p.name.lower()
-        if name.endswith(_WRITABLE_DATA_SUFFIXES) or any(fnmatch(name, g) for g in _WRITABLE_DATA_GLOBS):
+        if _looks_like_writable_data(p):
             hits.append(rel.as_posix())
     if hits:
         shown = ", ".join(sorted(hits)[:5]) + (" ..." if len(hits) > 5 else "")
