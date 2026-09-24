@@ -82,7 +82,8 @@ def _toml_basic_str(s: str) -> str:
 
 def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = False,
                       ram_only: bool = False, base_path: str = "",
-                      source_url: str = "", unpacked_bytes: int = 0) -> bytes:
+                      source_url: str = "", unpacked_bytes: int = 0,
+                      writable: list | tuple = ()) -> bytes:
     """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2 +
     docs/adr/0007), UTF-8, in fixed order. Canary tokens are validated env-name prefixes, so no
     escaping is needed.
@@ -113,6 +114,13 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = Fal
     # non-ephemeral binary's stub-config never carries it and stays byte-identical to v1.
     if ram_only and unpacked_bytes > 0:
         lines.append(f"unpacked_bytes = {int(unpacked_bytes)}")
+    # writable (#4, INV-STAGE-01 relaxation): the build-DECLARED, backstop-cleared set of app data
+    # files that may change on reuse, as EXACT stage-relative paths. Emitted only when non-empty, so
+    # a build that declares nothing stays byte-identical to the v1 corpus. Entries are TOML basic
+    # strings (a Windows path may carry `\`). The launcher's recordTree records these as `mutable:`.
+    if writable:
+        items = ", ".join(_toml_basic_str(w) for w in writable)
+        lines.append(f"writable = [{items}]")
     lines += ["", "[canary]"]
     lines += [f'{knob} = "{canary[knob]}"' for knob in _MANDATORY_CANARY_KNOBS]
     # The EPHEMERAL knob rides the closed catalogue but is additive: its `[canary]` key is written

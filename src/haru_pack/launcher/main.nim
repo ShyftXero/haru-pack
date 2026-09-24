@@ -224,7 +224,9 @@ proc launch(): int =
   let self = getAppFilename()
   let exeDir = getAppDir()
   let runDir = getCurrentDir()          # run-in-place root
-  let userArgs = commandLineParams()
+  # `var`: a `--<canary>-reinstall` reserved arg (#3) is consumed here and filtered OUT before the
+  # child ever sees it, so the packaged app's own argv is unchanged.
+  var userArgs = commandLineParams()
 
   # 1. locate staged payload root
   var stageRoot = ""
@@ -234,6 +236,9 @@ proc launch(): int =
   var reapWanted = false
   var reapTarget = ""
   var reapOverwrite = false
+  # The `--<canary>-shred` flag the Windows overwrite-reaper re-execs itself with (#3). Default is
+  # the `--haru-shred` a HARU build uses; set to the build's canary once the stub is read.
+  var reapShredArg = "--haru-shred"
   # True only when stageRoot came from HARUPACK_DEV_STAGE: like reap, stage-dir eviction is
   # skipped for a dev tree we did not create (INV-LAUNCH-02). Stays false on the overlay path.
   var devStaged = false
@@ -314,10 +319,29 @@ proc launch(): int =
     let rootFault = refuseUnsafeRoot(root)
     if rootFault.len > 0:
       die("refusing to stage under an unsafe base path — " & rootFault, ExitBadStub)
-    stageRoot = stageZip(payload, shahex[0..15], root)
+    # #3: `--<canary>-reinstall` is a DELIBERATE operator action — WIPE the staged own-subtree, then
+    # re-extract. It is an ARG (not an env INPUT), so INV-CANARY-03 does not apply; the prefix is
+    # canary-derived (argCanary) only for white-label consistency. The canary is known now that the
+    # stub is read (INV-STUB-01). Consume it here and filter it OUT of userArgs so the packaged app
+    # never sees it. stageZip wipes ONLY its own computed subtree, through the shared shredGuard, and
+    # NEVER a path from arg/env (INV-REAP-01 / INV-BASE-01). A verify mismatch never triggers this —
+    # only this explicit arg does (a mismatch stays fatal, INV-STAGE-01).
+    let canary = argCanary(sc)
+    let reinstallArg = "--" & canary & "-reinstall"
+    var reinstall = false
+    if reinstallArg in userArgs:
+      reinstall = true
+      userArgs = userArgs.filterIt(it != reinstallArg)
+      stderr.writeLine "haru-pack: " & reinstallArg &
+        ": wiping and re-extracting the staged tree (this discards stage state, including any " &
+        "declared-writable app data — keep writable state OUTSIDE the stage, in a data dir)."
+    stageRoot = stageZip(payload, shahex[0..15], root,
+                         reinstall = reinstall, overwrite = sc.overwrite,
+                         writable = sc.writable, canary = canary)
     reapWanted = sc.reap                 # build-time --reap; independent of ram_only
     reapTarget = stageRoot               # the exact subtree we just created/verified
     reapOverwrite = sc.overwrite         # build-time --overwrite: shred-on-reap (INV-SHRED-01)
+    reapShredArg = "--" & canary & "-shred"   # white-label consistent with --<canary>-reinstall (#3)
 
   # 2. manifest
   let mfPath = stageRoot / "manifest.toml"
@@ -438,21 +462,26 @@ proc launch(): int =
   # keep deleting after this stub has died. Only the subtree the launcher created this run is
   # reaped; a dev-stage tree (reapTarget == "") is never touched.
   if reapWanted and reapTarget.len > 0:
-    reapDetached(reapTarget, reapOverwrite)
+    reapDetached(reapTarget, reapOverwrite, reapShredArg)
   return rc
 
 when isMainModule:
   when defined(windows):
     # Hidden shred worker (docs/adr/0004 5b, INV-SHRED-01). The --overwrite reaper on Windows
-    # re-execs THIS launcher as `--haru-shred <subtree>` (stage.reapDetached), because there is
-    # no native per-file secure-erase and PowerShell is frequently locked on hardened targets.
-    # This is a delete primitive, so it is guarded to a stage-shaped own-subtree under a safe
-    # root and never a dev-stage tree (stage.shredGuard); anything else is refused, never run.
+    # re-execs THIS launcher as `--<canary>-shred <subtree>` (stage.reapDetached), because there is
+    # no native per-file secure-erase and PowerShell is frequently locked on hardened targets. The
+    # prefix is canary-derived for white-label consistency (#3, `--haru-shred` on a default build);
+    # it is cosmetic, and shredGuard is the actual boundary. This is a delete primitive, so it is
+    # guarded to a stage-shaped own-subtree under a safe root and never a dev-stage tree
+    # (stage.shredGuard); anything else is refused, never run. The stub is not read here (this runs
+    # before launch()), so the prefix is matched by SHAPE — a valid canary token — and the target's
+    # safety comes entirely from shredGuard, exactly as it did for the fixed `--haru-shred`.
     let shredArgs = commandLineParams()
-    if shredArgs.len == 2 and shredArgs[0] == "--haru-shred":
+    if shredArgs.len == 2 and shredArgs[0].startsWith("--") and shredArgs[0].endsWith("-shred") and
+       isValidCanary(shredArgs[0][2 ..< shredArgs[0].len - "-shred".len]):
       let why = shredGuard(shredArgs[1])
       if why.len > 0:
-        stderr.writeLine "haru-pack: refusing --haru-shred: " & why
+        stderr.writeLine "haru-pack: refusing " & shredArgs[0] & ": " & why
         quit(2)
       shredAndRemoveTree(shredArgs[1])
       quit(0)

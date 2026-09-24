@@ -34,6 +34,7 @@ from .geo import build_geo_policy
 from .inject import resolve_injects
 from .staging import _attach_payload, resolve_base_path, resolve_source_url
 from .tree import _staged_tree_bytes
+from .writable import resolve_writable
 from .validate import prepare_output_dir
 from . import signing
 from .. import shake as shake_mod
@@ -62,6 +63,20 @@ def _preflight(tgt: Target, cc: str, log) -> tuple[str, str, dict]:
     else:
         tc = {"ok": True, "compiler": f"zig ({tgt.zig_triple()})", "advice": ""}
     return nim, provider, tc
+
+
+def _stub_tree_inputs(payload_dir, ram_only, cli_writable, manifest, say):
+    """The two stub-config inputs that must inspect the ASSEMBLED tree's real bytes on disk:
+
+      * `unpacked_bytes` — the EXPANDED staged-tree size for the launcher's RAM-fit check
+        (docs/adr/0007, INV-EPHEMERAL-01); the uv member is un-XZ'd on stage, so this is not a `du`
+        of the compressed payload dir. Only needed when staging may go to RAM.
+      * the `--writable` set (#4, INV-STAGE-01 relaxation) — `--writable` globs + a
+        `haru_pack.toml` list, resolved to EXACT stage-relative members and passed the backstop
+        (which REFUSES any importable/executable/`+x` file). Rides the signature-covered stub-config.
+    """
+    unpacked_bytes = _staged_tree_bytes(payload_dir) if ram_only else 0
+    return unpacked_bytes, resolve_writable(payload_dir, cli_writable, manifest, log=say)
 
 
 def _record_obfuscation(manifest: dict, obfuscate: str, obfuscate_args, tier: str,
@@ -99,7 +114,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
           no_reap: bool = False, base_path: str = "", source_url: str = "", env_append=None,
           cc: str = "", emit_c: str = "", emit_nim: str = "",
           self_signed: bool = False, sign_key: str = "", cert_file: str = "",
-          sign_key_passphrase_env: str = "", log=None) -> dict:
+          sign_key_passphrase_env: str = "", writable=None, log=None) -> dict:
     project = Path(project); out = Path(out)
     prepare_output_dir(out)
     say = log or (lambda _m: None); emit_c_dir = emitkit.validate_c_dir(emit_c)
@@ -163,11 +178,9 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
             # binary that is nothing like the one they asked for, and they find out from
             # its size or not at all.
             raise BuildError(f"--shake refused to ship: {e}") from e
-        # The staged-tree size baked into the stub-config so the launcher can size its RAM-fit
-        # check BEFORE staging (docs/adr/0007, INV-EPHEMERAL-01). This is the EXPANDED tree the
-        # launcher stages (uv is un-XZ'd on stage), not the compressed payload dir — see
-        # _staged_tree_bytes. Only needed when staging may go to RAM.
-        unpacked_bytes = _staged_tree_bytes(payload_dir) if ram_only else 0
+        # Stub-config inputs derived from the assembled tree (RAM-fit size + the backstop-cleared
+        # --writable set); see _stub_tree_inputs. Both must read the real bytes on disk.
+        unpacked_bytes, writable_set = _stub_tree_inputs(payload_dir, ram_only, writable, manifest, say)
         payload = build_payload_zip(payload_dir)
         flags = 0
         if enc["enabled"]:
@@ -184,7 +197,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                 "Refusing to emit a binary whose build receipt would be wrong.")
         launcher = compile_launcher(nim, tgt, tdp, cc=cc, log=log)
         sc_bytes = stub_config_bytes(canary, reap=reap, overwrite=overwrite,
-                                     ram_only=ram_only, base_path=base_path,
+                                     ram_only=ram_only, base_path=base_path, writable=writable_set,
                                      source_url=source_url, unpacked_bytes=unpacked_bytes)
         # Every NEW binary is v2: it always carries the cleartext, signature-covered
         # stub-config section the launcher reads before decrypt (docs/adr/0003 §1.5).
@@ -202,7 +215,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
                    compiler=tc["compiler"], out=out, enc=enc, manifest=manifest, pyver=pyver,
                    canary=canary, reap=reap, overwrite=overwrite, ram_only=ram_only,
                    base_path=base_path, source_url=source_url, unpacked_bytes=unpacked_bytes,
-                   shake_report=shake_report, slim_report=slim_report,
+                   shake_report=shake_report, slim_report=slim_report, writable=writable_set,
                    signing_info=signing_info, cert_info=cert_info)
     emitkit.write_nim_kit(emit_nim, info=info, tgt=tgt, provider=provider, payload=payload,
                           stub_config=sc_bytes, flags=flags, source_url=source_url, out=out,

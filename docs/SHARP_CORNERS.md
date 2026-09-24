@@ -80,9 +80,9 @@ Rust ext, `flask db upgrade`, `prisma generate`, downloading a model, compiling 
   dir / adjacent to the script.** The stage is a content-addressed, hash-verified mirror of the
   payload: every bundled file is re-hashed on every run (INV-STAGE-01). So a bundled file the
   app opens **read-write in place** changes its hash, and the **next run refuses to launch** —
-  `StageError: stage directory does not match this payload` — not merely "reset on upgrade". (A
-  file the app *creates new* in the stage is unrecorded and ignored; it is *mutating a bundled
-  file* that breaks reuse.)
+  `StageError: the bundled file '<rel>' inside the stage changed since it was unpacked` — not
+  merely "reset on upgrade". (A file the app *creates new* in the stage is unrecorded and
+  ignored; it is *mutating a bundled file* that breaks reuse.)
 - Put writable data next to the exe (`HARUPACK_EXE_DIR`), in a user data dir, or relative to
   the launch dir (cwd) — never the stage. A bundled db is a **read-only seed**: if the app must
   mutate it, copy it out to a writable location on first run.
@@ -92,6 +92,18 @@ Rust ext, `flask db upgrade`, `prisma generate`, downloading a model, compiling 
   — a stdlib-only wrapper for exactly this (read-only `stage()`; writable `data_dir(app)` /
   `data_file(app, "files.db")` on XDG / `%LOCALAPPDATA%` / `~/Library`). It pulls in no heavy
   deps, so depending on haru-pack for it is cheap — or copy the two lines you need.
+- **If you genuinely must ship a MUTABLE seed** (a starter SQLite DB the app writes in place),
+  declare it at build: `--writable app/data/app.db` (repeatable; also `writable = [...]` in
+  `haru_pack.toml`). The launcher then checks the file is present but does **not** pin its bytes,
+  so it may change across runs. The build REFUSES to declare writable anything importable or
+  executable (`.py`/`.pyc`/`.so`/`.pth`/…, the interpreter, `uv`, the entrypoint, any `+x` or
+  magic-byte executable) — a writable code path would be a same-uid RCE hole.
+- **`--<canary>-reinstall` discards stage state.** If a stage wedges (genuine corruption, or you
+  *want* to reset a `--writable` seed), running the binary once with `--<canary>-reinstall`
+  (default `--haru-reinstall`) WIPES and re-extracts its own staged subtree from the payload —
+  throwing away everything in the stage, declared-writable files included. That is exactly why
+  writable state belongs in a data dir OUTSIDE the stage. A verify mismatch is never auto-healed;
+  reinstall is a deliberate operator action.
 
 Resolving the right folder (pathlib):
 

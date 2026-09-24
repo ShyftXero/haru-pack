@@ -129,6 +129,14 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
           env_append: list[str] = typer.Option(None, "--env-append", metavar="KEY=VALUE",
               help="inject KEY=VALUE into the child env before uv AND the app (repeatable). "
                    "Lives in the payload — use --encrypt to hide a secret value"),
+          writable: list[str] = typer.Option(None, "--writable", metavar="GLOB",
+              help="declare a BUNDLED app DATA file (glob, stage-relative) that may change on "
+                   "reuse, e.g. --writable app/data/app.db (repeatable). By default the launcher "
+                   "re-hashes every staged file and refuses a mismatch (INV-STAGE-01); a declared "
+                   "path is checked for presence but its BYTES are not pinned. REFUSED at build for "
+                   "any importable/executable file (.py/.pyc/.so/.pth/… , the interpreter tree, uv, "
+                   "the entrypoint, or any +x file). Writable state is safer OUTSIDE the stage (a "
+                   "data dir): --<canary>-reinstall WIPES the stage, declared files included"),
           self_signed: bool = typer.Option(False, "--self-signed",
               help="sign the build with an Ed25519 key so the launcher detects a post-build "
                    "payload edit (v3 footer). DEFAULT OFF. HONEST LIMIT: the public key is "
@@ -186,6 +194,6 @@ def build(project: Path = typer.Argument(..., help="payload dir (contains manife
                stub_env_ephemeral_canary=stub_env_ephemeral_canary,
                reap=reap, ephemeral=ephemeral, ram_only=ram_only, no_reap=no_reap,
                overwrite=overwrite, base_path=base_path, source_url=source_url,
-               env_append=env_append, emit_c=emit_c, emit_nim=emit_nim,
+               env_append=env_append, writable=writable, emit_c=emit_c, emit_nim=emit_nim,
                self_signed=self_signed, sign_key=sign_key,
                sign_key_passphrase_env=sign_key_passphrase_env, cert_file=cert_file)

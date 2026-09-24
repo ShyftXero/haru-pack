@@ -3,6 +3,44 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-09-23
+
+### `--writable`: bundled app data files may change on reuse (INV-STAGE-01 relaxation, fail-closed)
+
+By default the launcher re-hashes every staged file on every run and refuses any mismatch, which
+is right for code and wrong for a bundled data file the app opens read-write (a seed `app.db` the
+app mutates would fail verification on the second run). `--writable <glob>` (repeatable; also
+`writable = [...]` in `haru_pack.toml`) DECLARES such files. The build resolves the glob against
+the assembled tree to exact stage-relative paths, carries them in the SIGNATURE-COVERED
+stub-config, and the launcher records them as `mutable:` lines — checked for presence, regular-file
+kind, and non-symlink-ness on reuse, but with their BYTES deliberately not pinned. The tree stays
+fully accounted for: a `mutable:` member still counts in the file count and the `.stage-files`
+digest the `.ready` token binds, and it may never be a symlink or a `.haru-links` alias target.
+
+The load-bearing safety is a BUILD-TIME backstop that fails the build (never the customer): it
+REFUSES to declare writable any importable/executable file — Python/native (`.py`/`.pyc`/`.so`/
+`.pth`/…) AND shell/Windows executables (`.sh`/`.bat`/`.ps1`/`.exe`/…), `sitecustomize`/
+`usercustomize`, the interpreter tree, `uv`, the entrypoint, EVERY pre/post-install `run` token
+(whatever its extension, including extensionless), ANY file whose CONTENT is executable magic
+(shebang/ELF/PE/Mach-O — content beats name, so a renamed executable can't slip through), or ANY
+file carrying the POSIX executable bit. A writable code path would be a same-uid RCE primitive that
+re-cuts the holes `stage.nim`'s "NOT exempt, deliberately" block documents; `.pth` is a hard refuse
+because `site` executes its `import` lines at interpreter startup.
+
+### `--<canary>-reinstall`: a deliberate wipe-and-re-extract (reserved arg, not an env knob)
+
+A verify mismatch now surfaces the SPECIFIC file that changed and points at the remedy instead of
+a generic "corrupt cache": *"the bundled file `…` inside the stage changed since it was unpacked …
+use a data dir … re-run with `--<canary>-reinstall`."* A mismatch is still FATAL and never
+auto-healed (tamper-evidence). The operator-only `--<canary>-reinstall` arg (default
+`--haru-reinstall`; prefix tracks the build canary for white-label consistency, and the existing
+`--haru-shred` worker arg is canary-fied the same way) WIPES the launcher's OWN computed subtree —
+through the same `shredGuard` the reaper uses, never a path from arg/env (INV-REAP-01 /
+INV-BASE-01) — and re-extracts, shredding the wipe on an `--overwrite` build. It is consumed before
+the packaged app sees its argv. NOTE the `#3`/`#4` conflict: reinstall re-extracts from the
+payload and so discards ALL stage state, declared-writable files included — keep writable app
+state OUTSIDE the stage (a data dir; docs/SHARP_CORNERS.md section E).
+
 ## 2026-09-16
 
 ### `--thick` offline was only accidentally offline: the cache is now warmed with the pinned uv

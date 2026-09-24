@@ -62,7 +62,8 @@ def _uv(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def make_payload(root: Path, *, uv_body: str = UV_ECHO_STAGE) -> Path:
+def make_payload(root: Path, *, uv_body: str = UV_ECHO_STAGE,
+                 extra_files: dict | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "app").mkdir(exist_ok=True)
     (root / "app" / "hello.py").write_text("print('hi')\n")
@@ -71,13 +72,20 @@ def make_payload(root: Path, *, uv_body: str = UV_ECHO_STAGE) -> Path:
         'entrypoint = ["hello.py"]\ntier = "default"\n'
         "fetch_uv = false\noffline = false\n")
     _uv(root / "vendor" / "uv", uv_body)
+    # Extra stage-relative files, e.g. a bundled data seed the app rewrites in place ({"data/app.db":
+    # b"seed"}). Lets a test exercise the #4 declared-writable path end to end.
+    for rel, data in (extra_files or {}).items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data if isinstance(data, bytes) else data.encode())
     return root
 
 
 def stub_toml2(*, secret: str = "HARU", uv_ver: str = "HARU", source_url: str = "HARU",
                base_path_canary: str = "HARU", ephemeral_canary: str = "HARU",
                reap: bool = False, overwrite: bool = False,
-               ram_only: bool = False, base_path: str = "", unpacked_bytes: int = 0) -> bytes:
+               ram_only: bool = False, base_path: str = "", unpacked_bytes: int = 0,
+               writable: list | tuple = ()) -> bytes:
     """A v2 stub-config carrying the Phase-2/3 staging keys (ADR 0004 + 0005). Optional keys are
     emitted only when set, exactly as build.stub_config_bytes does - so the bytes a test feeds the
     launcher are the same shape a real build produces. `ephemeral_canary` and `unpacked_bytes`
@@ -94,6 +102,9 @@ def stub_toml2(*, secret: str = "HARU", uv_ver: str = "HARU", source_url: str = 
         lines.append(f'base_path = "{base_path}"')
     if unpacked_bytes:
         lines.append(f"unpacked_bytes = {int(unpacked_bytes)}")
+    if writable:
+        items = ", ".join('"' + w.replace("\\", "\\\\").replace('"', '\\"') + '"' for w in writable)
+        lines.append(f"writable = [{items}]")
     lines += ["", "[canary]",
               f'secret = "{secret}"', f'uv_ver = "{uv_ver}"',
               f'source_url = "{source_url}"', f'base_path = "{base_path_canary}"']
@@ -110,7 +121,8 @@ def pack(launcher: Path, payload: bytes, out: Path, *, stub_config: bytes) -> di
 
 
 def run(exe: Path, tmp_path: Path, *,
-        env_extra: dict | None = None) -> subprocess.CompletedProcess:
+        env_extra: dict | None = None,
+        args: list | tuple = ()) -> subprocess.CompletedProcess:
     cache = tmp_path / "cache"
     cache.mkdir(exist_ok=True)
     (tmp_path / "home").mkdir(exist_ok=True)
@@ -119,7 +131,7 @@ def run(exe: Path, tmp_path: Path, *,
     env = {"HOME": str(tmp_path / "home"), "XDG_CACHE_HOME": str(cache), "PATH": ""}
     env.update(env_extra or {})
     # umask 022 because stage.nim refuses a group-writable stage dir on this 002 box.
-    return subprocess.run([str(exe)], capture_output=True, text=True, cwd=tmp_path,
+    return subprocess.run([str(exe), *args], capture_output=True, text=True, cwd=tmp_path,
                           env=env, umask=0o022, stdin=subprocess.DEVNULL, timeout=60,
                           check=False)
 

@@ -1845,7 +1845,20 @@ Status: active
 Statement: The launcher never executes a staged tree it cannot account for: a stage directory
 is reused only if it is a real directory owned by the calling user, not group- or
 world-writable, carrying a `.ready` token that names this exact payload digest, and every file
-recorded in `.stage-files` still hashes to its recorded sha256.
+recorded in `.stage-files` still hashes to its recorded sha256. The ONE relaxation (#4): a member
+the build DECLARED writable (`--writable <glob>`, resolved to exact stage-relative paths and
+carried in the signature-covered stub-config) is recorded as a `mutable:` line instead of a
+sha256; on reuse it is checked for presence, regular-file kind, and non-symlink-ness — its BYTES
+are deliberately not pinned, so a bundled data file the app rewrites in place no longer fails
+verification — while it STILL counts in the file count and the `.stage-files` digest the `.ready`
+token binds, so the tree stays fully accounted for. The BUILD refuses to declare writable any
+importable/executable file (`.py`/`.pyc`/`.so`/`.pth`/…, `sitecustomize`/`usercustomize`, the
+interpreter tree, `uv`, the entrypoint, pre/post-install targets, or ANY `+x` file) — a writable
+code path would be a same-uid RCE primitive — and a `mutable:` member may never be a symlink or a
+`.haru-links` alias target. A verify mismatch stays FATAL and is never auto-healed; the deliberate
+recovery is the operator-only `--<canary>-reinstall` arg (#3), which WIPES the launcher's own
+computed subtree — through the same shredGuard the reaper uses, never a path from arg/env — and
+re-extracts.
 Actors: any process on the target that can write into the user's cache directory before the
 launcher does — a same-user attacker, a shared or misconfigured cache, resident malware.
 Assets: code execution under the vendor's identity and (on Windows) behind their signature. The
@@ -1853,7 +1866,19 @@ launcher runs `pre_install`/`post_install` argv and the entrypoint straight out 
 Red-path: Restore the trust-on-first-use short circuit — `if dirExists(final): return final` in
 `stage.stageZip`. The claiming tests pre-create a hostile stage directory (with and without the
 old one-byte `.ready`), modify and delete a staged file, chmod the tree 0777, and replace it
-with a symlink. Walked 2026-09-09: 6 red, 49 passed.
+with a symlink. Walked 2026-09-09: 6 red, 49 passed. The #4/#3 additions to the walked set
+(tests/test_writable_reinstall.py, nim host): (a) declare `data/app.db` writable, stage, rewrite
+it between runs -> 2nd run rc 0 — neutralised by dropping the `mutable:` branch in
+recordTree/verifyTree, which turns the app's own write into a fatal tamper; (b) rewrite a
+NON-declared bundled file (`bin/python`) -> still rc != 0 (verifyTree "modified"); (c) try to
+declare `plugins/hook.pth`, a `+x` file, a `.py`/`.so`, a shell/Windows executable
+(`.sh`/`.bat`/`.ps1`/`.exe`), a NON-`.py` pre/post-install `run` target of ANY extension
+(including extensionless), or a file whose CONTENT is executable magic (shebang/ELF/PE/Mach-O) even
+with no exec bit or code suffix, plus the interpreter tree or `uv` -> the BUILD refuses
+(build.resolve_writable backstop, pure-Python, runs on any host); (d) replace
+the declared `data/app.db` with a symlink -> verifyTree refuses ("now a symlink"). Also walked:
+the error-message fix names the changed file + `--<canary>-reinstall`, and reinstall wipes only
+its own subtree (a sentinel beside it survives, INV-REAP-01).
 Source: THREAT_MODEL.md boundary B10, adversarial review 2026-09-09. The old code
 short-circuited on a bare `.ready` existence check under a directory named after 64 bits of the
 footer digest, and its `if not dirExists(final): moveDir` also handed back a pre-existing
@@ -1871,7 +1896,18 @@ regenerate the token together; closing that needs an OS boundary (a separate ser
 a root-owned read-only stage), not a checksum. Ownership and mode are checked on POSIX only —
 there is no Windows ACL equivalent here. Verification re-hashes recorded files on every launch,
 so startup cost scales with payload size.
-Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim
+Note (#4 relaxation / #3 reinstall, 2026-09-23): the `--writable` relaxation deliberately widens
+what a same-uid attacker can change — a declared data file's BYTES are no longer pinned. That is
+acceptable ONLY because the build's backstop makes the declared set incapable of holding code
+(no importable/executable file, no `+x` file, never an alias target), so the relaxation can turn a
+data file mutable but can never turn a code path mutable. The declared set rides the
+signature-covered stub-config (INV-STUB-01 / INV-SIGN-01), so it is integrity-anchored, not a side
+channel. `#3` and `#4` CONFLICT on data loss: `--<canary>-reinstall` re-extracts from the payload
+and so discards ALL stage state, declared-writable files included — writable app state should live
+OUTSIDE the stage (a data dir; docs/SHARP_CORNERS.md section E), with the bundle carrying only a
+seed copied out on first run.
+Territory: src/haru_pack/launcher/stage.nim, src/haru_pack/launcher/main.nim,
+src/haru_pack/launcher/stubconfig.nim, src/haru_pack/build/writable.py
 
 ### INV-STAGE-02
 Status: active

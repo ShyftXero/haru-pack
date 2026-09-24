@@ -88,7 +88,11 @@ def harness(tmp_path_factory) -> Path:
     src.write_text(HARNESS_NIM, encoding="utf-8")
     out = d / "harness"
     r = subprocess.run(
-        ["nim", "c", "--hints:off", "--warnings:off", f"--path:{LAUNCHER}",
+        # -d:haruDev: shredGuard's HARUPACK_DEV_STAGE refusal is gated on haruDev (the dev-stage tree
+        # only exists in a dev build, and gating keeps the literal out of RELEASE binaries now that
+        # shredGuard is on the live reinstall path — INV-LAUNCH-02). The harness must enable it to
+        # exercise test_shredguard_refuses_a_dev_stage_tree.
+        ["nim", "c", "--hints:off", "--warnings:off", "-d:haruDev", f"--path:{LAUNCHER}",
          f"--nimcache:{d / 'nimcache'}", f"--out:{out}", str(src)],
         capture_output=True, text=True,
     )
@@ -225,13 +229,18 @@ def test_shred_overwrites_before_removing():
 @pytest.mark.invariant("INV-SHRED-01")
 def test_reapdetached_wires_overwrite_through_to_the_shredder():
     """reapDetached must take an `overwrite` flag and, when set, drive the native shredder
-    (POSIX inline shredAndRemoveTree / Windows --haru-shred re-exec) rather than a plain rm."""
+    (POSIX inline shredAndRemoveTree / Windows --<canary>-shred re-exec) rather than a plain rm.
+    The Windows shred arg is canary-derived (#3), defaulting to `--haru-shred`, and is passed
+    THROUGH to the re-exec (never hard-coded at the call site)."""
     src = STAGE_NIM.read_text()
     assert re.search(r"proc reapDetached\*\(target: string; overwrite", src), (
         "reapDetached does not take an overwrite flag")
+    assert re.search(r'proc reapDetached\*\([^)]*shredArg = "--haru-shred"', src), (
+        "reapDetached does not take a canary-derived shredArg defaulting to --haru-shred")
     body = _body_of(src, "reapDetached")
     assert "shredAndRemoveTree(target)" in body, "POSIX overwrite path does not shred natively"
-    assert '"--haru-shred", target' in body, "Windows overwrite path does not re-exec --haru-shred"
+    assert "[shredArg, target]" in body, (
+        "Windows overwrite path does not re-exec the canary-derived shred arg")
 
 
 @pytest.mark.invariant("INV-SHRED-01")
@@ -239,8 +248,8 @@ def test_main_reads_overwrite_and_passes_it_to_reap():
     """The launcher must read the baked `overwrite` and hand it to reapDetached with the target."""
     src = MAIN_NIM.read_text()
     assert "reapOverwrite = sc.overwrite" in src, "main does not read the baked overwrite knob"
-    assert "reapDetached(reapTarget, reapOverwrite)" in src, (
-        "main does not pass overwrite into the detached reaper")
+    assert "reapDetached(reapTarget, reapOverwrite, reapShredArg)" in src, (
+        "main does not pass overwrite (and the canary-derived shred arg) into the detached reaper")
 
 
 @pytest.mark.invariant("INV-SHRED-01")

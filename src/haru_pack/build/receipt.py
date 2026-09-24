@@ -33,6 +33,7 @@ def finish(info: dict, *, sources, provider: str, tier: str, tgt, nim: str, comp
            out: Path, enc: dict, manifest: dict, pyver: str, canary: dict, reap: bool,
            overwrite: bool, ram_only: bool, base_path: str, source_url: str,
            unpacked_bytes: int, shake_report: dict,
+           writable=(),
            slim_report: dict | None = None,
            signing_info: dict | None = None, cert_info: dict | None = None) -> dict:
     """Fold every recorded fact about this build into the receipt and return it."""
@@ -45,7 +46,11 @@ def finish(info: dict, *, sources, provider: str, tier: str, tgt, nim: str, comp
                 staging={"reap": bool(reap), "overwrite": bool(overwrite),
                          "ram_only": bool(ram_only), "base_path": base_path,
                          "source_url": source_url,
-                         "unpacked_bytes": int(unpacked_bytes)},
+                         "unpacked_bytes": int(unpacked_bytes),
+                         # #4: the build-declared, backstop-cleared writable app-data set (exact
+                         # stage-relative paths). Policy, not a secret — an auditor should see which
+                         # bundled files this binary allows to change on reuse (INV-STAGE-01).
+                         "writable": list(writable)},
                 obfuscation=manifest.get("obfuscation", {"engine": "none",
                                                          "applied": False}))
     if shake_report:
