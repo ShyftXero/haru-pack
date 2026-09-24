@@ -141,7 +141,7 @@ def build(project: Path, out: Path, target: str = "host", tier: str = "default",
     reap = advisories.couple_staging_flags(reap=reap, overwrite=overwrite, ram_only=ram_only,
                                            no_reap=no_reap, say=say)
     advisories.announce_staging(enc=enc, reap=reap, overwrite=overwrite, ram_only=ram_only,
-                                base_path=base_path, say=say)
+                                base_path=base_path, source=source, say=say)
     if injects:
         # Lives in the PAYLOAD manifest (post-decrypt), so --encrypt hides it (docs/adr/0003
         # §4.3). Carried through assemble_payload's manifest dump; the launcher reads `inject`.

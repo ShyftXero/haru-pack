@@ -15,8 +15,19 @@ Split out of build.py 2026-09-13 (INV-MODULARITY-01). Text unchanged.
 """
 from __future__ import annotations
 
+from fnmatch import fnmatch
+from pathlib import Path
+
 from .errors import BuildError
 from .geo import DEFAULT_GEO_ENDPOINT
+
+# Writable-data signatures: files a program typically opens READ-WRITE. Bundled next to the code
+# they stage read-only and are re-hashed on every run (INV-STAGE-01), so an app that writes to
+# one IN PLACE fails to launch on the second run — see docs/SHARP_CORNERS.md section E.
+_WRITABLE_DATA_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db3", ".ddb")
+_WRITABLE_DATA_GLOBS = ("*-wal", "*-shm", "*-journal")   # sqlite sidecars
+_SCAN_SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build",
+                   ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
 
 def couple_staging_flags(*, reap: bool, overwrite: bool, ram_only: bool, no_reap: bool,
@@ -50,8 +61,11 @@ def couple_staging_flags(*, reap: bool, overwrite: bool, ram_only: bool, no_reap
 
 
 def announce_staging(*, enc: dict, reap: bool, overwrite: bool, ram_only: bool,
-                     base_path: str, say) -> None:
-    """Say out loud what each staging knob will, and will not, actually do."""
+                     base_path: str, say, source=None) -> None:
+    """Say out loud what each staging knob will, and will not, actually do — and warn if the
+    project bundles writable-looking data that would hard-fail the second run (section E)."""
+    if source is not None:
+        warn_bundled_writable_data(source, say)
     if enc["geo"].get("allow"):
         gp = enc["geo"]
         say(f"--geo-restrict: online location gate — {len(gp['allow'])} allow-rule(s), "
@@ -119,3 +133,33 @@ def announce_obfuscation_tier(*, obfuscate: str, tier: str, python: str, say) ->
         f"thin/default the target may resolve a different Python minor and the binary "
         f"will fail to start with an 'undefined symbol' import error. Use --thick, or "
         f"ensure the target has exactly Python {python or '3.13'}.")
+
+
+def warn_bundled_writable_data(source, say) -> list:
+    """Nudge the packager away from bundling a WRITABLE data file (a sqlite db, ...) next to the
+    code. Such a file stages read-only and is re-hashed on every run (INV-STAGE-01); if the app
+    writes to it in place, the SECOND run refuses to launch. Runtime data belongs in the launch
+    dir (cwd) or a data dir, not the stage. Best-effort signature match — a nudge, not a gate.
+    Returns the hit list (for the claiming test). See docs/SHARP_CORNERS.md section E.
+    """
+    src = Path(source)
+    if not src.is_dir():          # a single-script pack has nothing bundled adjacent
+        return []
+    hits = []
+    for p in src.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(src)
+        if any(part in _SCAN_SKIP_DIRS for part in rel.parts):
+            continue
+        name = p.name.lower()
+        if name.endswith(_WRITABLE_DATA_SUFFIXES) or any(fnmatch(name, g) for g in _WRITABLE_DATA_GLOBS):
+            hits.append(rel.as_posix())
+    if hits:
+        shown = ", ".join(sorted(hits)[:5]) + (" ..." if len(hits) > 5 else "")
+        say("WARNING: writable-looking data is bundled with your code: " + shown + ".\n"
+            "  It stages READ-ONLY and is re-hashed on every run (INV-STAGE-01); if your app "
+            "WRITES to it in place, the SECOND run fails to launch. Ship it as a read-only seed "
+            "and write runtime data to the launch dir (cwd) or a data dir (HARUPACK_EXE_DIR / a "
+            "user dir), not next to the script. See docs/SHARP_CORNERS.md section E.")
+    return hits
