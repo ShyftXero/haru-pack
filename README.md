@@ -318,6 +318,7 @@ security claims here that were never implemented.
 | `haru-pack build <dir>` | build a single-file launcher from a project or script |
 | `haru-pack bootstrap` | install Nim + launcher deps; verify the C toolchain |
 | `haru-pack doctor [dir]` | check Nim / C toolchain; scan a project for needed bundle/install steps |
+| `haru-pack stamp <exe> --out <exe> [options]` | replace the stub-config in a built binary — no recompile, no re-encrypt; compile once, produce N per-recipient copies (see [Stamp-many](#stamp-many)) |
 | `haru-pack verify <exe> [--pin github:<user>]` | inspect the footer + confirm payload integrity; `--pin` also anchors a `--self-signed` build to a published identity ([`docs/SIGNING.md`](docs/SIGNING.md)) |
 | `haru-pack hostname` | print this machine's OS hostname (for `--machine` license binding) |
 | `haru-pack keygen` | mint + store the Ed25519 key for `--self-signed`, and print its fingerprint |
@@ -393,6 +394,32 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
 os = ["windows"]
 run = ["playwright", "install", "firefox"]
 ```
+
+## Stamp-many
+
+Compile the launcher once; produce N per-recipient copies that differ only by a small
+cleartext stub-config — no Nim recompile, no payload rebuild, no re-encrypt:
+
+```sh
+# Build once
+haru-pack build myapp/ --out base.exe
+
+# Stamp a copy for each customer (seconds, not minutes)
+haru-pack stamp base.exe --out cust_acme.exe  --env-canary ACME
+haru-pack stamp base.exe --out cust_beta.exe  --env-canary BETA
+haru-pack stamp base.exe --out device_42.exe  --env-canary DEVICE42
+```
+
+The stamped binary reads its secret from `ACME_SECRET`, `BETA_SECRET`, or `DEVICE42_SECRET`
+at runtime (the canary is the env-var *prefix*). Set that var on each target machine, or
+swap in a short-TTL token on first run.
+
+Honest limit: the canary is cleartext in the binary and recoverable. Use short-TTL tokens
+or swap the credential on first run if secrecy matters.
+
+All `build` canary and staging flags are supported on `stamp`:
+`--env-canary`, `--env-canary-random`, `--stub-env-secret-canary`, `--reap`, `--ephemeral`,
+`--base-path`, etc. The payload bytes and their encrypted state are preserved as-is.
 
 ## Runtime environment (set for your code)
 | Var | Meaning |
