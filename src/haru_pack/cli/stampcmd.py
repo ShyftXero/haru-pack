@@ -11,6 +11,7 @@ import typer
 
 from ..build.canary import resolve_canary, stub_config_bytes
 from ..build.errors import BuildError
+from ..build.inject import resolve_injects
 from ..build.staging import resolve_base_path
 from ..overlay import FOOTER_FLAG_REMOTE, stamp as _stamp, verify
 from ..ui import print
@@ -44,7 +45,12 @@ def stamp(
         ephemeral: bool = typer.Option(False, "--ephemeral",
             help="best-effort RAM-backed staging root"),
         base_path: str = typer.Option("", "--base-path", metavar="DIR",
-            help="staging-root default for stamped copies ('' = normal per-user cache)")):
+            help="staging-root default for stamped copies ('' = normal per-user cache)"),
+        inject: list[str] = typer.Option([], "--inject", metavar="KEY=VALUE",
+            help="bake env var into stub-config [inject]; set before launch on the target. "
+                 "Repeatable. Same reserved-key refusal and secret-shape warning as "
+                 "--env-append. Cleartext in the binary — treat like the PowerShell "
+                 "one-liner it replaces.")):
     """Re-stamp a built binary with a new stub-config. No recompile, no re-encrypt.
 
     Compile the launcher once with `build`; call `stamp` for each recipient with their
@@ -68,6 +74,7 @@ def stamp(
 
     say = lambda m: print(f"{prog()}: {m}",
                           style="warn" if m.startswith("WARNING") else "info")
+    encrypted = bool(src_info["flags"] & 1)
     try:
         canary = resolve_canary(
             env_canary, env_canary_random,
@@ -78,11 +85,13 @@ def stamp(
                       "ephemeral": stub_env_ephemeral_canary},
             log=say)
         base_path_v = resolve_base_path(base_path)
+        injects = resolve_injects(inject, encrypted=encrypted, log=say)
     except BuildError as e:
         print(str(e), style="error"); raise typer.Exit(2)
 
     sc = stub_config_bytes(canary, reap=reap, overwrite=overwrite,
-                           ram_only=ephemeral, base_path=base_path_v)
+                           ram_only=ephemeral, base_path=base_path_v,
+                           inject=injects)
 
     try:
         result = _stamp(src, sc, out)

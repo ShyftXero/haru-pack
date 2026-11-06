@@ -83,7 +83,8 @@ def _toml_basic_str(s: str) -> str:
 def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = False,
                       ram_only: bool = False, base_path: str = "",
                       source_url: str = "", unpacked_bytes: int = 0,
-                      writable: list | tuple = ()) -> bytes:
+                      writable: list | tuple = (),
+                      inject: list | tuple = ()) -> bytes:
     """The cleartext stub-config TOML section (docs/adr/0003 §2.1 + docs/adr/0004 §2 +
     docs/adr/0007), UTF-8, in fixed order. Canary tokens are validated env-name prefixes, so no
     escaping is needed.
@@ -96,7 +97,11 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = Fal
     `source_url` (Phase 3, INV-REMOTE-01) names WHERE to fetch the payload; it is not a trust
     anchor (the footer digest is), so it needs no escaping beyond TOML basic-string quoting.
     Read before decryption by launcher/stubconfig.parseStubConfig; sha-checked first
-    (INV-STUB-01)."""
+    (INV-STUB-01).
+    `inject` (issue #83) is a list of validated KEY=VALUE strings (from resolve_injects()).
+    Emitted as a `[inject]` TOML table section only when non-empty, before `[canary]`.
+    Keys are bare TOML keys (env names match ^[A-Za-z_][A-Za-z0-9_]*$); values are basic strings.
+    A build that declares no injects is byte-identical to the pre-inject corpus."""
     lines = ["stub_config_version = 1"]
     # Top-level keys must precede the [canary] table (TOML). Emit only when non-default.
     if reap:
@@ -121,6 +126,12 @@ def stub_config_bytes(canary: dict, *, reap: bool = False, overwrite: bool = Fal
     if writable:
         items = ", ".join(_toml_basic_str(w) for w in writable)
         lines.append(f"writable = [{items}]")
+    if inject:
+        lines.append("")
+        lines.append("[inject]")
+        for pair in inject:
+            key, _, value = pair.partition("=")
+            lines.append(f"{key} = {_toml_basic_str(value)}")
     lines += ["", "[canary]"]
     lines += [f'{knob} = "{canary[knob]}"' for knob in _MANDATORY_CANARY_KNOBS]
     # The EPHEMERAL knob rides the closed catalogue but is additive: its `[canary]` key is written

@@ -40,6 +40,11 @@ type
                          ## (the trust anchor), so repointing the URL can change WHERE bytes
                          ## come from but never WHICH bytes are accepted. "" = appended
                          ## delivery (today's behaviour).
+    inject*: seq[tuple[key, val: string]] ## build-time --inject pairs applied by the launcher BEFORE
+                           ## staging so the env is set before the Python app starts. Each entry is a
+                           ## KEY=VALUE validated at build time (refuses HARUPACK_* and reserved UV_*).
+                           ## Lives in the cleartext stub-config (re-stampable in seconds, no recompile).
+                           ## `@[]` = no baked env (today's default). Emitted only when non-empty.
     writable*: seq[string] ## build-DECLARED app data files that may change on reuse (#4, INV-STAGE-01
                            ## relaxation). Each entry is an EXACT stage-relative path the build
                            ## resolved from a `--writable <glob>` against the assembled tree AND
@@ -96,6 +101,7 @@ proc defaultStubConfig*(): StubConfig =
   result.sourceUrl = ""
   result.unpackedBytes = 0
   result.writable = @[]
+  result.inject = @[]
 
 proc isValidCanary*(tok: string): bool =
   ## ^[A-Za-z_][A-Za-z0-9_]*$ — a non-empty, valid env-name prefix. Enforced at build time
@@ -166,6 +172,7 @@ proc parseStubConfig*(raw: string): StubConfig =
   result.sourceUrl = ""
   result.unpackedBytes = 0
   result.writable = @[]
+  result.inject = @[]
   if t.contains("reap"):
     let n = t["reap"]
     if n.kind != TomlValueKind.Bool:
@@ -220,6 +227,18 @@ proc parseStubConfig*(raw: string): StubConfig =
       if item.kind != TomlValueKind.String:
         raise newException(ValueError, "stub-config: writable entries must be strings")
       result.writable.add item.getStr()
+  if t.contains("inject"):
+    # Cleartext [inject] table (issue #83): KEY = "VALUE" pairs the launcher sets before
+    # launching the Python app. Refused at build time for HARUPACK_* and reserved UV_*
+    # (INV-LAUNCH-09 belt-and-braces). Absent -> no baked env (today's default).
+    let injectNode = t["inject"]
+    if injectNode.kind != TomlValueKind.Table:
+      raise newException(ValueError, "stub-config: inject must be a table")
+    for key, val in injectNode.getTable()[].pairs:
+      if val.kind != TomlValueKind.String:
+        raise newException(ValueError,
+          "stub-config: [inject] value for key '" & key & "' must be a string")
+      result.inject.add((key: key, val: val.getStr()))
 
 proc envForKnob*(sc: StubConfig, k: Knob): string =
   ## The single runtime resolution rule (INV-CANARY-01): knob K is read from
