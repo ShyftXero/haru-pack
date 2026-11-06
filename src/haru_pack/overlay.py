@@ -125,16 +125,22 @@ def stamp(src: Path, new_stub_config: bytes, out: Path) -> dict:
     to out. The payload bytes and flags (encrypted bit, remote bit) are preserved exactly.
     src and out may be the same path — the read completes before any write.
 
-    Raises ValueError if src has no valid footer or either digest does not match (the binary
-    is corrupted and should not be stamped)."""
+    Raises ValueError if src has no valid footer, either digest does not match (corrupt
+    binary), or src is a remote-fetch binary (FOOTER_FLAG_REMOTE — payload not embedded,
+    so the footer's payload digest cannot be preserved correctly)."""
     data = Path(src).read_bytes()
     info = verify(src)                    # validates footer; raises on bad input
     if not info["sha_ok"]:
         raise ValueError(f"{src}: payload digest mismatch — corrupt binary, refusing stamp")
-    if info["format_ver"] == 2 and not info.get("stub_ok", True):
+    if info["format_ver"] in (2, 3) and not info.get("stub_ok", True):
         raise ValueError(f"{src}: stub-config digest mismatch — corrupt binary, refusing stamp")
     off, ln = info["payload_off"], info["payload_len"]
     flags = info["flags"]
+    if flags & FOOTER_FLAG_REMOTE:
+        raise ValueError(
+            f"{src}: cannot re-stamp a remote-fetch binary — the payload is not embedded "
+            "and the footer's payload digest covers bytes hosted at the source URL, not "
+            "the binary itself. Host a new payload at the new URL and rebuild instead.")
     paysha = hashlib.sha256(data[off:off + ln]).digest()
     stub_off = off + ln
     stub_sha = hashlib.sha256(new_stub_config).digest()

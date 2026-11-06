@@ -124,3 +124,43 @@ def test_stamp_preserves_encrypted_flag(tmp_path):
     stamped = tmp_path / "enc_stamped.exe"
     stamp(out, stub2, stamped)
     assert verify(stamped)["flags"] & FOOTER_FLAG_ENCRYPTED
+
+
+def test_stamp_refuses_remote_binary(tmp_path):
+    """stamp raises ValueError on a remote-fetch binary (FOOTER_FLAG_REMOTE)."""
+    launcher = tmp_path / "launcher"
+    launcher.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    payload = b"PK" + b"\xab" * 64
+    stub1 = b'stub_config_version = 1\n\n[canary]\nsecret = "HARU"\nuv_ver = "HARU"\nsource_url = "HARU"\nbase_path = "HARU"\n'
+    out = tmp_path / "remote.exe"
+    attach(launcher, payload, out, stub_config=stub1, remote=True)
+
+    stub2 = b'stub_config_version = 1\n\n[canary]\nsecret = "CUST"\nuv_ver = "HARU"\nsource_url = "HARU"\nbase_path = "HARU"\n'
+    with pytest.raises(ValueError, match="remote-fetch"):
+        stamp(out, stub2, tmp_path / "stamped.exe")
+
+
+def test_stamp_refuses_corrupt_v3_stub(tmp_path):
+    """stamp raises ValueError on a v3 (self-signed) binary with a corrupt stub-config."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError:
+        pytest.skip("cryptography not available")
+
+    launcher = tmp_path / "launcher"
+    launcher.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    payload = b"PK" + b"\xcd" * 64
+    stub1 = b'stub_config_version = 1\n\n[canary]\nsecret = "HARU"\nuv_ver = "HARU"\nsource_url = "HARU"\nbase_path = "HARU"\n'
+    sign_key = Ed25519PrivateKey.generate()
+    out = tmp_path / "signed.exe"
+    attach(launcher, payload, out, stub_config=stub1, sign_key=sign_key)
+
+    # Corrupt one byte in the stub-config region
+    data = bytearray(out.read_bytes())
+    info = verify(out)
+    data[info["stub_off"]] ^= 0xFF
+    out.write_bytes(bytes(data))
+
+    stub2 = b'stub_config_version = 1\n\n[canary]\nsecret = "CUST"\nuv_ver = "HARU"\nsource_url = "HARU"\nbase_path = "HARU"\n'
+    with pytest.raises(ValueError, match="digest mismatch"):
+        stamp(out, stub2, tmp_path / "stamped.exe")
