@@ -3,6 +3,37 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-11-03
+
+### `haru-pack stamp`: compile once, produce N per-recipient binaries (closes #80)
+
+`haru stamp <base.exe> --out <cust.exe> [--env-canary TOKEN] [staging flags]` takes a
+built binary and re-emits it with a new cleartext stub-config — no Nim recompile, no
+payload rebuild, no re-encrypt. Seconds per copy instead of minutes.
+
+The canary mechanism already gave every binary a per-binary env-var prefix; stamp makes
+that ergonomic. Build once, loop over your fleet, stamp each copy with its own canary
+(`ACME`, `BETA`, `DEVICE42`...). The launcher on each target reads its secret from
+`ACME_SECRET`, `BETA_SECRET`, etc. All `build` canary and staging options (`--reap`,
+`--ephemeral`, `--base-path`) work on `stamp`.
+
+Honest limit: the stub-config is cleartext and recoverable. Same position haru-pack already
+holds for `--embed-secret` and unencrypted `--env-append` — use short-TTL tokens or swap
+the real credential on first run if secrecy matters. The command says so in `--help`.
+
+Remote-fetch binaries (Phase 3, `--source-url`) cannot be stamped — their payload is not
+embedded, so there is nothing to extract and re-wrap. The command refuses with a clear
+error rather than producing a corrupt output.
+
+`overlay.stamp()` is the new Python-level primitive: given a source exe, new stub-config
+bytes, and an output path, it reads src into memory (safe for src == out), validates both
+digests, then writes `[launcher][payload][new_stub_config][footer_v2]`. It preserves the
+payload flags (encrypted bit, etc.) and raises `ValueError` on a corrupted input rather
+than silently producing a bad binary.
+
+`tests/test_stamp.py` covers the round-trip: valid footer, payload digest unchanged, canary
+replaced, in-place write, v1→v2 promotion, corruption refusal, encrypted-flag preservation.
+
 ## 2026-09-23
 
 ### `--writable`: bundled app data files may change on reuse (INV-STAGE-01 relaxation, fail-closed)

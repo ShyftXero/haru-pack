@@ -118,6 +118,44 @@ def attach(launcher: Path, payload: bytes, out: Path, flags: int = 0,
     return info
 
 
+def stamp(src: Path, new_stub_config: bytes, out: Path) -> dict:
+    """Replace the stub-config in a built binary without recompiling or re-encrypting.
+
+    Reads src entirely into memory, then writes [launcher][payload][new_stub_config][footer]
+    to out. The payload bytes and flags (encrypted bit, remote bit) are preserved exactly.
+    src and out may be the same path — the read completes before any write.
+
+    Raises ValueError if src has no valid footer, either digest does not match (corrupt
+    binary), or src is a remote-fetch binary (FOOTER_FLAG_REMOTE — payload not embedded,
+    so the footer's payload digest cannot be preserved correctly)."""
+    data = Path(src).read_bytes()
+    info = verify(src)                    # validates footer; raises on bad input
+    off, ln = info["payload_off"], info["payload_len"]
+    flags = info["flags"]
+    # Check remote BEFORE sha_ok: for remote builds payload_len==0, so sha_ok is always
+    # False (SHA256(b"") != the actual payload digest at the source URL). The remote guard
+    # fires first to give the right error instead of a misleading "digest mismatch".
+    if flags & FOOTER_FLAG_REMOTE:
+        raise ValueError(
+            f"{src}: cannot re-stamp a remote-fetch binary — the payload is not embedded "
+            "and the footer's payload digest covers bytes hosted at the source URL, not "
+            "the binary itself. Host a new payload at the new URL and rebuild instead.")
+    if not info["sha_ok"]:
+        raise ValueError(f"{src}: payload digest mismatch — corrupt binary, refusing stamp")
+    if info["format_ver"] in (2, 3) and not info.get("stub_ok", True):
+        raise ValueError(f"{src}: stub-config digest mismatch — corrupt binary, refusing stamp")
+    paysha = hashlib.sha256(data[off:off + ln]).digest()
+    stub_off = off + ln
+    stub_sha = hashlib.sha256(new_stub_config).digest()
+    footer = (MAGIC + struct.pack("<HHQQ", 2, flags, off, ln) + paysha
+              + struct.pack("<QQ", stub_off, len(new_stub_config)) + stub_sha + TAIL)
+    assert len(footer) == FOOTER_V2_SIZE, len(footer)
+    Path(out).write_bytes(data[:off + ln] + new_stub_config + footer)
+    return {"format_ver": 2, "payload_off": off, "payload_len": ln,
+            "sha256": paysha.hex(), "stub_off": stub_off,
+            "stub_len": len(new_stub_config), "stub_sha256": stub_sha.hex()}
+
+
 def verify(exe: Path) -> dict:
     """Locate the footer by backward scan (survives an appended signature), dispatch on
     format_ver, and confirm the payload (and, for v2, the stub-config) sha256 still match."""

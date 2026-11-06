@@ -8,6 +8,7 @@
     doctorcmd      `doctor`
     bootstrapcmd   `bootstrap`
     inspectcmd     `version`, `verify`, `init`, `hostname`
+    stampcmd       `stamp`
 
 Importing a command module is what REGISTERS it: the `@app.command()` decorators run at
 import time. So the imports below are not tidiness — drop one and its subcommand silently
@@ -23,6 +24,7 @@ from .builddriver import _run_build
 from .doctorcmd import doctor
 from .bootstrapcmd import bootstrap
 from .inspectcmd import hostname_cmd, init, keygen, verify, version
+from .stampcmd import stamp
 from .naming import prog
 from .report import _report_ambiguity, _report_capabilities
 from .root import app
@@ -34,7 +36,7 @@ def main():
 
 __all__ = [
     "app", "main", "prog",
-    "bootstrap", "build", "doctor", "init", "hostname_cmd", "keygen", "verify", "version",
+    "bootstrap", "build", "doctor", "init", "hostname_cmd", "keygen", "stamp", "verify", "version",
     "_report_ambiguity", "_report_capabilities", "_run_build",
 ]
 
