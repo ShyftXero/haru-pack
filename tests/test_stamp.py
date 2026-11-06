@@ -2,6 +2,8 @@
 
 One runnable check that fails if stamp/readback round-trips wrong (issue #80).
 No Nim required — fake launcher bytes are sufficient to exercise the Python path.
+Issue #83 adds three inject tests at the bottom: round-trip, reserved-key refusal,
+and secret-shape warning (unencrypted) / silence (encrypted).
 """
 from __future__ import annotations
 
@@ -164,3 +166,58 @@ def test_stamp_refuses_corrupt_v3_stub(tmp_path):
     stub2 = b'stub_config_version = 1\n\n[canary]\nsecret = "CUST"\nuv_ver = "HARU"\nsource_url = "HARU"\nbase_path = "HARU"\n'
     with pytest.raises(ValueError, match="digest mismatch"):
         stamp(out, stub2, tmp_path / "stamped.exe")
+
+
+# ------------------------------------------------------------------ issue #83: --inject
+
+def _make_base_exe(tmp_path: Path) -> tuple[Path, bytes]:
+    launcher = tmp_path / "launcher"
+    launcher.write_bytes(b"\x7fELF" + b"\x00" * 64)
+    payload = b"PK\x03\x04" + b"\xab" * 128
+    stub = (
+        b'stub_config_version = 1\n\n[canary]\n'
+        b'secret = "HARU"\nuv_ver = "HARU"\n'
+        b'source_url = "HARU"\nbase_path = "HARU"\n'
+    )
+    out = tmp_path / "base.exe"
+    attach(launcher, payload, out, stub_config=stub)
+    return out, payload
+
+
+def test_stamp_inject_round_trips_into_stub_config(tmp_path):
+    """[inject] values appear in the re-read stub-config; payload is byte-identical."""
+    from haru_pack.build.canary import stub_config_bytes
+    src, payload = _make_base_exe(tmp_path)
+    canary = {"secret": "HARU", "uv_ver": "HARU", "source_url": "HARU", "base_path": "HARU"}
+    sc = stub_config_bytes(canary, inject=["LOTEK_RUNNER_TOKEN=abc123",
+                                           "LOTEK_RUNNER_ID=device42"])
+    out = tmp_path / "stamped.exe"
+    result = stamp(src, sc, out)
+    info = verify(out)
+    assert info["sha_ok"] and info["stub_ok"]
+    assert 'LOTEK_RUNNER_TOKEN = "abc123"' in info["stub_config"]
+    assert 'LOTEK_RUNNER_ID = "device42"' in info["stub_config"]
+    # payload unchanged
+    assert result["payload_len"] == len(payload)
+
+
+def test_stamp_inject_reserved_key_refused(tmp_path):
+    """resolve_injects() refuses HARUPACK_* and reserved UV_* keys for --inject."""
+    from haru_pack.build.inject import resolve_injects
+    from haru_pack.build.errors import BuildError
+    with pytest.raises(BuildError, match="reserved key"):
+        resolve_injects(["HARUPACK_STAGE=pwned"], encrypted=False)
+    with pytest.raises(BuildError, match="reserved key"):
+        resolve_injects(["UV_PYTHON=evil"], encrypted=False)
+
+
+def test_stamp_inject_secret_shaped_warns_unencrypted_silent_encrypted(tmp_path):
+    """secret-shaped inject warns on unencrypted builds and is silent on encrypted ones."""
+    from haru_pack.build.inject import resolve_injects
+    log: list[str] = []
+    resolve_injects(["API_TOKEN=abcdefghij0123456789KLMN"], encrypted=False, log=log.append)
+    assert any("WARNING" in m and "secret-shaped" in m for m in log), log
+
+    log.clear()
+    resolve_injects(["API_TOKEN=abcdefghij0123456789KLMN"], encrypted=True, log=log.append)
+    assert not any("WARNING" in m for m in log)

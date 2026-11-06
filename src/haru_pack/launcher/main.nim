@@ -242,6 +242,9 @@ proc launch(): int =
   # True only when stageRoot came from HARUPACK_DEV_STAGE: like reap, stage-dir eviction is
   # skipped for a dev tree we did not create (INV-LAUNCH-02). Stays false on the overlay path.
   var devStaged = false
+  # Stub-config is read inside the overlay block below; hoist sc so step-3 env wiring
+  # can apply [inject] pairs alongside the manifest inject (issue #83).
+  var sc = defaultStubConfig()
   # INV-LAUNCH-02: HARUPACK_DEV_STAGE stages an arbitrary directory and skips the
   # overlay, the digest check, decryption and every license check. In a shipped, signed
   # binary that is a signed proxy for arbitrary code execution, available to anyone who
@@ -266,7 +269,7 @@ proc launch(): int =
     # canary map decides which env name holds each knob. A v1 (single-payload) binary carries
     # no stub -> the all-HARU default. Only SECRET is consumed in Phase 1 (below); UV_VER /
     # SOURCE_URL / BASE_PATH ride in `sc` for later phases (TODOs at their future consumers).
-    var sc = defaultStubConfig()
+    # `sc` is hoisted above so step-3 env wiring can read sc.inject (issue #83).
     if ft.hasStub:
       let stubBytes = readStub(self, ft, footerAt)
       verifyStubDigest(stubBytes, ft.stubSha)   # INV-STUB-01 — before we parse the map
@@ -376,6 +379,10 @@ proc launch(): int =
     evictStale(stageRoot, m.keepDays, m.keepMax)
 
   # 3. env wiring (inject first, then three roots + uv offline knobs)
+  # Stub-config [inject] (issue #83): baked KEY=VALUE pairs applied before the manifest
+  # inject so the manifest inject can override a stub value. Both refuse reserved keys at
+  # build time (INV-LAUNCH-09 belt-and-braces); the launcher's own vars set below still win.
+  for (k, v) in sc.inject: putEnv(k, v)
   # inject (env-append) is applied FIRST so both uv AND the app inherit it, while every
   # reserved var the launcher sets below WINS on a collision — an inject cannot repoint
   # UV_PYTHON off the host and defeat the thick tier's hermeticity (INV-LAUNCH-04). The
