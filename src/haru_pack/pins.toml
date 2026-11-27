@@ -316,3 +316,66 @@ retrieved = "2026-09-15"
 # When it is added, its `provenance` must be the WORKFLOW RUN URL, not a person. That is the
 # whole difference between "a maintainer's Raspberry Pi produced this" and "here is the public
 # log of the job that produced it, from the source tarball digest above".
+[[artifact]]
+kind = "uv"
+version = "0.13.10"
+asset = "uv-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "bf65ac1a0af10f92c522d91ac096c7c0a39657647b155577e7836c2cbbb4526c"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-unknown-linux-gnu.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-unknown-linux-gnu.tar.gz.sha256"
+retrieved = "2026-11-26"
+
+[[artifact]]
+kind = "uv"
+version = "0.13.10"
+asset = "uv-aarch64-unknown-linux-gnu.tar.gz"
+sha256 = "14590f644805a6234ffe071154340669e38137f38e60aa9629690119704107d2"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-unknown-linux-gnu.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-unknown-linux-gnu.tar.gz.sha256"
+retrieved = "2026-11-26"
+
+[[artifact]]
+kind = "uv"
+version = "0.13.10"
+asset = "uv-armv7-unknown-linux-gnueabihf.tar.gz"
+sha256 = "ab7a68a76962f7403fe66418c4a005e0b17d822518f7fea9d3c1bd036e8f530f"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-armv7-unknown-linux-gnueabihf.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-armv7-unknown-linux-gnueabihf.tar.gz.sha256"
+retrieved = "2026-11-26"
+
+[[artifact]]
+kind = "uv"
+version = "0.13.10"
+asset = "uv-x86_64-apple-darwin.tar.gz"
+sha256 = "153e03197588204c04fc4c81cc4bafbfa4280222a385e4ee36a87aeec0ae63b4"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-apple-darwin.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-apple-darwin.tar.gz.sha256"
+retrieved = "2026-11-26"
+
+[[artifact]]
+kind = "uv"
+version = "0.13.10"
+asset = "uv-aarch64-apple-darwin.tar.gz"
+sha256 = "e419bf07533bdbf48795fc793601c834dd79db57a8c49ce8e25cfe3a8639958d"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-apple-darwin.tar.gz"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-apple-darwin.tar.gz.sha256"
+retrieved = "2026-11-26"
+
+[[artifact]]
+kind = "uv"
+version = "0.13.10"
+asset = "uv-x86_64-pc-windows-msvc.zip"
+sha256 = "297b3881fe1adfb922becc2c1613202abb41dc83ea5ff43d472aa087ca1f8683"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-pc-windows-msvc.zip"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-pc-windows-msvc.zip.sha256"
+retrieved = "2026-11-26"
+
+[[artifact]]
+kind = "uv"
+version = "0.13.10"
+asset = "uv-aarch64-pc-windows-msvc.zip"
+sha256 = "f223bcd3fa010174ffeeb885cc1d5334bb81388640c65baa5b8b42b47017337e"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-pc-windows-msvc.zip"
+provenance = "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-pc-windows-msvc.zip.sha256"
+retrieved = "2026-11-26"
+

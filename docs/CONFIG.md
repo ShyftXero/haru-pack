@@ -128,7 +128,7 @@ HARUPACK_UV_BASE=... HARUPACK_PYTHON_BASE=... HARUPACK_INDEX_URL=... haru-pack b
 `haru_pack.toml` wins over the environment; the environment wins over the defaults.
 
 **A mirror must be a path-preserving reverse proxy.** Everything after the base URL is
-reused verbatim, so `<uv_base>/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz` has to resolve.
+reused verbatim, so `<uv_base>/0.13.10/uv-x86_64-unknown-linux-gnu.tar.gz` has to resolve.
 That's the same shape `uv python install --mirror` expects, so a mirror that works for uv
 works here.
 

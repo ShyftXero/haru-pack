@@ -3,6 +3,28 @@
 Stuff worth knowing about, newest first. Dates are when it landed on `main`. The precise
 version of any security claim lives in `INVARIANTS.md`; this file is the human-readable trail.
 
+## 2026-11-26
+
+### default uv bumped to 0.13.10 (INV-SUPPLY-01)
+
+The pinned default `UV_VERSION` moves from 0.10.4 to 0.13.10. All seven targetable uv
+assets get a digest in `pins.toml`, each fetched from the publisher's `.sha256` sidecar
+by `tools/add-pin.py`. This is a bump of the PIN, not an unpinned fetch: an artifact with
+no digest is still refused before the network, and the `UV_VER` knob still overrides the
+version per build.
+
+The thick cache stays sound across the bump because it is warmed with the PINNED uv
+(#53). uv 0.13.10 renames its cache buckets (`simple-v28`, `wheels-v8`, `sdists-v11`,
+`interpreter-v6`); the KEEP/DROP rules in `shake/config.py` match by prefix, so they cover
+the new names and still keep an unrecognised bucket. Historical 0.10.4 measurements in
+docs are left as dated snapshots.
+
+`tools/add-pin.py` gains `--check-latest`: it compares `bundle.UV_VERSION` to the newest
+published uv release and exits 1 when a bump is available. It needs the network, so it is
+a flag for a maintainer or a scheduled job, never a CI test. The same run fixed a bug in
+that tool where `--all` skipped every asset after the first, because the "already pinned"
+test looked for the version anywhere in the file instead of in the asset's own entry.
+
 ## 2026-09-23
 
 ### `--writable`: bundled app data files may change on reuse (INV-STAGE-01 relaxation, fail-closed)
