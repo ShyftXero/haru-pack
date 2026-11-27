@@ -28,7 +28,7 @@ or per-invocation via the environment, which is what CI usually wants:
     HARUPACK_UV_BASE, HARUPACK_PYTHON_BASE, HARUPACK_INDEX_URL
 
 A mirror is expected to be a path-preserving reverse proxy: everything after the base is
-reused verbatim, so `<base>/0.10.4/uv-x86_64-unknown-linux-gnu.tar.gz` must resolve. That
+reused verbatim, so `<base>/0.13.10/uv-x86_64-unknown-linux-gnu.tar.gz` must resolve. That
 is the same shape `uv python install --mirror` expects.
 """
 from __future__ import annotations

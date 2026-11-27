@@ -6,7 +6,7 @@ from .sources import Sources
 from .targets import Target
 from . import pins
 
-UV_VERSION = "0.10.4"
+UV_VERSION = "0.13.10"
 
 # INV-SUPPLY-01. The digests themselves live in pins.toml — data, hand-editable, each
 # entry carrying the publisher channel it came from. They were dict literals here until
@@ -280,10 +280,12 @@ def warm_cache_and_lock(app_dir: Path, py: Path, cache_dir: Path, tmp_env: Path,
 
     `uv_bin` MUST be the same uv the launcher will run at the target — the pinned/bundled uv,
     not the build host's `uv` on PATH. uv keys its cache buckets by its OWN schema version
-    (`simple-vNN`, `wheels-vNN`, …): a cache warmed by a newer host uv writes, say, `simple-v24`,
-    which the bundled 0.10.4 uv cannot read (it looks in `simple-v20`), so the "offline" run
-    fails to resolve deps whose bytes are right there in the cache. Warming with the pinned uv
-    makes the buckets match on any build host, instead of only when host uv == pinned uv (#53).
+    (`simple-vNN`, `wheels-vNN`, …): a cache warmed by a newer host uv writes, say, `simple-v28`,
+    which a bundled uv on an older bucket version cannot read (0.10.4 looks in `simple-v20`;
+    the pinned 0.13.10 looks in `simple-v28`), so the "offline" run fails to resolve deps whose
+    bytes are right there in the cache. Warming with the pinned uv makes the buckets match on
+    any build host, instead of only when host uv == pinned uv (#53). The rule is the pin, not
+    the bucket number: `shake/config.py` matches buckets by prefix for the same reason.
 
     `--no-dev` is load-bearing, not tidiness (INV-PAYLOAD-03). `uv sync` installs the
     *default* dependency groups, and `dev` is one of them, so this call used to warm the

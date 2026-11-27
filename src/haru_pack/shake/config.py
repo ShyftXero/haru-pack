@@ -19,23 +19,28 @@ class ShakeError(RuntimeError):
 #
 # uv's cache is several independently-versioned buckets. Which ones a runtime `uv sync
 # --frozen --offline` actually needs was determined empirically on 2026-09-10 (uv 0.10.4)
-# by deleting each bucket from a warmed cache and re-syncing into a fresh env:
+# by deleting each bucket from a warmed cache and re-syncing into a fresh env. The bucket
+# NAMES below are the 0.10.4 ones; uv 0.13.10 renames them (seen in uv-cache source, 2026-11-26)
+# and the role of each is unchanged:
 #
 #   archive-v0     REQUIRED  unpacked wheel trees; this is what gets linked into the venv
 #   wheels-v6      REQUIRED  without it: "Failed to download werkzeug==3.1.8 ... wasn't
-#                            found in the cache"
+#                            found in the cache"            (0.13.10: wheels-v8)
 #   sdists-v9      kept      empty for wheel-only projects, load-bearing for sdist deps
+#                                                           (0.13.10: sdists-v11)
 #   simple-v20     DROPPED   PyPI index responses. 4.4 MB on a five-dependency project.
 #                            Only a *resolve* reads them and thick resolves at build time.
+#                                                           (0.13.10: simple-v28)
 #   builds-v0      DROPPED   build backend scratch
-#   interpreter-v4 DROPPED   cached interpreter probes — and they embed the BUILD HOST's
+#   interpreter-v4 DROPPED   cached interpreter probes. They also embed the BUILD HOST's
 #                            absolute paths (`/home/<operator>`) in a payload that gets
 #                            shipped and signed. Dropping it is a size win and a hygiene
-#                            one; cf. INV-PAYLOAD-01.
+#                            one; cf. INV-PAYLOAD-01.     (0.13.10: interpreter-v6)
 #
-# Matched by prefix because the version suffix moves with uv. An UNRECOGNISED bucket is
-# KEPT: a future uv that stores something load-bearing under a new name must not be
-# silently pruned by a rule written before it existed.
+# Matched by prefix because the version suffix moves with uv, which is exactly what the
+# 0.10.4 -> 0.13.10 bump showed. An UNRECOGNISED bucket is KEPT: a future uv that stores
+# something load-bearing under a new name must not be silently pruned by a rule written
+# before it existed.
 _CACHE_KEEP_PREFIXES = ("archive-", "wheels-", "sdists-")
 _CACHE_DROP_PREFIXES = ("simple-", "builds-", "interpreter-")
 

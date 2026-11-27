@@ -68,7 +68,7 @@ proc parseManifest*(path: string): Manifest =
   result.verboseUv = gb(t, "verbose_uv", false)
   result.tier = gs(t, "tier", "default")
   result.fetchUv = gb(t, "fetch_uv", false)
-  result.uvVersion = gs(t, "uv_version", "0.10.4")
+  result.uvVersion = gs(t, "uv_version", "0.13.10")
   result.cacheDir = gs(t, "cache_dir", "")
   # stage-dir retention (eviction): evict trees unused for keep_days, but never drop the
   # keep_max most recent. keep_days = 0 disables eviction. Defaults mirror stage.DefaultKeep*.
